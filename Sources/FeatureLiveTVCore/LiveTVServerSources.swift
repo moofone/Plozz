@@ -162,7 +162,7 @@ struct LiveTVServerCatalog: Sendable {
     /// derived again, so a row is shown only if this source and account still publish it as saved.
     init?(
         lastSeen: LiveTVLastSeenSnapshot.Source, source: LiveTVServerSource,
-        context: LiveTVAuthorizedServerProvider
+        context: LiveTVAuthorizedServerProvider, now: Date = Date()
     ) {
         guard lastSeen.sourceID == source.id, lastSeen.accountID == source.accountID,
               context.accountID == source.accountID, lastSeen.kind == context.kind,
@@ -188,7 +188,15 @@ struct LiveTVServerCatalog: Sendable {
         kind = context.kind
         channels = lastSeen.entries.map(\.channel)
         self.references = references
-        programs = []
+        // Saved listings are shown only for these rows and only while still current; anything else waits for the guide read.
+        var perChannel: [String: Int] = [:]
+        programs = (lastSeen.programs ?? []).filter { program in
+            guard references[program.channelID] != nil, !program.id.isEmpty, program.start < program.end,
+                  program.end > now, perChannel[program.channelID, default: 0] < LiveTVLastSeenSnapshot.maximumProgramsPerChannel
+            else { return false }
+            perChannel[program.channelID, default: 0] += 1
+            return true
+        }
         inlineGuideFailure = nil
         pendingGuideChannelIDs = context.provider.usesPerChannelLiveTVGuide ? Set(references.keys) : []
         isProvisional = true
@@ -225,7 +233,8 @@ struct LiveTVServerCatalog: Sendable {
                 number: Int(channel.number ?? "") ?? index + 1,
                 name: channel.name, category: channel.groups.first ?? (channel.isRadio ? "Radio" : "Live TV"),
                 symbol: channel.isRadio ? "radio" : "tv", accent: index % 6, source: context.kind,
-                tagline: "", logoURL: channel.imageURL, configuredSourceID: source.id, groups: channel.groups
+                tagline: "", guideID: channel.guideID, guideName: channel.guideName,
+                configuredSourceID: source.id, country: channel.guideCountry, groups: channel.groups
             )
         }
         self.references = references
@@ -267,7 +276,7 @@ struct LiveTVServerCatalog: Sendable {
         return mapped
     }
 
-    private static func channelID(source: LiveTVServerSource, nativeID: String) -> String {
+    static func channelID(source: LiveTVServerSource, nativeID: String) -> String {
         "server-channel-\(digest(source.id + "\u{1F}" + source.accountID + "\u{1F}" + nativeID))"
     }
 

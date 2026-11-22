@@ -498,7 +498,9 @@ public actor CloudConfigSyncService {
                     channel.schema.zoneName.hasPrefix(CloudSyncSchemaDescriptor.liveTVSourcesV1.zoneName)
                         ? .liveTVSources : .trackerSignIns
                 case CloudSyncSchemaDescriptor.mediaStateV1.recordType:
-                    if channel.schema.zoneName.hasPrefix(CloudSyncSchemaDescriptor.liveTVStateV1.zoneName) {
+                    if channel.schema.zoneName.hasPrefix(CloudSyncSchemaDescriptor.liveTVLogosV1.zoneName) {
+                        .liveTVPreferences
+                    } else if channel.schema.zoneName.hasPrefix(CloudSyncSchemaDescriptor.liveTVStateV1.zoneName) {
                         switch LiveTVPortableRecordKey.parse(name)?.kind {
                         case .library, .snapshot: .libraryChannelSchedules
                         default: .liveTVPreferences

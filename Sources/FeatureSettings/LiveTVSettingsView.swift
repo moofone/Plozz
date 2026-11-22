@@ -2,6 +2,7 @@
 import CoreModels
 import CoreUI
 import Observation
+import SchedulesDirectService
 import SwiftUI
 
 /// Profile-scoped channel browsing preferences for Live TV.
@@ -9,14 +10,17 @@ public struct LiveTVSettingsView: View {
     private let store: any LiveTVViewSettingsStoring
     private let sourceManagement: ((AnyView) -> AnyView)?
     private let searchPage: SettingsSearchPage
+    private let schedulesDirectNamespace: String?
     @State private var settings: LiveTVViewSettings
     @State private var hiddenChannelsModel: LiveTVHiddenChannelsSettingsModel
 
     public init(
         store: any LiveTVViewSettingsStoring = LiveTVViewSettingsStore(),
         preferencesStore: any LiveTVPreferencesStoring = LiveTVPreferencesStore(),
-        sourceManagement: ((AnyView) -> AnyView)? = nil, searchPage: SettingsSearchPage = .liveTV
+        sourceManagement: ((AnyView) -> AnyView)? = nil, searchPage: SettingsSearchPage = .liveTV,
+        schedulesDirectNamespace: String? = nil
     ) {
+        self.schedulesDirectNamespace = schedulesDirectNamespace
         self.store = store
         self.sourceManagement = sourceManagement
         self.searchPage = searchPage
@@ -48,7 +52,8 @@ public struct LiveTVSettingsView: View {
         } else {
         LiveTVPreferencesPage(title: "Live TV") {
             let preferences = AnyView(LiveTVBrowsingSettingsSections(
-                settings: $settings, hiddenChannels: hiddenChannelsModel
+                settings: $settings, hiddenChannels: hiddenChannelsModel,
+                schedulesDirectNamespace: schedulesDirectNamespace
             ))
             if let sourceManagement {
                 sourceManagement(preferences)
@@ -63,6 +68,7 @@ public struct LiveTVSettingsView: View {
 private struct LiveTVBrowsingSettingsSections: View {
     @Binding var settings: LiveTVViewSettings
     let hiddenChannels: LiveTVHiddenChannelsSettingsModel
+    let schedulesDirectNamespace: String?
 
     var body: some View {
         SettingsSectionGroup("Guide & browsing") {
@@ -88,6 +94,9 @@ private struct LiveTVBrowsingSettingsSections: View {
             }
             .accessibilityIdentifier("live-tv-channel-order")
             .settingsSearchAnchor("channel-order")
+            Toggle("Show Channel Numbers", isOn: $settings.showsChannelNumbers)
+                .accessibilityIdentifier("live-tv-show-channel-numbers")
+                .settingsSearchAnchor("live-show-channel-numbers")
             SettingsPageLink {
                 LiveTVPreferencesPage(title: "Guide preferences") {
                     LiveTVGuidePreferences(settings: $settings)
@@ -110,6 +119,18 @@ private struct LiveTVBrowsingSettingsSections: View {
             .settingsSearchAnchor("channel-visibility")
         }
         LiveTVChannelNameSettings(settings: $settings)
+        if RuntimeFeatureFlags.buildDefault.isEnabled(.schedulesDirect) {
+            SettingsSectionGroup("Guide Data") {
+                SettingsPageLink {
+                    SchedulesDirectSettingsView(service: .standard(namespace: schedulesDirectNamespace))
+                } label: {
+                    SettingsDisclosureLabel { Label("Schedules Direct", systemImage: "calendar.badge.clock") }
+                }
+                .settingsActionRow()
+                .accessibilityIdentifier("live-tv-schedules-direct")
+                .settingsSearchAnchor("schedules-direct")
+            }
+        }
         #if os(iOS)
         SettingsSectionGroup("Playback") {
             Toggle("Stop without Wi-Fi or Ethernet", isOn: $settings.wifiOnly).settingsSearchAnchor("live-network")
@@ -134,7 +155,7 @@ struct LiveTVChannelNameSettings: View {
                 Text(samples.isEmpty ? LocalizedStringResource("Example") : "Preview")
                     .font(.caption).settingsRowSecondary()
                 ForEach(Array((samples.isEmpty ? [example] : samples).enumerated()), id: \.offset) { index, name in
-                    Text(verbatim: settings.cleanChannelNames ? IPTVChannelName.cleaned(name) : name)
+                    Text(verbatim: settings.cleanChannelNames ? IPTVChannelName.split(name).name : name)
                         .lineLimit(1)
                         .accessibilityIdentifier(index == 0
                             ? "live-tv-channel-name-preview" : "live-tv-channel-name-preview-\(index)")
@@ -151,6 +172,7 @@ struct LiveTVChannelNameSettings: View {
 
 private struct LiveTVGuidePreferences: View {
     @Binding var settings: LiveTVViewSettings
+    @Environment(\.savedGuideRefresh) private var guideRefresh
 
     var body: some View {
         #if os(tvOS)
@@ -187,6 +209,13 @@ private struct LiveTVGuidePreferences: View {
             }
             .accessibilityIdentifier("live-tv-guide-update")
             .settingsSearchAnchor("live-guide-update")
+            if let guideRefresh {
+                // Validates the saved guide now, through the same refresh the timer uses; it changes neither
+                // the interval nor the timer's schedule, and works with automatic updates off.
+                Button("Sync Now") { guideRefresh.requestManualRefresh() }
+                    .disabled(!guideRefresh.isAvailable || guideRefresh.isRefreshing)
+                    .accessibilityIdentifier("live-tv-guide-sync-now")
+            }
         } footer: {
             Text("Keeps the channel list and a downloaded programme guide up to date while Plozz is open. When off, they update only when you open Live TV.")
         }
@@ -228,7 +257,7 @@ private struct LiveTVChannelVisibilitySettings: View {
     }
 }
 
-private struct LiveTVPreferencesPage<Content: View>: View {
+struct LiveTVPreferencesPage<Content: View>: View {
     let title: LocalizedStringResource
     @ViewBuilder let content: () -> Content
     #if os(tvOS)

@@ -431,6 +431,7 @@ struct MainTabView: View {
     let onRemoveAccountEverywhere: (Account) -> Void
     var offersRemoveEverywhere: Bool = false
     let onRescanShare: (String) -> Void
+    var onRebuildLibraryIndex: (String) -> Void = { _ in }
     /// Lets Home poke the media shares on a timer, so content that arrives while
     /// the viewer sits there is noticed. Injected like `onRescanShare` rather than
     /// reached through an environment object.
@@ -1167,6 +1168,7 @@ struct MainTabView: View {
                 onRemoveAccountEverywhere: onRemoveAccountEverywhere,
                 offersRemoveEverywhere: offersRemoveEverywhere,
                 onRescanShare: onRescanShare,
+                onRebuildLibraryIndex: onRebuildLibraryIndex,
                 onSignOutAll: onSignOutAll,
                 onResetToFirstRun: debugActions.resetToFirstRun,
                 onReviewSyncErasure: debugActions.reviewSyncErasure,
@@ -1852,6 +1854,19 @@ struct MainTabView: View {
                 }
             )
         }
+        #if DEBUG
+        .background {
+            LiveTVDebugRemoteOpenRouter {
+                guard activeNavigationDestinations.contains(.liveTV), isLiveTVProfileAuthorized() else { return false }
+                if navigationStyle == .tabBar {
+                    selectedTab.wrappedValue = .liveTV
+                } else {
+                    libraryNavigationSelection.wrappedValue = .liveTV
+                }
+                return true
+            }
+        }
+        #endif
         .background {
             HomeRequestDestinationRouter(
                 pendingPlay: homeRuntime.pendingPlay,
@@ -2102,7 +2117,10 @@ struct MainTabView: View {
             authorizationID: accountsProviders.liveTVAuthorizationID,
             isAuthorized: activeNavigationDestinations.contains(.liveTV) && isLiveTVProfileAuthorized(),
             namespace: liveTVPreferencesNamespace,
-            resolver: accountsProviders.liveTVProviderResolver()
+            resolver: accountsProviders.liveTVProviderResolver(),
+            sources: LiveTVChannelLogoRuntime.serverSourcesLoader(
+                profileID: activeProfile.id, namespace: liveTVPreferencesNamespace
+            )
         )
     }
 

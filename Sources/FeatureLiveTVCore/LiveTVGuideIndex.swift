@@ -6,24 +6,32 @@ import Foundation
 public struct LiveTVGuideIndexState: Codable, Sendable {
     let generation: UUID
     let projection: String
+    /// What the lineup alone contributed to `projection` (its guided channels and the language), saved with the index. A
+    /// saved index whose lineup is unchanged but whose rules or parser version differ may still answer while it is indexed
+    /// again; one saved without it (or for another lineup) may not.
+    var lineupKey: String? = nil
     let digest: String
     let lowerBound: Date
     let upperBound: Date
     var expiresAt: Date
     var cacheMetadata: XMLTVGuideCacheMetadata? = nil
+    /// Set on read (never saved) when the saved feed held no programmes at all: an empty feed is asked again after
+    /// `XMLTVGuideCacheMetadata.emptyResultMaximumAge`. Nil for every feed that has programmes.
+    var emptyFeedRetryAt: Date? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case generation, projection, lineupKey, digest, lowerBound, upperBound, expiresAt, cacheMetadata
+    }
 
     func contains(_ range: DateInterval) -> Bool {
         range.start >= lowerBound && range.end <= upperBound
     }
 
-    /// Whether the saved listings may be used without asking the server again.
-    /// `updateInterval` is the profile's chosen limit; nil keeps the response's own lifetime.
-    func isReusable(at now: Date, updateInterval: TimeInterval?) -> Bool {
-        guard let cacheMetadata else { return expiresAt > now }
-        guard let updateInterval else { return expiresAt > now && cacheMetadata.isFresh(at: now) }
-        // An expiry earlier than the response's own marks an index that must be rebuilt soon.
-        if expiresAt < cacheMetadata.expiresAt, expiresAt <= now { return false }
-        return cacheMetadata.isFresh(at: now, updateInterval: updateInterval)
+    /// Whether the saved listings may be read without asking the server again. Saved listings never lapse by age
+    /// (fetch once, refetch only on a refresh the user asks for or the profile's automatic update); only an empty feed
+    /// is asked again, and a window the listings no longer cover is a miss in `contains`.
+    func isReusable(at now: Date) -> Bool {
+        emptyFeedRetryAt.map { now < $0 } ?? true
     }
 
     /// When an automatic update next falls due. Shorter lifetimes stated by the server are
@@ -51,11 +59,17 @@ public actor LiveTVGuideIndex {
     private var requiresValidation = false
     private var cachedProjection: (revision: String, value: String)?
     private var flight: Flight?
+    /// Committed guide changes not yet reported by `refreshSaved`, so an import done for a foreground request is not lost.
+    private var unreportedChanges: [URL: SavedGuideSourceChange] = [:]
     private var transientTasks: [UUID: Task<[LiveTVPrototypeProgram], any Error>] = [:]
     private var admissionWaiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
+    /// Guides whose saved index is being built again behind reads that were answered from the older one.
+    private var reindexTasks: [URL: Task<Void, Never>] = [:]
 
     private enum Resolution: Sendable {
         case indexed(LiveTVGuideIndexState)
+        /// A new index was committed; `change` says what differed from the previous commit.
+        case imported(LiveTVGuideIndexState, change: SavedGuideSourceChange)
         case transient(Data)
     }
 
@@ -64,6 +78,8 @@ public actor LiveTVGuideIndex {
         let url: URL
         let projection: String
         let epoch: UUID
+        /// Started by a manual refresh: skipped the reuse check and went to the server.
+        let forced: Bool
         let task: Task<Void, Never>
         let progress: GuideProgressRelay
         var cancelling = false
@@ -88,6 +104,9 @@ public actor LiveTVGuideIndex {
             await Task.yield()
         }
     }
+    func waitForReindexForTesting() async {
+        while let task = reindexTasks.values.first { await task.value }
+    }
     func waitForAdmissionForTesting() async {
         let deadline = ContinuousClock.now + .seconds(2)
         while admissionWaiters.isEmpty, ContinuousClock.now < deadline { await Task.yield() }
@@ -109,6 +128,19 @@ public actor LiveTVGuideIndex {
         from url: URL, catalog: [LiveTVPrototypeChannel], channels: [LiveTVPrototypeChannel],
         range: DateInterval, trustsGuideIDs: Bool = false, revalidate: @escaping Revalidate
     ) async throws -> [LiveTVPrototypeProgram] {
+        try await programs(
+            from: url, catalog: catalog, channels: channels, range: range, trustsGuideIDs: trustsGuideIDs,
+            forcing: false, revalidate: revalidate
+        )
+    }
+
+    /// `forcing` skips the reuse check once, so a saved guide is asked of the server even when it is not due.
+    /// It changes no stored setting and invalidates nothing.
+    func programs(
+        from url: URL, catalog: [LiveTVPrototypeChannel], channels: [LiveTVPrototypeChannel],
+        range: DateInterval, trustsGuideIDs: Bool, forcing: Bool, answersFromOlderIndex: Bool = true,
+        revalidate: @escaping Revalidate
+    ) async throws -> [LiveTVPrototypeProgram] {
         guard range.duration > 0, range.duration <= 172_800,
               range.start.timeIntervalSince1970.isFinite, range.end.timeIntervalSince1970.isFinite,
               channels.count <= 2_000, catalog.count <= 100_000 else { throw LiveTVCacheError.invalidRange }
@@ -118,13 +150,22 @@ public actor LiveTVGuideIndex {
             try Task.checkCancellation()
             guard !closed, !invalidating else { throw CancellationError() }
             let requestEpoch = epoch
+            if answersFromOlderIndex, !forcing,
+               let older = try await olderIndexAnswer(
+                url: url, projection: projection, catalog: catalog, range: range, channels: channels,
+                trustsGuideIDs: trustsGuideIDs, requestEpoch: requestEpoch
+               ) {
+                reindexInBackground(url: url, catalog: catalog, range: range, revalidate: revalidate)
+                return older
+            }
             let resolution = try await resolution(
-                url: url, catalog: catalog, projection: projection, range: range, download: revalidate
+                url: url, catalog: catalog, projection: projection, range: range, forcing: forcing,
+                download: revalidate
             )
             try Task.checkCancellation()
             guard epoch == requestEpoch, !closed, !invalidating else { throw CancellationError() }
             switch resolution {
-            case .indexed(let state):
+            case .indexed(let state), .imported(let state, _):
                 guard state.contains(range) else { continue }
                 do {
                     let result = try await cache.indexedAccountPrograms(
@@ -161,6 +202,49 @@ public actor LiveTVGuideIndex {
         }
     }
 
+    /// The listings of a saved index that was built for another lineup or under older matcher rules, when it still covers
+    /// `range`. A launch never waits for the whole guide to be parsed again: the older index answers (its stations are the
+    /// ones the old lineup kept) and `reindexInBackground` builds the current one. Nil when there is nothing usable to read.
+    private func olderIndexAnswer(
+        url: URL, projection: String, catalog: [LiveTVPrototypeChannel], range: DateInterval,
+        channels: [LiveTVPrototypeChannel], trustsGuideIDs: Bool, requestEpoch: UUID
+    ) async throws -> [LiveTVPrototypeProgram]? {
+        guard !requiresValidation || validated[url] == epoch, !LiveTVGuideSnapshotWriter.stationDumpOwed() else { return nil }
+        let sourceID = Self.sourceID(url)
+        guard let saved = try await cache.guideIndexState(sourceID: sourceID, sourceURL: url),
+              saved.projection != projection, saved.contains(range), saved.isReusable(at: clock()),
+              let savedLineup = saved.lineupKey,
+              savedLineup == (try Self.lineupKey(catalog, language: language)) else { return nil }
+        do {
+            let result = try await cache.indexedAccountPrograms(
+                sourceID: sourceID, sourceURL: url, generation: saved.generation,
+                channels: channels, range: range, trustsGuideIDs: trustsGuideIDs
+            )
+            try Task.checkCancellation()
+            guard epoch == requestEpoch, !closed, !invalidating else { throw CancellationError() }
+            return result
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // The older index cannot be read (replaced meanwhile, or an older layout): the normal path builds the current one.
+            try Task.checkCancellation()
+            return nil
+        }
+    }
+
+    private func reindexInBackground(
+        url: URL, catalog: [LiveTVPrototypeChannel], range: DateInterval, revalidate: @escaping Revalidate
+    ) {
+        guard reindexTasks[url] == nil, !closed, !invalidating else { return }
+        reindexTasks[url] = Task(priority: .utility) {
+            _ = try? await self.programs(
+                from: url, catalog: catalog, channels: [], range: range, trustsGuideIDs: false, forcing: false,
+                answersFromOlderIndex: false, revalidate: revalidate
+            )
+            self.reindexTasks[url] = nil
+        }
+    }
+
     /// Answers from a fresh saved index without starting or joining a download.
     /// `nil` means only a source that can load the guide can answer. The lineup is
     /// read only once a saved index could answer, so a miss costs no catalogue load.
@@ -178,12 +262,14 @@ public actor LiveTVGuideIndex {
         guard !closed, !invalidating else { throw CancellationError() }
         // An explicit refresh must reach the provider before saved rows are trusted again.
         guard !requiresValidation || validated[url] == epoch else { return nil }
+        // DEBUG station dump owed: the saved guide must not answer before the XMLTV has been read once.
+        guard !LiveTVGuideSnapshotWriter.stationDumpOwed() else { return nil }
         let requestEpoch = epoch
         let sourceID = Self.sourceID(url)
         let now = clock()
         let saved = try await cache.guideIndexState(sourceID: sourceID, sourceURL: url)
         var result: [LiveTVPrototypeProgram]?
-        if let state = saved, state.contains(range), state.isReusable(at: now, updateInterval: updateInterval()) {
+        if let state = saved, state.contains(range), state.isReusable(at: now) {
             let projection: String
             if let catalogRevision, let cachedProjection, cachedProjection.revision == catalogRevision {
                 projection = cachedProjection.value
@@ -217,33 +303,73 @@ public actor LiveTVGuideIndex {
         from url: URL, catalog: @Sendable () async throws -> [LiveTVPrototypeChannel],
         revalidate: @escaping Revalidate
     ) async throws -> Date? {
-        guard let interval = updateInterval(), !closed else { return nil }
+        try await refreshSaved(from: url, catalog: catalog, trigger: .scheduled, revalidate: revalidate).nextDue
+    }
+
+    /// `updateSaved` for either trigger. The only difference is the due gate: `.manual` asks the server about a saved
+    /// guide that is not due, or when automatic updates are off (`nextDue` is then nil). A guide that was never saved
+    /// is still never downloaded here, and the guide's own refusal and backoff rules are not bypassed.
+    public func refreshSaved(
+        from url: URL, catalog: @Sendable () async throws -> [LiveTVPrototypeChannel],
+        trigger: SavedGuideRefreshTrigger, revalidate: @escaping Revalidate
+    ) async throws -> SavedGuideRefreshReport {
+        let interval = updateInterval()
+        guard !closed, trigger == .manual || interval != nil else {
+            return SavedGuideRefreshReport(nextDue: nil, transferredGuides: 0, committedInputs: takeUnreportedChanges(url))
+        }
         let sourceID = Self.sourceID(url)
-        guard let saved = try await cache.guideIndexState(sourceID: sourceID, sourceURL: url) else { return nil }
+        guard let saved = try await cache.guideIndexState(sourceID: sourceID, sourceURL: url) else {
+            return SavedGuideRefreshReport(nextDue: nil, transferredGuides: 0, committedInputs: takeUnreportedChanges(url))
+        }
         let now = clock()
-        let due = saved.updateDue(interval: interval)
-        if now < due { return due }
+        if trigger == .scheduled, let interval {
+            let due = saved.updateDue(interval: interval)
+            if now < due {
+                return SavedGuideRefreshReport(nextDue: due, transferredGuides: 0, committedInputs: takeUnreportedChanges(url))
+            }
+        }
         _ = try await programs(
             from: url, catalog: try await catalog(), channels: [],
-            range: DateInterval(start: now, duration: 6 * 3_600), revalidate: revalidate
+            range: DateInterval(start: now, duration: 6 * 3_600), trustsGuideIDs: false,
+            forcing: true, revalidate: revalidate
         )
-        return try await cache.guideIndexState(sourceID: sourceID, sourceURL: url)?
-            .updateDue(interval: interval)
+        var next: Date?
+        if let interval {
+            next = try await cache.guideIndexState(sourceID: sourceID, sourceURL: url)?.updateDue(interval: interval)
+        }
+        return SavedGuideRefreshReport(nextDue: next, transferredGuides: 1, committedInputs: takeUnreportedChanges(url))
+    }
+
+    /// Reported only on a successful return; a throw or cancellation leaves the change for the next refresh.
+    private func takeUnreportedChanges(_ url: URL) -> SavedGuideCommittedInputs {
+        guard let change = unreportedChanges.removeValue(forKey: url) else { return SavedGuideCommittedInputs() }
+        return SavedGuideCommittedInputs(guideChanges: [change])
+    }
+
+    /// The debug snapshot's guide half for the saved guide at `url` (`LiveTVGuideSnapshot`); nil when none is saved.
+    public func snapshotRecords(from url: URL, range: DateInterval) async throws -> [LiveTVGuideSnapshot.GuideRecord]? {
+        guard !closed else { return nil }
+        return try await cache.guideSnapshotRecords(sourceID: Self.sourceID(url), sourceURL: url, range: range)
     }
 
     public func invalidate() async {
         epoch = UUID()
         cachedProjection = nil
+        // An invalidation follows a credential or authorization change: unreported changes belong to the old one.
+        unreportedChanges.removeAll()
         requiresValidation = true
         validated.removeAll()
         invalidating = true
         let task = flight?.task
         let transient = Array(transientTasks.values)
+        let reindexing = Array(reindexTasks.values)
         flight?.cancelling = true
         task?.cancel()
         for task in transient { task.cancel() }
+        for task in reindexing { task.cancel() }
         await task?.value
         for task in transient { _ = await task.result }
+        for task in reindexing { await task.value }
         invalidating = false
     }
 
@@ -254,10 +380,11 @@ public actor LiveTVGuideIndex {
 
     private func resolution(
         url: URL, catalog: [LiveTVPrototypeChannel], projection: String,
-        range: DateInterval, download: @escaping Revalidate
+        range: DateInterval, forcing: Bool, download: @escaping Revalidate
     ) async throws -> Resolution {
         while let existing = flight,
-              existing.url != url || existing.projection != projection || existing.cancelling {
+              existing.url != url || existing.projection != projection || existing.cancelling
+                || (forcing && !existing.forced) {
             try await waitForAdmission()
             try Task.checkCancellation()
             guard !closed, !invalidating else { throw CancellationError() }
@@ -270,7 +397,7 @@ public actor LiveTVGuideIndex {
                 if flight == nil {
                     let id = UUID()
                     let requestEpoch = epoch
-                    let force = requiresValidation && validated[url] != epoch
+                    let force = forcing || (requiresValidation && validated[url] != epoch)
                     let cache = cache
                     let language = language
                     let progress = GuideProgressRelay()
@@ -281,13 +408,16 @@ public actor LiveTVGuideIndex {
                                 try await Self.resolve(
                                     url: url, catalog: catalog, projection: projection, range: range,
                                     cache: cache, language: language, force: force, now: self.clock(),
-                                    updateInterval: self.updateInterval(), download: download
+                                    download: download
                                 )
                             })
                         } catch { result = .failure(error) }
                         self.finish(id: id, epoch: requestEpoch, result: result)
                     }
-                    flight = Flight(id: id, url: url, projection: projection, epoch: requestEpoch, task: task, progress: progress)
+                    flight = Flight(
+                        id: id, url: url, projection: projection, epoch: requestEpoch, forced: force, task: task,
+                        progress: progress
+                    )
                 }
                 flight?.waiters[waiterID] = continuation
                 if let report = ServerLiveTVGuideProgress.report {
@@ -330,6 +460,13 @@ public actor LiveTVGuideIndex {
         for continuation in admissions { continuation.resume() }
         let admitted = !closed && !invalidating && epoch == requestEpoch && !current.cancelling
         if admitted, case .success = result { validated[current.url] = epoch }
+        // Committed in the cache whoever is still waiting; reported once by `refreshSaved` unless invalidated first.
+        if !closed, !invalidating, epoch == requestEpoch, case .success(.imported(_, let change)) = result {
+            let stations = Set(unreportedChanges[current.url]?.changedStationIDs ?? []).union(change.changedStationIDs)
+            unreportedChanges[current.url] = SavedGuideSourceChange(
+                sourceKey: change.sourceKey, contentRevision: change.contentRevision, changedStationIDs: stations.sorted()
+            )
+        }
         for continuation in current.waiters.values {
             if admitted { continuation.resume(with: result) }
             else { continuation.resume(throwing: CancellationError()) }
@@ -339,21 +476,22 @@ public actor LiveTVGuideIndex {
     private static func resolve(
         url: URL, catalog: [LiveTVPrototypeChannel], projection: String, range: DateInterval,
         cache: LiveTVIndexedCache, language: String?, force: Bool, now: Date,
-        updateInterval: TimeInterval?, download: Revalidate
+        download: Revalidate
     ) async throws -> Resolution {
         let sourceID = sourceID(url)
         let saved = try await cache.guideIndexState(sourceID: sourceID, sourceURL: url)
         var eligible = saved.flatMap { $0.projection == projection && $0.contains(range) ? $0 : nil }
-        if !force, let eligible, eligible.isReusable(at: now, updateInterval: updateInterval) {
+        let dumpOwed = LiveTVGuideSnapshotWriter.stationDumpOwed()
+        if !force, !dumpOwed, let eligible, eligible.isReusable(at: now) {
             PlozzLog.networking.info("IPTV_INDEX outcome=reused")
             return .indexed(eligible)
         }
         let reason = saved == nil ? "none" : saved?.projection != projection ? "lineupChanged"
-            : saved?.contains(range) != true ? "window" : force ? "forced" : "due"
+            : saved?.contains(range) != true ? "window" : force ? "forced" : "emptyFeed"
         PlozzLog.networking.info("IPTV_INDEX outcome=download reason=\(reason)")
         // Only validate a representation that can answer this exact projection
         // and window. A 304 cannot supply stations/intervals we never indexed.
-        let previous = eligible?.cacheMetadata.flatMap { $0.hasValidator ? $0 : nil }
+        let previous = dumpOwed ? nil : eligible?.cacheMetadata.flatMap { $0.hasValidator ? $0 : nil }
         var downloaded = try await download(previous)
         if case .notModified(let metadata) = downloaded {
             guard var validated = eligible, let previous, metadata.responseURL == previous.responseURL else {
@@ -397,7 +535,7 @@ public actor LiveTVGuideIndex {
             hasher.update(data: response.data.subdata(in: offset..<min(response.data.count, offset + 65_536)))
         }
         let digest = LiveTVIdentityDigest.hex(hasher.finalize())
-        if var eligible, eligible.digest == digest {
+        if !dumpOwed, var eligible, eligible.digest == digest {
             eligible.expiresAt = response.expiresAt
             eligible.cacheMetadata = response.cacheMetadata
             try await cache.revalidateGuideIndex(sourceID: sourceID, sourceURL: url, state: eligible)
@@ -405,28 +543,63 @@ public actor LiveTVGuideIndex {
             return .indexed(eligible)
         }
         let state = LiveTVGuideIndexState(
-            generation: UUID(), projection: projection, digest: digest,
+            generation: UUID(), projection: projection, lineupKey: try Self.lineupKey(catalog, language: language),
+            digest: digest,
             lowerBound: range.start.addingTimeInterval(-86_400),
             upperBound: range.start.addingTimeInterval(7 * 86_400), expiresAt: response.expiresAt,
             cacheMetadata: response.cacheMetadata
         )
-        _ = try await cache.importGuide(
+        let before = try await cache.savedGuideStations(sourceID: sourceID, sourceURL: url)
+        let imported = try await cache.importGuide(
             data: response.data, sourceID: sourceID, channels: catalog,
             provider: LiveTVGuideSource.provider(for: url), now: range.start,
             sourceURL: url, preferredLanguage: language, indexState: state
         )
         PlozzLog.networking.info("IPTV_INDEX outcome=imported channels=\(catalog.count)")
-        return .indexed(state)
+        let previousStations = before.map(stationFingerprints) ?? [:]
+        let currentStations = stationFingerprints(imported)
+        let changed = Set(previousStations.keys).union(currentStations.keys)
+            .filter { previousStations[$0] != currentStations[$0] }.sorted()
+        return .imported(state, change: SavedGuideSourceChange(
+            sourceKey: sourceID, contentRevision: digest, changedStationIDs: changed
+        ))
+    }
+
+    /// A digest of each station's names and icon address, so a change is detected without keeping or logging the icon URL.
+    private static func stationFingerprints(_ guide: LiveTVGuideImport) -> [String: String] {
+        guide.guideChannels.reduce(into: [:]) { result, station in
+            let icon = guide.guideIcons[station.key]?.absoluteString ?? ""
+            result[station.key] = LiveTVIdentityDigest.hex(SHA256.hash(
+                data: Data((station.value + [icon]).joined(separator: "\u{1F}").utf8)
+            ))
+        }
     }
 
     static func sourceID(_ url: URL) -> String {
         LiveTVIdentityDigest.hex(SHA256.hash(data: Data(url.absoluteString.utf8)))
     }
 
+    /// The lineup's own part of the projection: its guided channels and the language, not the matcher rules or parser version.
+    static func lineupKey(_ catalog: [LiveTVPrototypeChannel], language: String?) throws -> String {
+        var hasher = SHA256()
+        hasher.update(data: try JSONEncoder().encode(["account-xmltv-lineup-v1", language]))
+        for channel in catalog.filter({ $0.guideID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false })
+            .sorted(by: { $0.id < $1.id }) {
+            try Task.checkCancellation()
+            hasher.update(data: try JSONEncoder().encode(
+                [channel.id, channel.name, channel.guideID, channel.guideName, channel.country]
+            ))
+        }
+        return LiveTVIdentityDigest.hex(hasher.finalize())
+    }
+
+    /// The saved projection names the matcher's rules (`LiveTVGuideStationIndex.rulesFingerprint`): the stations a saved guide
+    /// retains are the ones those rules pick for the lineup, so a rules change re-indexes it once. Each guide address has its own
+    /// saved index that retains by the lineup alone, so adding or removing another guide never makes this one stale.
     private static func projection(_ catalog: [LiveTVPrototypeChannel], language: String?) throws -> String {
         var hasher = SHA256()
         hasher.update(data: try JSONEncoder().encode([
-            "account-xmltv-stations-v2", String(LiveTVXMLTVParser.cacheVersion), language
+            "account-xmltv-stations-v3", String(LiveTVXMLTVParser.cacheVersion), LiveTVGuideStationIndex.rulesFingerprint, language
         ]))
         // Only a channel with a guide ID can be given listings. Leaving the others out keeps
         // a saved guide usable when a provider renames its event channels through the day.

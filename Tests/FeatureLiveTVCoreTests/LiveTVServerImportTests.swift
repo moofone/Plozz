@@ -519,6 +519,129 @@ final class LiveTVServerImportTests: XCTestCase {
         XCTAssertEqual(model.browsingCategories, firstModel.browsingCategories)
     }
 
+    func testVisibleGuideRequestSupersedingTheLastSeenGuideStillLetsTheLineupReplaceTheRows() async throws {
+        let server = source()
+        let lineup = (1...400).map { ServerLiveTVChannel(id: "n\($0)", name: "Channel \($0)", number: "\($0)") }
+        let store = LastSeenMemoryStore()
+        let first = LiveTVPrototypeImportModel(
+            configuration: .init(servers: [server]),
+            serverProviderResolver: { [self] _ in authorized(server, ServerImportProvider(channels: lineup)) },
+            lastSeen: store
+        )
+        let firstModel = LiveTVPrototypeModel(now: now, channels: [])
+        await first.reload(into: firstModel, forceServerRefresh: false)
+        await first.saveLastSeen(from: firstModel)?.value
+
+        // The saved rows' listings are being read when the open screen asks for its visible rows, which overlap them.
+        let started = expectation(description: "Saved-rows guide read suspended")
+        let provider = ServerImportProvider(channels: lineup, suspended: .guide, started: started)
+        let context = authorized(server, provider, authorizationID: "next-session")
+        let imports = LiveTVPrototypeImportModel(
+            configuration: .init(servers: [server]), serverProviderResolver: { _ in context }, lastSeen: store
+        )
+        let model = LiveTVPrototypeModel(now: now, channels: [])
+        let reload = Task { await imports.reload(into: model, forceServerRefresh: false) }
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertEqual(model.channels.count, 150)
+        let visible = Array(model.channels.prefix(12)).map(\.id)
+        await imports.reloadServerGuides(
+            channelIDs: visible, from: now, to: now.addingTimeInterval(21_600), into: model, force: true)
+        await provider.resume()
+        await reload.value
+
+        XCTAssertEqual(model.channels.count, 400, "the provider lineup replaces the saved rows; they are never emptied")
+        XCTAssertEqual(model.channels, firstModel.channels)
+        let catalogReads = await provider.calls.catalogs
+        XCTAssertEqual(catalogReads, 1)
+    }
+
+    /// STARTUP-10S: the saved rows' listings come from the provider's saved guide, which may have to be indexed again
+    /// (minutes). The lineup is read and published meanwhile, and the open guide's rows switch to it at once.
+    func testLineupPublishesWhileTheSavedRowsGuideIsStillBeingRead() async throws {
+        let server = source()
+        let lineup = (1...400).map { ServerLiveTVChannel(id: "n\($0)", name: "Channel \($0)", number: "\($0)") }
+        let store = LastSeenMemoryStore()
+        let first = LiveTVPrototypeImportModel(
+            configuration: .init(servers: [server]),
+            serverProviderResolver: { [self] _ in authorized(server, ServerImportProvider(channels: lineup)) },
+            lastSeen: store
+        )
+        let firstModel = LiveTVPrototypeModel(now: now, channels: [])
+        await first.reload(into: firstModel, forceServerRefresh: false)
+        await first.saveLastSeen(from: firstModel)?.value
+
+        let started = expectation(description: "Saved-rows guide read suspended")
+        let provider = ServerImportProvider(channels: lineup, suspended: .guide, started: started)
+        let context = authorized(server, provider, authorizationID: "next-session")
+        let imports = LiveTVPrototypeImportModel(
+            configuration: .init(servers: [server]), serverProviderResolver: { _ in context }, lastSeen: store
+        )
+        let model = LiveTVPrototypeModel(now: now, channels: [])
+        let reload = Task { await imports.reload(into: model, forceServerRefresh: false) }
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertEqual(model.guideChannels.count, 150, "the saved rows are on screen while their guide read is held")
+
+        // The open guide observes `guideChannels`: the published lineup must reach it while the guide read is still held.
+        let switched = expectation(description: "Open guide rows replaced by the lineup")
+        @MainActor func observe() {
+            withObservationTracking { _ = model.guideChannels } onChange: {
+                Task { @MainActor in
+                    if model.guideChannels.count == 400 { switched.fulfill() } else { observe() }
+                }
+            }
+        }
+        observe()
+        await fulfillment(of: [switched], timeout: 5)
+        XCTAssertEqual(model.channels.count, 400, "the lineup is published without waiting for the guide read")
+        let catalogReads = await provider.calls.catalogs
+        XCTAssertEqual(catalogReads, 1)
+
+        await provider.resume()
+        await reload.value
+        XCTAssertEqual(model.channels, firstModel.channels)
+    }
+
+    func testLastSeenRowsSavedBelowTheFirstPageReopenAtThatPositionAndDropItWhenTheLineupArrives() async throws {
+        let server = source()
+        let lineup = (1...400).map { ServerLiveTVChannel(id: "n\($0)", name: "Channel \($0)", number: "\($0)") }
+        let store = LastSeenMemoryStore()
+        let first = LiveTVPrototypeImportModel(
+            configuration: .init(servers: [server]),
+            serverProviderResolver: { [self] _ in authorized(server, ServerImportProvider(channels: lineup)) },
+            lastSeen: store
+        )
+        let firstModel = LiveTVPrototypeModel(now: now, channels: [])
+        await first.reload(into: firstModel, forceServerRefresh: false)
+        let rows = firstModel.guideChannels.map(\.id)
+        XCTAssertNil(first.restoredGuideViewport)
+        first.noteGuideViewport(anchor: rows[250], relativeOffset: 33)
+        first.noteGuideFocus(rows[255].channelID)
+        await first.saveLastSeen(from: firstModel)?.value
+        let saved = try XCTUnwrap(store.load())
+        XCTAssertEqual(saved.sources.first?.entries.first?.channel.id, rows[230].channelID,
+                       "the saved rows start above the first visible row, so they hold the viewport")
+        XCTAssertEqual(saved.viewport?.anchorChannelID, rows[250].channelID)
+        XCTAssertEqual(saved.viewport?.relativeOffset, 33)
+
+        let started = expectation(description: "Lineup read suspended")
+        let provider = ServerImportProvider(channels: lineup, suspended: .channels, started: started)
+        let imports = LiveTVPrototypeImportModel(
+            configuration: .init(servers: [server]),
+            serverProviderResolver: { [self] _ in authorized(server, provider) }, lastSeen: store
+        )
+        let model = LiveTVPrototypeModel(now: now, channels: [])
+        let task = Task { await imports.reload(into: model, forceServerRefresh: false) }
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertEqual(model.guideChannels.map(\.id), Array(rows[230..<380]))
+        XCTAssertEqual(imports.restoredGuideViewport, LiveTVRestoredGuideViewport(
+            anchor: rows[250], relativeOffset: 33, focus: rows[255]))
+
+        await provider.resume()
+        await task.value
+        XCTAssertEqual(model.guideChannels.map(\.id), rows)
+        XCTAssertNil(imports.restoredGuideViewport, "the position belongs to the saved rows only")
+    }
+
     func testAuthorizationLossDuringHiddenPreloadClearsProvisionalBrowseAndRejectsLateLineup() async throws {
         let server = source()
         let lineup = [ServerLiveTVChannel(id: "n1", name: "Old profile", groups: ["Old category"])]
@@ -619,6 +742,8 @@ final class LiveTVServerImportTests: XCTestCase {
             )
             let firstModel = LiveTVPrototypeModel(now: now, channels: [])
             await first.reload(into: firstModel, forceServerRefresh: false)
+            let anchor = try XCTUnwrap(firstModel.guideChannels.first?.id)
+            first.noteGuideViewport(anchor: anchor, relativeOffset: 17)
             await first.saveLastSeen(from: firstModel)?.value
             let saved = try XCTUnwrap(store.load())
             XCTAssertEqual(saved.sources[0].viewerScopeID, "profile-account-server-viewer-one")
@@ -640,10 +765,12 @@ final class LiveTVServerImportTests: XCTestCase {
                 await fulfillment(of: [started], timeout: 2)
                 if scope == "profile-account-server-viewer-one" {
                     XCTAssertEqual(model.channels, firstModel.channels)
+                    XCTAssertEqual(imports.restoredGuideViewport?.anchor, anchor)
                     XCTAssertEqual(Set(imports.serverChannelReferences.values.map(\.authorizationID)), ["rotated-session"])
                 } else {
                     XCTAssertTrue(model.channels.isEmpty, "An account ID alone cannot authorize another viewer's rows")
                     XCTAssertTrue(imports.serverChannelReferences.isEmpty)
+                    XCTAssertNil(imports.restoredGuideViewport, "Do not position the guide from another viewer's snapshot")
                     XCTAssertEqual(model.categoryChannelCount(nil), 0)
                 }
                 await provider.resume()
@@ -676,6 +803,38 @@ final class LiveTVServerImportTests: XCTestCase {
             let decoded = try JSONDecoder().decode(LiveTVLastSeenSnapshot.self, from: bytes)
             XCTAssertNil(LiveTVServerCatalog(lastSeen: decoded.sources[0], source: server, context: context))
         }
+    }
+
+    func testRestoredRowsKeepOnlyCurrentBoundedListingsOfTheirOwnChannels() throws {
+        let server = source()
+        let context = authorized(server, ServerImportProvider(channels: [channel()]), kind: .plex, viewerScopeID: "home-one")
+        let catalog = try LiveTVServerCatalog(source: server, context: context, channels: [channel()])
+        let row = catalog.channels[0]
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        func program(_ id: String, channel: String, from start: TimeInterval, to end: TimeInterval) -> LiveTVPrototypeProgram {
+            .init(id: id, channelID: channel, title: id, subtitle: "",
+                  start: now.addingTimeInterval(start), end: now.addingTimeInterval(end))
+        }
+        let saved = [
+            program("ended", channel: row.id, from: -3_600, to: -60),
+            program("airing", channel: row.id, from: -60, to: 1_800),
+            program("next", channel: row.id, from: 1_800, to: 3_600),
+            program("third", channel: row.id, from: 3_600, to: 5_400),
+            program("stranger", channel: "server-channel-other", from: -60, to: 1_800),
+            program("inverted", channel: row.id, from: 100, to: 50)
+        ]
+        let rows = LiveTVLastSeenSnapshot.Source(
+            sourceID: server.id, accountID: server.accountID, kind: .plex,
+            entries: [.init(nativeID: "native", channel: row)], viewerScopeID: "home-one", programs: saved)
+        let restored = try XCTUnwrap(LiveTVServerCatalog(lastSeen: rows, source: server, context: context, now: now))
+        XCTAssertEqual(restored.programs.map(\.id), ["airing", "next"])
+        let legacy = LiveTVLastSeenSnapshot.Source(
+            sourceID: server.id, accountID: server.accountID, kind: .plex,
+            entries: [.init(nativeID: "native", channel: row)], viewerScopeID: "home-one")
+        XCTAssertEqual(try XCTUnwrap(LiveTVServerCatalog(lastSeen: legacy, source: server, context: context, now: now)).programs, [])
+        let bytes = try JSONEncoder().encode(LiveTVLastSeenSnapshot(
+            sources: [rows], browse: .init(categories: [], categoryCounts: [:], totalCount: 1)))
+        XCTAssertEqual(try JSONDecoder().decode(LiveTVLastSeenSnapshot.self, from: bytes).sources[0].programs, saved)
     }
 
     func testViewerChangeWhileSnapshotLoadIsSuspendedRejectsPreviousRows() async throws {

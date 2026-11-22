@@ -569,6 +569,7 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
     /// Playback Info reads the stream's variant, tracks and HLS logs off this.
     public var nowPlayingPlayer: AVPlayer? { underlyingEngine.nowPlayingPlayer }
     public var videoAspectRatio: Double? { underlyingEngine.videoAspectRatio }
+    public var decodedVideoHeight: Int? { underlyingEngine.decodedVideoHeight }
     public var audioTracks: [MediaTrack] { underlyingEngine.audioTracks }
     public var subtitleTracks: [MediaTrack] { underlyingEngine.subtitleTracks }
     public var currentAudioTrackID: Int? { underlyingEngine.currentAudioTrackID }

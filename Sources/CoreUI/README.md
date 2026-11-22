@@ -401,6 +401,20 @@ Category tint blends over `themePalette.cardOpaqueSurface`, so Light, Dark,
 and Black keep their own brightness and foreground contrast. Supplied logos
 always retain precedence; external channels keep the ordinary name fallback.
 
+`ChannelLogoArtwork` defaults to the themed plate (`ChannelLogoStyle.plate`). The Live
+TV guide's channel column opts into `ChannelLogoStyle.bare`, which draws only the
+provider-supplied logo (`logoURL`) straight on the row, with no plate. `ChannelLogoExtraction`
+decodes the provider image at its natural size (above 1024 px a side it is downsampled
+first), trims pixels with alpha at or below 12, and fits the trimmed aspect to an equal-area
+box scaled from the 1080p guide design (164 × 52 pt in a 252 × 82 pt cell). A logo whose
+sampled opaque pixels (every fourth, alpha above 128) average below 0.28 luminance, or one
+the provider marks `logoNeedsDarkBackground`, is drawn as a 90% white silhouette; other logos
+keep their colours. An optional quality badge such as "4K" sits beside the logo's top-right
+corner and shrinks the logo to leave room for it. No logo is bundled, looked up by name,
+or substituted: a channel without a loadable `logoURL` keeps the ordinary name fallback.
+Bytes arrive through `ArtworkSession`; results are memoized per URL. Hero logos and the
+plate styles are unchanged.
+
 `PlozzStartupLogo` starts from a smile and rotates through wink, delight, and
 surprise on successive cold launches. The device-local choice is saved once per
 process when animation first becomes active; view remounts and foreground

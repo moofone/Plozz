@@ -50,4 +50,21 @@ final class LiveTVCloudSyncSchemaTests: XCTestCase {
             XCTAssertNil(SyncRemoteRecord(ckRecord: record, schema: .trackerTokensV1))
         }
     }
+
+    func testLogoChannelUsesTheDeployedRecordTypeInItsOwnZone() throws {
+        let logos = CloudSyncSchemaDescriptor.liveTVLogosV1
+        XCTAssertEqual(logos.recordType, CloudSyncSchemaDescriptor.mediaStateV1.recordType)
+        XCTAssertFalse(logos.encryptsValue)
+        for other: CloudSyncSchemaDescriptor in [.mediaStateV1, .liveTVStateV1, .liveTVSourcesV1, .configV3] {
+            XCTAssertNotEqual(logos.zoneID, other.zoneID)
+        }
+        let name = "logo:cGxheWxpc3Q:Y2g"
+        XCTAssertEqual(logos.kind(forRecordName: name), "logo")
+        let bytes = Data(#"{"version":1}"#.utf8)
+        let record = CKRecord(recordType: logos.recordType, recordID: logos.recordID(forRecordName: name))
+        SyncUpload(recordName: name, value: bytes, editedAt: 7, systemFields: nil).populate(record, schema: logos)
+        XCTAssertEqual(SyncRemoteRecord(ckRecord: record, schema: logos)?.value, bytes)
+        XCTAssertNil(SyncRemoteRecord(ckRecord: record, schema: .liveTVStateV1), "an older client ignores the zone")
+        XCTAssertNil(SyncRemoteRecord(ckRecord: record, schema: .mediaStateV1))
+    }
 }

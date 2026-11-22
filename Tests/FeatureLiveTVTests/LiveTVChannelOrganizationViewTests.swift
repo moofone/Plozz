@@ -17,6 +17,7 @@ final class LiveTVChannelOrganizationViewTests: XCTestCase {
         let model = LiveTVPrototypeModel(channels: [channel], preferencesStore: store)
         let imports = LiveTVPrototypeImportModel(configuration: .empty, loader: LiveTVSourceLoader())
         let saved = store.value
+        let savesAfterNumbering = store.saves
         for width in [390.0, 1_024.0, 1_920.0] {
             let management = UIHostingController(rootView: NavigationStack {
                 LiveTVChannelOrganizationView(model: model, imports: imports, canMutate: { false })
@@ -32,7 +33,7 @@ final class LiveTVChannelOrganizationViewTests: XCTestCase {
             hidden.view.layoutIfNeeded()
         }
         XCTAssertEqual(store.value, saved)
-        XCTAssertEqual(store.saves, 0)
+        XCTAssertEqual(store.saves, savesAfterNumbering, "Appearing saves nothing")
         XCTAssertEqual(model.hiddenChannelEntries.map(\.id), ["unknown"])
     }
 }

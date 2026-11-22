@@ -8,12 +8,21 @@ enum PrototypeLayout {
     static let smallGap = PlozzTheme.Spacing.xSmall
     static let radius = PlozzTheme.Metrics.cornerRadius
     static let sectionGap = PlozzTheme.Spacing.large
+    #if os(tvOS)
+    /// Liquid Glass guide: programmes sit 12 pt apart.
+    static var cellGap: CGFloat { LiveTVGlassLayout.active.cellGap }
+    #else
     static let cellGap = PlozzTheme.Spacing.xSmall
+    #endif
     // On touch the grid is one even mesh: rows, the logo column and programmes
     // all sit a programme-gap apart. The TV keeps wider row and column gaps.
     #if os(iOS)
     static let rowGap = cellGap
     static let columnGap = cellGap
+    #elseif os(tvOS)
+    static var rowGap: CGFloat { LiveTVGlassLayout.active.rowGap }
+    /// The plate-to-programmes gap is the mockup's `cg`, the same as the gap between programmes.
+    static var columnGap: CGFloat { LiveTVGlassLayout.active.cellGap }
     #else
     static let rowGap = PlozzTheme.Spacing.medium
     static let columnGap = PlozzTheme.Spacing.small
@@ -26,11 +35,15 @@ enum PrototypeLayout {
     static var rowRadius: CGFloat {
         #if os(iOS)
         UIDevice.current.userInterfaceIdiom == .phone ? 14 : logoRadius + rowInset
+        #elseif os(tvOS)
+        LiveTVGlassLayout.active.cellRadius
         #else
         logoRadius + rowInset
         #endif
     }
     static let programInset: CGFloat = 0
+    /// The narrowest programme cell the tvOS guide draws; a shorter slot is absorbed by a neighbour.
+    static let minimumCellWidth: CGFloat = 64
     static var programRadius: CGFloat { rowRadius - programInset }
     static let horizontalFade = PlozzTheme.Spacing.large
     static let verticalFade = PlozzTheme.Spacing.xLarge
@@ -46,7 +59,7 @@ enum PrototypeLayout {
     static let inset = PlozzTheme.Spacing.xLarge
     static let stationSize: CGFloat = 96
     static let controlHeight: CGFloat = 56
-    static let guideFontSize: CGFloat = 26
+    static var guideFontSize: CGFloat { LiveTVGlassLayout.active.cellFontSize }
     static let sectionFontSize: CGFloat = 22
     #else
     static let inset = PlozzTheme.Spacing.medium
@@ -55,8 +68,24 @@ enum PrototypeLayout {
     static let guideFontSize: CGFloat = 16
     static let sectionFontSize: CGFloat = 14
     #endif
+    #if os(tvOS)
+    // The Liquid Glass guide: 82 pt rows and a 252 pt channel plate.
+    static var rowHeight: CGFloat { LiveTVGlassLayout.active.rowHeight }
+    static var stationColumnWidth: CGFloat { LiveTVGlassLayout.active.plateWidth }
+    /// The plate's channel-number column, its leading inset, and the ruler label metrics.
+    /// Fits five tabular digits at 25 pt after shrinking to 0.8 (about 61 pt), so a number never truncates.
+    static var plateNumberWidth: CGFloat { LiveTVGlassLayout.active.plateNumberWidth }
+    static var plateLeadingInset: CGFloat { LiveTVGlassLayout.active.plateLeadingInset }
+    static var plateLogoTrailingInset: CGFloat { LiveTVGlassLayout.active.plateLogoTrailingInset }
+    static let cellInset: CGFloat = 24
+    static var rulerFontSize: CGFloat { LiveTVGlassLayout.active.rulerFontSize }
+    static let rulerLabelInset: CGFloat = 6
+    #else
     static let rowHeight = stationSize + rowInset * 2
     static let stationColumnWidth = stationSize * 1.75 + rowInset * 2
+    /// Programme text inset inside a cell.
+    static let cellInset = rowInset
+    #endif
     static var guideShape: UnevenRoundedRectangle {
         #if os(tvOS)
         let bottom: CGFloat = 0
@@ -88,10 +117,17 @@ enum PrototypeLayout {
     static let rulerGap: CGFloat = 4
     #else
     static let sectionLabelHeight: CGFloat = 44
-    static let rulerHeight: CGFloat = 44
     static let sectionLabelGap: CGFloat = rowGap
     static let toolbarGuideGap: CGFloat = sectionGap
+    #if os(tvOS)
+    // The ruler is 52 pt tall (50 × 0.75 at 4K) and the first row starts `rulerRowGap` (14, 4K 10.5) under it: the
+    // list's own 8 pt lead-in (`smallGap`) plus this 6 pt gap.
+    static var rulerHeight: CGFloat { LiveTVGlassLayout.active.rulerHeight }
+    static var rulerGap: CGFloat { LiveTVGlassLayout.active.rulerRowGap - smallGap }
+    #else
+    static let rulerHeight: CGFloat = 44
     static let rulerGap: CGFloat = gap
+    #endif
     #endif
     static let compactStationWidth: CGFloat = 88
     static let compactRowHeight: CGFloat = 64
@@ -131,7 +167,12 @@ enum PrototypeLayout {
     /// How much programme time the visible timeline spans: two half-hour slots
     /// on a phone, four elsewhere.
     static func viewportSeconds(for width: CGFloat) -> TimeInterval {
-        isCompact(width) ? 3_600 : 7_200
+        if isCompact(width) { return 3_600 }
+        #if os(tvOS)
+        return LiveTVGlassLayout.active.windowSeconds
+        #else
+        return 7_200
+        #endif
     }
 
     /// The scrollable guide starts with six hours whatever the viewport, and
@@ -227,9 +268,18 @@ extension LiveTVPrototypeSort {
 
 struct PrototypeStationMark: View {
     let channel: LiveTVPrototypeChannel
+    /// Supplies the user's or TMDB's logo in place of the provider's, when the host provides a model.
+    @Environment(LiveTVPrototypeModel.self) private var logoModel: LiveTVPrototypeModel?
     var size: CGFloat = PrototypeLayout.stationSize
     var plateSize: CGSize? = nil
     var cornerRadius: CGFloat = PrototypeLayout.logoRadius
+    /// The guide's channel column draws the provider logo straight on the row.
+    var usesBareLogo = false
+    /// The 4K word beside the logo's top-right corner.
+    var qualityBadge: String?
+    /// The IPTV guide row: the identity, theme and glyph come from what the sync writer committed, read from memory only.
+    var usesSyncedMarks = false
+    @Environment(\.liveTVGuideStationMarks) private var stationMarks
 
     private var dimensions: CGSize {
         plateSize ?? CGSize(width: size * 1.75, height: size)
@@ -240,12 +290,114 @@ struct PrototypeStationMark: View {
     }
 
     var body: some View {
+        let synced = usesSyncedMarks ? stationMarks.read(channel) : .unsynced
+        if synced != .unsynced {
+            syncedMark(synced)
+        } else {
+            modelMark
+        }
+    }
+
+    /// No effective-logo lookup, placeholder screening, sports parsing, loader or disk: a miss draws the channel name.
+    @ViewBuilder
+    private func syncedMark(_ read: LiveTVGuideStationMarkRead) -> some View {
+        switch read {
+        case .glyph(let symbol):
+            PrototypeSportsGlyph(symbol: symbol, size: dimensions, cornerRadius: cornerRadius, bare: usesBareLogo)
+        case .logo(let identity, let regionLabel):
+            ChannelLogoArtwork(
+                name: channel.name, logoURL: identity.url, size: dimensions,
+                cornerRadius: cornerRadius, artworkInset: artworkInset,
+                style: usesBareLogo ? .bare(qualityBadge: qualityBadge) : .plate,
+                logoNeedsDarkBackground: identity.providerRequestsDarkBackground,
+                regionLabel: usesBareLogo && qualityBadge == nil ? regionLabel : nil,
+                preparedArtworkCache: stationMarks.cache
+            )
+        case .name, .unsynced:
+            Text(verbatim: channel.name)
+                .font(.system(size: max(10, dimensions.height * 0.23), weight: .semibold))
+                .foregroundStyle(.white.opacity(0.88))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
+                .padding(.horizontal, 6)
+                .frame(width: dimensions.width, height: dimensions.height)
+        }
+    }
+
+    @ViewBuilder
+    private var modelMark: some View {
+        switch logoModel?.sportsComposition(for: channel) {
+        case .twoCrests?, .oneCrest?:
+            // The crests are drawn by the channel panel's matchup card; the plate keeps the league badge.
+            artwork
+        case .broadcaster(_, let glyph)?:
+            artwork.overlay(alignment: .bottomTrailing) {
+                if let glyph { PrototypeSportsGlyphChip(symbol: glyph.symbolName, plateHeight: dimensions.height) }
+            }
+        case .leagueBadge?, .glyph?:
+            if let symbol = logoModel?.sportsGlyphSymbol(for: channel) {
+                PrototypeSportsGlyph(symbol: symbol, size: dimensions, cornerRadius: cornerRadius, bare: usesBareLogo)
+            } else {
+                artwork
+            }
+        case .text?, nil:
+            artwork
+        }
+    }
+
+    private var artwork: some View {
         ChannelLogoArtwork(
-            name: channel.name, logoURL: channel.logoURL, size: dimensions,
+            name: channel.name,
+            logoURL: logoModel.map { $0.effectiveLogoURL(for: channel) } ?? channel.displayedLogoURL, size: dimensions,
             cornerRadius: cornerRadius, artworkInset: artworkInset,
             plozzChannelID: channel.source == .plozz ? channel.id : nil,
-            plozzChannelMood: channel.plozzChannelMood
+            plozzChannelMood: channel.plozzChannelMood,
+            style: usesBareLogo ? .bare(qualityBadge: qualityBadge) : .plate,
+            logoNeedsDarkBackground: channel.logoNeedsDarkBackground,
+            placeholderScreeningKey: logoModel?.placeholderScreeningKey(for: channel),
+            regionLabel: usesBareLogo && qualityBadge == nil ? logoModel?.regionLabel(for: channel) : nil
         )
+    }
+}
+
+/// A sport symbol drawn white and fitted, never stretched, for an event channel with no logo.
+struct PrototypeSportsGlyph: View {
+    let symbol: String
+    let size: CGSize
+    let cornerRadius: CGFloat
+    let bare: Bool
+
+    var body: some View {
+        Image(systemName: symbol)
+            .resizable()
+            .scaledToFit()
+            .foregroundStyle(.white)
+            .padding(min(size.width, size.height) * 0.18)
+            .frame(width: size.width, height: size.height)
+            .background {
+                if !bare {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).fill(.white.opacity(0.12))
+                }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+/// The sport glyph in the corner of a broadcaster's logo (composition "broadcaster logo + sport glyph").
+struct PrototypeSportsGlyphChip: View {
+    let symbol: String
+    let plateHeight: CGFloat
+
+    var body: some View {
+        Image(systemName: symbol)
+            .resizable()
+            .scaledToFit()
+            .foregroundStyle(.white)
+            .padding(plateHeight * 0.06)
+            .frame(width: plateHeight * 0.36, height: plateHeight * 0.36)
+            .background(Circle().fill(.black.opacity(0.55)))
+            .accessibilityHidden(true)
     }
 }
 
@@ -369,12 +521,22 @@ struct PrototypeGuideSurface: View {
     @Environment(\.themePalette) private var palette
     @Environment(\.gradientBackgroundsEnabled) private var gradientEnabled
 
+    /// The tvOS guide sits flat on the app background; only the accessibility
+    /// fallback below gets a surface.
+    private static var isFlat: Bool {
+        #if os(tvOS)
+        true
+        #else
+        false
+        #endif
+    }
+
     var body: some View {
         Group {
             if reduceTransparency || contrast == .increased {
                 Color.clear.plozzSurface(.raised, cornerRadius: 0)
                     .clipShape(PrototypeLayout.guideShape)
-            } else if gradientEnabled {
+            } else if gradientEnabled || Self.isFlat {
                 Color.clear
             } else {
                 PrototypeLayout.guideShape
@@ -415,10 +577,23 @@ struct PrototypeControlSurface: View {
     }
 }
 
+private struct ChangeChannelLogoKey: EnvironmentKey {
+    static let defaultValue: ((LiveTVPrototypeChannel) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    /// Opens the Change Logo sheet for a channel; `nil` where the host offers none.
+    var changeChannelLogo: ((LiveTVPrototypeChannel) -> Void)? {
+        get { self[ChangeChannelLogoKey.self] }
+        set { self[ChangeChannelLogoKey.self] = newValue }
+    }
+}
+
 enum PrototypeSheet: Identifiable {
     case filters, sources, guideTime, addSource, addPlaylist, serverSetup, multiviewFavorites, organization
     case program(LiveTVPrototypeProgram)
     case diagnostics(PlaybackDiagnosticReport)
+    case changeLogo(LiveTVPrototypeChannel)
 
     var id: String {
         switch self {
@@ -432,6 +607,8 @@ enum PrototypeSheet: Identifiable {
         case .multiviewFavorites: "multiview-favorites"
         case .program(let program): program.id
         case .diagnostics: "diagnostics"
+        case .changeLogo(let channel): "change-logo-\(channel.id)"
         }
     }
 }
+

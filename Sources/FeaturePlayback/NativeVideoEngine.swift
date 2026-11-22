@@ -207,6 +207,11 @@ public final class NativeVideoEngine: VideoEngine {
         #endif
     }
 
+    public var decodedVideoHeight: Int? {
+        guard let size = player?.currentItem?.presentationSize, size.height.isFinite, size.height > 0 else { return nil }
+        return Int(size.height.rounded())
+    }
+
     public var videoAspectRatio: Double? {
         if let size = player?.currentItem?.presentationSize,
            size.width > 0,

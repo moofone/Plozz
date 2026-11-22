@@ -9,7 +9,111 @@ import XCTest
 
 @MainActor
 final class LiveTVGuideRowLayoutTests: XCTestCase {
+    override func setUp() { super.setUp(); LiveTVGlassLayout.override = .hd1080 }
+    override func tearDown() { LiveTVGlassLayout.override = nil; super.tearDown() }
+
     private let start = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func channel(name: String, logo: String?, source: LiveTVPrototypeSource = .iptv) -> LiveTVPrototypeChannel {
+        LiveTVPrototypeChannel(
+            id: name, number: 7, name: name, category: "News", symbol: "tv", accent: 0, source: source,
+            tagline: "", logoURL: logo.flatMap(URL.init(string:)))
+    }
+
+    func testChannelWithOnlyAProviderLogoDrawsItsNameAsText() {
+        let provider = channel(name: "AMC", logo: "https://logos.example/amc.png")
+        XCTAssertTrue(PrototypeGuidePlateContent.drawsNameAsMark(provider, logoURL: provider.displayedLogoURL))
+        XCTAssertTrue(PrototypeGuidePlateContent.drawsNameAsMark(channel(name: "AMC", logo: nil), logoURL: nil))
+        XCTAssertFalse(PrototypeGuidePlateContent.drawsNameAsMark(
+            channel(name: "Plozz", logo: nil, source: .plozz), logoURL: nil))
+        XCTAssertFalse(PrototypeGuidePlateContent.drawsNameAsMark(
+            channel(name: "E!", logo: nil), logoURL: URL(string: "https://commons.example/e.svg")))
+    }
+
+    func testNameMarkGivesUpTheFourKWordsRoomAndBreaksAfterSlashes() {
+        XCTAssertEqual(PrototypeGuidePlateContent.nameMaxWidth(zoneWidth: 150, hasBadge: false, badgeRoom: 46), 142)
+        XCTAssertEqual(PrototypeGuidePlateContent.nameMaxWidth(zoneWidth: 150, hasBadge: true, badgeRoom: 46), 96)
+        XCTAssertEqual(PrototypeGuidePlateContent.nameMaxWidth(zoneWidth: 10, hasBadge: true, badgeRoom: 46), 1)
+        XCTAssertEqual(PrototypeGuidePlateContent.breakableName("FOX/NBC"), "FOX/\u{200B}NBC")
+    }
+
+    func testChannelNumbersOfEveryWidthFitTheNumberColumnAtBothSizes() {
+        // The number draws at 25 pt (reference) medium with tabular digits and may shrink to PrototypeGuidePlateContent.numberMinimumScale.
+        for layout in [LiveTVGlassLayout.hd1080, .uhd4K] {
+            LiveTVGlassLayout.override = layout
+            let scale = layout.rowHeight / 82
+            let font = UIFont.monospacedDigitSystemFont(ofSize: 25 * scale, weight: .medium)
+            for digits in 1...6 {
+                let widest = String(repeating: "8", count: digits)
+                let width = (widest as NSString).size(withAttributes: [.font: font]).width
+                let column = PrototypeGuidePlateContent.numberColumnWidth(
+                    digits: digits, scale: scale, layoutWidth: PrototypeLayout.plateNumberWidth * scale)
+                XCTAssertLessThanOrEqual(
+                    width * PrototypeGuidePlateContent.numberMinimumScale, column, "\(digits) digits at \(layout.rowHeight) pt rows")
+                XCTAssertGreaterThanOrEqual(column, PrototypeLayout.plateNumberWidth * scale)
+            }
+        }
+    }
+
+    func testAFiveDigitNumberWidensTheColumnOnlyWhereTheLayoutIsTooNarrow() {
+        let narrow = PrototypeGuidePlateContent.numberColumnWidth(digits: 5, scale: 0.677, layoutWidth: 36.75)
+        XCTAssertGreaterThan(narrow, 36.75)
+        XCTAssertEqual(PrototypeGuidePlateContent.numberColumnWidth(digits: 2, scale: 0.677, layoutWidth: 36.75), 36.75)
+        XCTAssertEqual(PrototypeGuidePlateContent.numberColumnWidth(digits: 5, scale: 1, layoutWidth: 64), 64)
+    }
+
+    func testHiddenChannelNumbersRemoveTheGuideRowsNumberColumnAndShownOnesKeepIt() {
+        let scale: CGFloat = 1
+        let layoutWidth = PrototypeLayout.plateNumberWidth * scale
+        XCTAssertEqual(
+            PrototypeGuidePlateContent.numberColumn(showsNumber: false, digits: 5, scale: scale, layoutWidth: layoutWidth), 0)
+        XCTAssertEqual(
+            PrototypeGuidePlateContent.numberColumn(showsNumber: true, digits: 2, scale: scale, layoutWidth: layoutWidth),
+            layoutWidth)
+        XCTAssertFalse(LiveTVPrototypeModel(channels: []).showsChannelNumbers, "Numbers are hidden by default")
+    }
+
+    func testTheChannelPanelAlwaysShowsTheNumberWhateverTheSetting() {
+        let model = LiveTVPrototypeModel(channels: [])
+        model.showsChannelNumbers = false
+        XCTAssertEqual(LiveTVGlassChannelPanelContent.numberText(forChannelNumber: 42, isEvent: false), "42")
+        model.showsChannelNumbers = true
+        XCTAssertEqual(LiveTVGlassChannelPanelContent.numberText(forChannelNumber: 42, isEvent: false), "42")
+        XCTAssertEqual(LiveTVGlassChannelPanelContent.numberText(forChannelNumber: 42, isEvent: true), "")
+    }
+
+    func testTheModelReportsTheWidestChannelNumberOfTheLineup() {
+        let lineup = [7, 16_939, 120].map {
+            LiveTVPrototypeChannel(id: "c\($0)", number: $0, name: "Channel \($0)", category: "x", symbol: "tv", accent: 0, source: .iptv, tagline: "")
+        }
+        XCTAssertEqual(LiveTVPrototypeModel(channels: lineup).widestChannelNumberDigits, 5)
+    }
+
+    func testTheFourKWordHangsOutsideTheNamesTopTrailingCorner() throws {
+        final class Frames: @unchecked Sendable { var text = CGRect.zero; var badge = CGRect.zero }
+        let frames = Frames()
+        func probe(_ frame: @escaping (CGRect) -> Void) -> some View {
+            GeometryReader { proxy in Color.clear.onAppear { frame(proxy.frame(in: .global)) } }
+        }
+        for name in ["AMC", "E!", "BBC CANADA HD (CA)"] {
+            let content = PrototypeNameWithBadge(maxWidth: 120, badgeRise: 3) {
+                Text(name).font(.system(size: 19, weight: .semibold)).background(probe { frames.text = $0 })
+                Color.red.frame(width: 24, height: 14).background(probe { frames.badge = $0 })
+            }
+            .frame(width: 200, height: 82)
+            let host = UIHostingController(rootView: content)
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            host.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertGreaterThan(frames.text.width, 0, name)
+            XCTAssertEqual(frames.badge.minX, frames.text.maxX, accuracy: 0.5, "\(name): the word starts where the text ends")
+            XCTAssertEqual(frames.badge.minY, frames.text.minY - 3, accuracy: 0.5, "\(name): the word rises above the text's top edge")
+            XCTAssertFalse(frames.badge.intersects(frames.text.insetBy(dx: 0.5, dy: 0.5)), name)
+            XCTAssertLessThanOrEqual(frames.text.width, 120.5, name)
+        }
+    }
 
     func testRestoredTimelineOffsetRetainsEnoughGuideHours() {
         for width: CGFloat in [320, 1_000] {
@@ -247,7 +351,7 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
         #endif
     }
 
-    func testGuideExtendsToTrailingScreenEdgeWithoutMovingItsLeadingControls() {
+    func testGuideExtendsToTrailingScreenEdgeExceptBesideTheRail() {
         for searching in [false, true] {
             for navigationInset: CGFloat in [0, 112] {
                 let layout = PrototypePreviewLayout(
@@ -256,11 +360,16 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
                     navigationInset: navigationInset, isSearching: searching
                 )
                 #if os(tvOS)
-                XCTAssertEqual(layout.contentFrame.maxX + layout.guideTrailingExtension, layout.bounds.maxX)
-                XCTAssertEqual(
-                    layout.contentFrame.minX - layout.bounds.minX,
-                    32 + (navigationInset > 0 ? PrototypeLayout.inset : 0) + navigationInset
-                )
+                if navigationInset > 0 {
+                    // Beside the rail the guide sits on the mockup's 144 / 80 screen edges.
+                    XCTAssertEqual(layout.guideTrailingExtension, 0)
+                    XCTAssertEqual(layout.contentFrame.maxX, layout.bounds.maxX - 80)
+                    XCTAssertEqual(
+                        layout.contentFrame.minX - layout.bounds.minX, layout.guideScreenLeading)
+                } else {
+                    XCTAssertEqual(layout.contentFrame.maxX + layout.guideTrailingExtension, layout.bounds.maxX)
+                    XCTAssertEqual(layout.contentFrame.minX - layout.bounds.minX, 32)
+                }
                 XCTAssertEqual(PrototypeLayout.guideTrailingInset, PrototypeLayout.guideInset)
                 XCTAssertEqual(PrototypeLayout.guideShape.cornerRadii.topTrailing, 0)
                 #else
@@ -276,11 +385,14 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
             .sizeThatFits(in: CGSize(width: 500, height: 500))
         XCTAssertEqual(size.height, PrototypeLayout.stationSize, accuracy: 0.5)
         XCTAssertEqual(size.width, PrototypeLayout.stationSize * 1.75, accuracy: 0.5)
-        XCTAssertEqual(PrototypeLayout.stationColumnWidth - size.width, PrototypeLayout.rowInset * 2, accuracy: 0.5)
         #if os(tvOS)
+        // The Liquid Glass plate is 204 pt: the number column, then the logo.
+        XCTAssertEqual(PrototypeLayout.stationColumnWidth, 204)
         XCTAssertGreaterThan(size.width, 126)
         XCTAssertGreaterThan(size.height, 72)
         XCTAssertLessThan(PrototypeLayout.stationColumnWidth, 280)
+        #else
+        XCTAssertEqual(PrototypeLayout.stationColumnWidth - size.width, PrototypeLayout.rowInset * 2, accuracy: 0.5)
         #endif
     }
 
@@ -370,8 +482,13 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
             points: [(300, 0), (300, 1), (300, 40), (300, 200), (300, 398)]
         )
         XCTAssertEqual(PrototypeLayout.minimumGuideOpacity, 0.05)
+        #if os(tvOS)
+        // The Liquid Glass guide is flat on the app background.
+        XCTAssertTrue(samples.allSatisfy { $0 == 0 })
+        #else
         XCTAssertTrue(samples.allSatisfy { $0 >= 12 })
         XCTAssertLessThan(try XCTUnwrap(samples.first), 25)
+        #endif
     }
 
     func testGradientGuideAvoidsASecondPageWashButPreservesSolidAccessibilitySurface() throws {
@@ -457,6 +574,9 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
         }
     }
 
+    // The tvOS Liquid Glass guide has no always-on elapsed fill: only the focused
+    // on-now cell shows progress (PrototypeGuideGlassTests).
+    #if !os(tvOS)
     func testNoGuideRowFillTracksVisibleTimeAndClampsInBothDirections() throws {
         let width: CGFloat = 1_000
         let timelineWidth = PrototypeLayout.timelineWidth(for: width)
@@ -517,6 +637,7 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
         )
         XCTAssertEqual(samples, [0])
     }
+    #endif
 
     func testElapsedProgramFillHasASubtleLeadingEdgeAndClampsToTheCell() throws {
         for (elapsed, expected) in [
@@ -652,7 +773,11 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
         }
         XCTAssertEqual(PrototypeLayout.programInset, 0)
         XCTAssertEqual(PrototypeLayout.programRadius, PrototypeLayout.rowRadius)
+        #if os(tvOS)
+        XCTAssertEqual(PrototypeLayout.rowGap, 10)
+        #else
         XCTAssertGreaterThanOrEqual(PrototypeLayout.rowGap, 16)
+        #endif
     }
 
     func testNavigationRailInsetsContentWithoutShrinkingVideo() {
@@ -663,11 +788,15 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
         XCTAssertEqual(rail.bounds, plain.bounds)
         XCTAssertEqual(rail.videoFrame, plain.videoFrame)
         #if os(tvOS)
-        XCTAssertEqual(rail.contentFrame.minX - plain.contentFrame.minX, 112 + PrototypeLayout.inset, accuracy: 0.5)
+        XCTAssertEqual(rail.contentFrame.minX - rail.bounds.minX, rail.guideScreenLeading, accuracy: 0.5)
         #else
         XCTAssertEqual(rail.contentFrame.minX - plain.contentFrame.minX, 112, accuracy: 0.5)
         #endif
+        #if os(tvOS)
+        XCTAssertEqual(rail.contentFrame.maxX, rail.bounds.maxX - 80, accuracy: 0.5)
+        #else
         XCTAssertEqual(rail.contentFrame.maxX, plain.contentFrame.maxX, accuracy: 0.5)
+        #endif
     }
 
     func testExtraLeadingClearanceOnlyAppliesToVisiblePinnedNavigation() {
@@ -686,8 +815,8 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
                 pinned.contentFrame.minX - normal.contentFrame.minX,
                 64 + PrototypeLayout.inset
             )
-            XCTAssertEqual(pinned.contentFrame.minX - pinned.bounds.minX, 32 + PrototypeLayout.inset + 64)
-            XCTAssertEqual(pinned.contentFrame.maxX, normal.contentFrame.maxX)
+            XCTAssertEqual(pinned.contentFrame.minX - pinned.bounds.minX, pinned.guideScreenLeading)
+            XCTAssertEqual(pinned.contentFrame.maxX, pinned.bounds.maxX - 80)
             XCTAssertEqual(pinned.videoFrame, normal.videoFrame)
             XCTAssertEqual(hiddenForSearch.contentFrame, normal.contentFrame)
         }
@@ -727,13 +856,19 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
         let listHeight = layout.contentFrame.height - layout.heroHeight - toolbarAndRuler - spacing
         let visibleRows = listHeight / (PrototypeLayout.rowHeight + PrototypeLayout.rowGap)
         XCTAssertGreaterThanOrEqual(visibleRows, 4)
-        XCTAssertLessThan(visibleRows, 5)
-        XCTAssertGreaterThanOrEqual(PrototypeLayout.rowHeight, 100)
+        XCTAssertEqual(PrototypeLayout.rowHeight, 82)
         #endif
     }
 
     func testWideGuideReservesSpaceForPinnedControlsWithoutShrinkingVideo() {
-        for size in [CGSize(width: 1_920, height: 1_080), CGSize(width: 1_024, height: 768)] {
+        #if os(tvOS)
+        // The glass hero is as tall as it takes to put the guide at y 358, so a canvas
+        // smaller than an Apple TV's has no room for the sidebar.
+        let sizes = [CGSize(width: 1_920, height: 1_080)]
+        #else
+        let sizes = [CGSize(width: 1_920, height: 1_080), CGSize(width: 1_024, height: 768)]
+        #endif
+        for size in sizes {
             let layout = PrototypePreviewLayout(size: size)
             XCTAssertGreaterThan(layout.sidebarWidth, 0)
             XCTAssertEqual(
@@ -806,10 +941,15 @@ final class LiveTVGuideRowLayoutTests: XCTestCase {
         if UIDevice.current.userInterfaceIdiom != .phone {
             XCTAssertEqual(PrototypeLayout.rowRadius, PrototypeLayout.logoRadius + PrototypeLayout.rowInset)
         }
+        #elseif os(tvOS)
+        XCTAssertEqual(PrototypeLayout.rowRadius, 24)
+        XCTAssertEqual(PrototypeLayout.rowHeight, 82)
         #else
         XCTAssertEqual(PrototypeLayout.rowRadius, PrototypeLayout.logoRadius + PrototypeLayout.rowInset)
         #endif
+        #if !os(tvOS)
         XCTAssertEqual(PrototypeLayout.rowHeight, PrototypeLayout.stationSize + PrototypeLayout.rowInset * 2)
+        #endif
         XCTAssertEqual(PrototypeLayout.stationArtworkInset, PrototypeLayout.guideInset + 8)
         XCTAssertEqual(
             PrototypeLayout.controlGroupRadius,
@@ -955,6 +1095,10 @@ private struct GuideRowFixture: View {
     var nowOffset: TimeInterval = 2_500
     var width: CGFloat = 1_400
     var timelineOffset: CGFloat = 0
+    var usesHostedTimeline = false
+    #if os(tvOS)
+    @State private var scroll = PrototypeGuideScrollController()
+    #endif
     @FocusState private var focus: PrototypeBrowseFocus?
 
     private let channel = LiveTVPrototypeChannel(
@@ -962,7 +1106,7 @@ private struct GuideRowFixture: View {
         symbol: "tv", accent: 0, source: .iptv, tagline: ""
     )
 
-    var body: some View {
+    private var row: PrototypeGuideRow {
         PrototypeGuideRow(
             channel: channel, programs: programs, start: start,
             now: start.addingTimeInterval(nowOffset), width: width,
@@ -971,6 +1115,30 @@ private struct GuideRowFixture: View {
             toggleFavorite: {}, tune: {}, details: { _ in },
             controls: {}, top: {}, goToNow: {}
         )
+    }
+
+    var body: some View {
+        #if os(tvOS)
+        if usesHostedTimeline {
+            PrototypeNativeGuideList(
+                rows: [.init(channelID: channel.id)], scrollController: scroll,
+                scrolled: { _, _ in }, revision: { _ in 0 },
+                timelineWidth: PrototypeLayout.timelineContentWidth(for: width),
+                pinnedWidth: PrototypeLayout.stationWidth(for: width) + PrototypeLayout.columnGap,
+                initialTimelineOffset: timelineOffset
+            ) { _ in
+                row.inPlane(.stationary).frame(maxHeight: .infinity, alignment: .top)
+            } scrollingContent: { _ in
+                row.inPlane(.programmes).frame(maxHeight: .infinity, alignment: .top)
+            }
+        } else if programs.isEmpty {
+            row.inPlane(.stationary)
+        } else {
+            row.inPlane(.programmes)
+        }
+        #else
+        row
+        #endif
     }
 }
 

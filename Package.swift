@@ -51,6 +51,7 @@ let package = Package(
         .library(name: "CoreTrackerAuth", targets: ["CoreTrackerAuth"]),
         .library(name: "WetrakrService", targets: ["WetrakrService"]),
         .library(name: "SeerService", targets: ["SeerService"]),
+        .library(name: "SchedulesDirectService", targets: ["SchedulesDirectService"]),
         .library(name: "SimklService", targets: ["SimklService"]),        .library(name: "AniListService", targets: ["AniListService"]),
         .library(name: "MALService", targets: ["MALService"]),
         .library(name: "LastFmService", targets: ["LastFmService"]),
@@ -418,6 +419,10 @@ let package = Package(
             dependencies: ["CoreModels", "CoreNetworking"]
         ),
         .target(
+            name: "SchedulesDirectService",
+            dependencies: ["CoreModels", "CoreNetworking", "CoreSecureStore"]
+        ),
+        .target(
             name: "SimklService",
             dependencies: ["CoreModels", "CoreNetworking", "CoreSecureStore"]
         ),
@@ -500,15 +505,15 @@ let package = Package(
         ),
         .target(
             name: "FeatureLiveTVCore",
-            dependencies: ["CoreModels", "CoreNetworking"]
+            dependencies: ["CoreModels", "CoreNetworking", "MetadataKit"]
         ),
         .target(
             name: "FeatureLiveTV",
-            dependencies: ["CoreModels", "CoreUI", "FeatureLiveTVCore"]
+            dependencies: ["CoreModels", "CoreNetworking", "CoreUI", "FeatureLiveTVCore", "MetadataKit"]
         ),
         .target(
             name: "FeatureSettings",
-            dependencies: ["CoreModels", "CoreUI", "CoreNetworking", "CrashReporting", "FeatureProfiles", "TraktService", "WetrakrService", "SeerService", "SimklService", "AniListService", "MALService", "LastFmService"]
+            dependencies: ["CoreModels", "CoreUI", "CoreNetworking", "CrashReporting", "FeatureProfiles", "TraktService", "WetrakrService", "SeerService", "SchedulesDirectService", "SimklService", "AniListService", "MALService", "LastFmService"]
         ),
         .target(
             name: "FeatureProfiles",
@@ -1034,7 +1039,7 @@ let package = Package(
         .testTarget(
             name: "AppRuntimeTests",
             dependencies: [
-                "AppRuntime", "CoreModels", "FeatureAuthCore", "CrashReporting", "FeatureHomeCore",
+                "AppRuntime", "CoreModels", "MetadataKit", "FeatureAuthCore", "CrashReporting", "FeatureHomeCore",
                 .target(name: "FeatureHome", condition: .when(platforms: [.tvOS])),
                 "FeatureSyncCloud", "TestSupportPerformance"
             ]
@@ -1049,7 +1054,8 @@ let package = Package(
         ),
         .testTarget(
             name: "CoreUITests",
-            dependencies: ["CoreUI", "CoreModels", "TopShelfKit", "TestSupportPerformance"]
+            dependencies: ["CoreUI", "CoreModels", "TopShelfKit", "TestSupportPerformance"],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "CoreNetworkingTests",
@@ -1108,6 +1114,10 @@ let package = Package(
             dependencies: ["MALService", "CoreModels", "CoreNetworking", "TestSupportNetworking"]
         ),
         .testTarget(
+            name: "SchedulesDirectServiceTests",
+            dependencies: ["SchedulesDirectService", "CoreModels", "CoreNetworking"]
+        ),
+        .testTarget(
             name: "SeerServiceTests",
             dependencies: ["SeerService", "CoreModels", "CoreNetworking"]
         ),
@@ -1137,11 +1147,11 @@ let package = Package(
         ),
         .testTarget(
             name: "FeatureLiveTVCoreTests",
-            dependencies: ["CoreModels", "FeatureLiveTVCore", "TestSupportPerformance"]
+            dependencies: ["CoreModels", "FeatureLiveTVCore", "MetadataKit", "TestSupportPerformance"]
         ),
         .testTarget(
             name: "FeatureLiveTVTests",
-            dependencies: ["FeatureLiveTV", "FeatureLiveTVCore"]
+            dependencies: ["FeatureLiveTV", "FeatureLiveTVCore", "CoreModels", "CoreUI", "MetadataKit"]
         ),
         .testTarget(
             name: "FeatureProfilesTests",

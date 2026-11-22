@@ -8,10 +8,10 @@ final class IPTVChannelNameTests: XCTestCase {
             "|UK| Sky Sports 1", "Canal+ F H D", "## Fourth H D ##"
         ]
         XCTAssertEqual(IPTVChannelName.previewSamples(from: names), [
-            "## BBC One H D ##", "|UK| Sky Sports 1", "Canal+ F H D"
+            "BBC One HD", "|UK| Sky Sports 1", "Canal+ F H D"
         ])
         XCTAssertEqual(IPTVChannelName.previewSamples(from: names.prefix(4)), [
-            "## BBC One H D ##", "BBC: News"
+            "BBC One HD", "BBC: News"
         ])
     }
 

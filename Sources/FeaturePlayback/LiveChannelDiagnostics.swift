@@ -14,6 +14,9 @@ struct LiveChannelDiagnostics {
         case failure, startupTimeout, stallTimeout, ended, stop
         case initializationFailure, sourceReset, retune, retuneExhausted
         case tuneToFirstFrame
+        /// Audio plays, a video track exists, no frame decoded: the one software-decode retry.
+        case videoNoneDecodedRetry = "videoNoneDecoded retry=software"
+        case videoNoneDecoded
     }
 
     #if DEBUG

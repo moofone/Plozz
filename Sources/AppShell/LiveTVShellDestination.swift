@@ -55,6 +55,7 @@ struct LiveTVShellDestination: View {
 
     @Environment(ProfilesModel.self) private var profiles
     @Environment(LiveTVGuidePreparationModel.self) private var guidePreparation: LiveTVGuidePreparationModel?
+    @Environment(LiveTVExtraGuidesModel.self) private var extraGuides: LiveTVExtraGuidesModel?
     @Environment(NavigationStyleSettingsModel.self) private var navigationStyle: NavigationStyleSettingsModel?
     @Environment(GlassPerformanceModel.self) private var glassPerformance: GlassPerformanceModel?
     @Environment(DisplayVeilModel.self) private var displayVeil: DisplayVeilModel?
@@ -113,6 +114,7 @@ struct LiveTVShellDestination: View {
             navigationContent
                 .environment(profiles)
                 .environment(guidePreparation)
+                .environment(extraGuides)
                 .environment(navigationStyle)
                 .environment(glassPerformance)
                 .environment(displayVeil)
@@ -170,6 +172,7 @@ struct LiveTVShellDestination: View {
             sourceLoader: LiveTVCatalogStorage.loader(profileID: profileID, namespace: preferencesNamespace),
             profileID: profileID,
             preferencesNamespace: preferencesNamespace,
+            allowsManagingChannels: !profiles.activeProfile.isKids,
             libraryService: library.service,
             libraryHistory: library.history,
             libraryIssue: library.issue,
@@ -186,7 +189,7 @@ struct LiveTVShellDestination: View {
                 channelID: playback.channel.id,
                 title: playback.channel.name,
                 input: playback.input,
-                logoURL: playback.channel.logoURL,
+                logoURL: playback.channel.displayedLogoURL,
                 plozzChannelMood: playback.channel.plozzChannelMood,
                 makeEngine: {
                     library.makeEngine(
@@ -212,6 +215,10 @@ struct LiveTVShellDestination: View {
                 onPlaybackUpdate: playback.playbackUpdate,
                 onPlaybackFailed: playback.playbackFailed,
                 onVideoAspectRatioChange: playback.videoAspectRatioChanged,
+                onMeasuredResolution: { height in
+                    let key = playback.channel.qualityKey
+                    LiveChannelMeasuredQualityStore.shared.record(height: height, sourceID: key.sourceID, channelID: key.channelID)
+                },
                 onMultiview: playback.canOpenMultiview ? playback.openMultiview : nil,
                 outputGroup: liveOutputGroup,
                 outputID: playback.paneID,

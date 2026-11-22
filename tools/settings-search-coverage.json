@@ -2391,6 +2391,13 @@
       "reason": "Reviewed navigation, connection, credential, confirmation, recovery or content-management action; not a preference value.",
       "count": 4
     },
+    "Sources/FeatureSettings/LiveTVSettingsView.swift|LiveTVGuidePreferences|body|Button|\"Sync Now\"": {
+      "reason": "Immediate validation of the saved guide next to its indexed interval; not a separate preference.",
+      "covered_by": [
+        "live-guide-update"
+      ],
+      "count": 1
+    },
     "Sources/FeatureSettings/LiveTVSettingsView.swift|LiveTVGuidePreferences|body|Picker|\"Update guide automatically\"": {
       "reason": "The contextual interval Picker edits the indexed Update guide automatically row; live-guide-update owns search reveal and selection.",
       "covered_by": [

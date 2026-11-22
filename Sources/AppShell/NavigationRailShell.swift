@@ -48,6 +48,8 @@ struct NavigationRailShell<Content: View>: View {
         }
         .accessibilityElement(children: .contain)
         .ignoresSafeArea()
+        // The Live TV page and the rail's clock read the same layout tokens, recomputed on a display-mode change.
+        .liveTVGlassLayoutTracking()
     }
 }
 
@@ -194,6 +196,7 @@ private struct NavigationRailShellContent<Content: View>: View {
                         isEnabled: presentation.isEdgeNavigationEnabled(
                             searchResultsHaveFocus: pinnedSidebarInteraction.searchResultsHaveFocus
                         ) && !pinnedSidebarInteraction.heroHasFocus && !chrome.transitionSuppressesFocus
+                        && !pinnedSidebarInteraction.pageHoldsFocus
                     )
                     .frame(width: 0, height: 0)
                     .allowsHitTesting(false)
@@ -235,7 +238,7 @@ private struct NavigationRailShellContent<Content: View>: View {
                     )
                     // Keep the focus-request observer mounted while Search hides
                     // the collapsed rail, but exclude invisible rows from focus.
-                    .disabled(!presentation.isRailEnabled || chrome.transitionSuppressesFocus)
+                    .disabled(!presentation.isRailEnabled || chrome.transitionSuppressesFocus || pinnedSidebarInteraction.pageHoldsFocus)
                     .opacity(presentation.isRailVisible ? 1 : 0)
                     .animation(
                         reduceMotion || presentation.isRailVisible ? nil : .easeInOut(duration: 0.22),
@@ -297,6 +300,8 @@ private struct NavigationRailShellContent<Content: View>: View {
         }
         .onChange(of: railExpanded, initial: true) { _, expanded in
             onNavigationFocusChanged(expanded)
+            pinnedSidebarInteraction.setRailExpanded(expanded)
+            TVBackDiagnostics.notice("rail expanded=\(expanded) cause=\(isOpeningNavigation ? "shell request (Back or left edge)" : "focus")")
             HeroFocusDiagnostics.emit("sidebar.shell expanded=\(expanded) opening=\(isOpeningNavigation) waiting=\(destinationFocus.isWaiting)")
             isOpeningNavigation = false
             if !expanded && !isStartupEntry {
@@ -346,6 +351,7 @@ private struct NavigationRailShellContent<Content: View>: View {
         .onDisappear {
             if startupFocusAllowed { isStartupEntry = false }
             onNavigationFocusChanged(false)
+            pinnedSidebarInteraction.setRailExpanded(false)
             destinationFocus.cancel()
             contentFocusRequest = nil
             contentReturnFocus.clear()
@@ -361,6 +367,16 @@ private struct NavigationRailShellContent<Content: View>: View {
                 requestContentFocus(restoringPrevious: false)
                 return
             }
+            // Select on the destination that is already showing must always hand focus to the page. A panel left open by the
+            // page is closed first, and a request left pending by an earlier hand-off (one that never completed) is dropped, not
+            // waited on: `returnFocusToPage` ignores Select while either is outstanding, which is the "Select does nothing" case.
+            let closedPanel = pinnedSidebarInteraction.performPageBack()
+            let staleWaiting = destinationFocus.isWaiting
+            let staleContentRequest = contentFocusRequest != nil
+            TVBackDiagnostics.notice("select on current destination=\(destination.storageValue) closedPanel=\(closedPanel) staleWaiting=\(staleWaiting) staleContentRequest=\(staleContentRequest) pageHoldsFocus=\(pinnedSidebarInteraction.pageHoldsFocus) focus=\(TVBackDiagnostics.focusSummary())")
+            if staleWaiting { destinationFocus.cancel() }
+            contentFocusRequest = nil
+            pinnedSidebarInteraction.setPageHoldsFocus(false)
             returnFocusToPage()
             return
         }
@@ -431,7 +447,26 @@ private struct NavigationRailShellContent<Content: View>: View {
     }
 
     private func handleBack() {
-        guard !isBackHandoffInProgress else { return }
+        guard !isBackHandoffInProgress else {
+            TVBackDiagnostics.notice("shell handleBack ignored: handoff in progress")
+            return
+        }
+        // A panel inside the page (Live TV's menus) already spent this press closing itself.
+        guard !TVBackConsumption.wasJustConsumed() else {
+            TVBackDiagnostics.notice("shell handleBack ignored: a panel spent this press")
+            return
+        }
+        // The panel's own exit command may not have run first: the page closes its top panel here, and the panel's command then
+        // sees the spent press. Either order closes exactly one panel and never expands the rail.
+        if pinnedSidebarInteraction.performPageBack() {
+            TVBackDiagnostics.notice("shell handleBack handled by the page's panel")
+            return
+        }
+        guard !pinnedSidebarInteraction.pageHoldsFocus else {
+            TVBackDiagnostics.notice("shell handleBack ignored: the page still holds focus after closing a panel")
+            return
+        }
+        TVBackDiagnostics.notice("shell handleBack acts railExpanded=\(railExpanded) selection=\(String(describing: selection))")
         if railExpanded {
             onRequireHome()
             destinationFocus.begin(.home, focusTarget: .navigation)

@@ -49,8 +49,32 @@ public struct LiveTVGuideSource: Identifiable, Equatable, Sendable {
 
 public enum LiveTVGuideMatchMethod: Int, Codable, Comparable, Sendable {
     case displayName, providerName, verifiedAlias, nativeID, exactID, userConfirmed
+    /// The row's tvg-id names a station only in another letter case or with stray spaces (`ctvcalgary.ca` for `CTVCalgary.ca`).
+    /// Appended last so stored raw values stay; `trust` orders the cases.
+    case idCase
+    /// The row's name matched a station of a country that shares its feeds (a Canadian `CNN` reads `CNN.us`).
+    case foreignFeed
 
-    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.trust < rhs.trust }
+
+    private var trust: Double {
+        switch self {
+        case .foreignFeed: -1
+        case .idCase: Double(Self.exactID.rawValue) - 0.5
+        default: Double(rawValue)
+        }
+    }
+
+    /// The label the coverage log uses.
+    public var sourceLabel: String {
+        switch self {
+        case .exactID, .nativeID, .verifiedAlias: "id"
+        case .idCase: "id-case"
+        case .displayName, .providerName: "name"
+        case .foreignFeed: "name-foreign-feed"
+        case .userConfirmed: "override"
+        }
+    }
 }
 
 public struct LiveTVGuideMatch: Codable, Equatable, Sendable {

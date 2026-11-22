@@ -21,7 +21,9 @@ final class WetrakrAuthorizationTests: XCTestCase {
     func testBuildRolloutMatchesConfiguration() {
         XCTAssertTrue(RuntimeFeatureFlags.buildDefault.isEnabled(.universalWatchlist))
         XCTAssertTrue(RuntimeFeatureFlags.buildDefault.isEnabled(.wetrakr))
-        XCTAssertEqual(RuntimeFeatureFlags.buildDefault, .productionDefault)
+        var build = RuntimeFeatureFlags.buildDefault
+        build.set(.schedulesDirect, enabled: false)  // DEBUG-only research flag
+        XCTAssertEqual(build, .productionDefault)
     }
 
     func testDefaultConfigurationUsesBuildRollout() {

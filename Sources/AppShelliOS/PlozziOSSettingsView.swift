@@ -109,6 +109,7 @@ struct PlozziOSSettingsView: View {
         )
         .offlineStatusOverlay(appModel: appModel, palette: palette)
         .environment(appModel.guidePreparation)
+        .environment(appModel.extraGuides)
         .environment(\.themePalette, palette)
         .environment(\.colorScheme, palette.isLight ? .light : .dark)
         .tint(palette.primaryText)
@@ -398,7 +399,8 @@ private struct PlozziOSProfileSettingsPage: View {
                         settingsPreferences: preferences
                     ))
                 },
-                searchPage: searchPage ?? .liveTV
+                searchPage: searchPage ?? .liveTV,
+                schedulesDirectNamespace: appModel.profiles.activeNamespace
             )
             .id(appModel.profiles.activeProfile.id)
         case .libraries:
@@ -1821,6 +1823,13 @@ struct PlozziOSAccountDetailView: View {
             }
 
             SettingsSectionGroup {
+                if account.server.provider == .iptv {
+                    // Pending copy: label needs owner sign-off.
+                    Button("Rebuild library index", systemImage: "arrow.triangle.2.circlepath") {
+                        appModel.rebuildLibraryIndex(accountID: account.id)
+                    }
+                    .settingsActionRow()
+                }
                 if account.server.provider.supportsAccountReauthentication, let providerSetupRouter {
                     Button("Sign In Again", systemImage: "arrow.clockwise") {
                         providerSetupRouter.reauthenticationAccount = account

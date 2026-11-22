@@ -104,6 +104,7 @@ public struct SettingsView: View {
     private let onRemoveAccountEverywhere: (Account) -> Void
     private let offersRemoveEverywhere: Bool
     private let onRescanShare: (String) -> Void
+    private let onRebuildLibraryIndex: (String) -> Void
     private let onSignOutAll: () -> Void
     private let onResetToFirstRun: () -> Void
     private let onReviewSyncErasure: (() -> Void)?
@@ -211,6 +212,7 @@ public struct SettingsView: View {
         onRemoveAccountEverywhere: @escaping (Account) -> Void = { _ in },
         offersRemoveEverywhere: Bool = false,
         onRescanShare: @escaping (String) -> Void,
+        onRebuildLibraryIndex: @escaping (String) -> Void = { _ in },
         onSignOutAll: @escaping () -> Void,
         onResetToFirstRun: @escaping () -> Void,
         onReviewSyncErasure: (() -> Void)? = nil,
@@ -282,6 +284,7 @@ public struct SettingsView: View {
         self.onRemoveAccountEverywhere = onRemoveAccountEverywhere
         self.offersRemoveEverywhere = offersRemoveEverywhere
         self.onRescanShare = onRescanShare
+        self.onRebuildLibraryIndex = onRebuildLibraryIndex
         self.onSignOutAll = onSignOutAll
         self.onResetToFirstRun = onResetToFirstRun
         self.onReviewSyncErasure = onReviewSyncErasure
@@ -355,6 +358,7 @@ public struct SettingsView: View {
             onRemoveAccountEverywhere: onRemoveAccountEverywhere,
             offersRemoveEverywhere: offersRemoveEverywhere,
             onRescanShare: onRescanShare,
+            onRebuildLibraryIndex: onRebuildLibraryIndex,
             onSignOutAll: onSignOutAll,
             plexHomeUsersFetcher: plexHomeUsersFetcher,
             onSelectPlexHomeUser: onSelectPlexHomeUser,
@@ -1068,7 +1072,8 @@ public struct SettingsView: View {
                 preferencesStore: LiveTVPreferencesStore(
                     namespace: liveTVPreferencesNamespace
                 ),
-                sourceManagement: liveTVSources.map { destination in { destination.content(preferences: $0) } }
+                sourceManagement: liveTVSources.map { destination in { destination.content(preferences: $0) } },
+                schedulesDirectNamespace: liveTVPreferencesNamespace
             )
             .id(activeProfile.id)
         case .nightShift:

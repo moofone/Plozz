@@ -5,7 +5,7 @@ import XCTest
 
 final class FirstRunCloudIsolationTests: XCTestCase {
     private let schemas: [CloudSyncSchemaDescriptor] = [
-        .configV3, .trackerTokensV1, .mediaStateV1, .liveTVStateV1, .liveTVSourcesV1
+        .configV3, .trackerTokensV1, .mediaStateV1, .liveTVStateV1, .liveTVSourcesV1, .liveTVLogosV1
     ]
 
     func testEveryChannelIsIsolatedWithoutChangingItsRecordContract() {

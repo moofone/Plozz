@@ -14,34 +14,42 @@ public enum LiveTVGuideAutoUpdate {
     static let minimumWait: TimeInterval = 300
     static let firstRetry: TimeInterval = 900
 
+    /// The timer for callers with only a resolver. Runs through a private coordinator, so it behaves exactly as before.
     @MainActor
     public static func run(
-        accountIDs: [String], interval: TimeInterval, resolver: LiveTVServerProviderResolver,
+        accountIDs: [String], interval: TimeInterval, resolver: @escaping LiveTVServerProviderResolver,
         now: @escaping @Sendable () -> Date = Date.init,
         sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
     ) async {
         guard interval > 0, !accountIDs.isEmpty else { return }
+        let coordinator = LiveTVGuideRefreshCoordinator(scope: .init(
+            accountIDs: accountIDs, authorizationID: "", isAuthorized: true, resolver: resolver
+        ))
+        await run(coordinator: coordinator, interval: interval, now: now, sleep: sleep)
+    }
+
+    /// The timer over a shared coordinator: each pass joins or starts the same run a manual request would, so the two
+    /// never overlap. The timer keeps its own failure count; a manual request never resets it or its next wake.
+    @MainActor
+    public static func run(
+        coordinator: LiveTVGuideRefreshCoordinator, interval: TimeInterval,
+        now: @escaping @Sendable () -> Date = Date.init,
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
+    ) async {
+        guard interval > 0 else { return }
         do {
             try await sleep(startDelay)
             var failures = 0
             while true {
-                var next: Date?
-                var failed = false
-                for id in accountIDs {
-                    try Task.checkCancellation()
-                    // Resolved again on every pass: only the current profile's authorized accounts.
-                    guard let context = resolver(id), context.kind == .iptv else { continue }
-                    do {
-                        if let due = try await context.provider.updateSavedLiveTVGuide() {
-                            next = min(next ?? due, due)
-                        }
-                    } catch {
-                        try Task.checkCancellation()
-                        failed = true
-                        PlozzLog.app.error("Automatic guide update failed; saved listings retained")
-                    }
-                }
-                try await sleep(wait(next: next, failed: failed, failures: &failures, interval: interval, now: now()))
+                try Task.checkCancellation()
+                let result = await coordinator.refresh(.scheduled)
+                try Task.checkCancellation()
+                // Retired (profile, accounts, authorization or foreground changed): the owner restarts the timer.
+                guard let result else { return }
+                if result.failed { PlozzLog.app.error("Automatic guide update failed; saved listings retained") }
+                try await sleep(wait(
+                    next: result.nextDue, failed: result.failed, failures: &failures, interval: interval, now: now()
+                ))
             }
         } catch {
             // Cancelled: the profile, accounts, setting, or foreground state changed.

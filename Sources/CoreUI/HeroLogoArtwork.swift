@@ -1287,7 +1287,7 @@ private extension UIImage {
     /// visible content, and measures the logo's luminance (used to pick and gate
     /// the contrast halo). Returns `nil` when nothing usable remains (no decodable
     /// image, or removal erased essentially everything).
-    func preparedAsHeroLogo() -> PreparedLogo? {
+    internal func preparedAsHeroLogo() -> PreparedLogo? {
         guard let cg = cgImage, cg.width > 0, cg.height > 0 else {
             return PreparedLogo(image: self, luminance: 0.0)
         }
@@ -1461,9 +1461,13 @@ private extension UIImage {
 
         // Sample the border ring to estimate the background colour and confirm it
         // is opaque + uniform enough to be a deliberate plate rather than artwork.
-        var rSum = 0, gSum = 0, bSum = 0, aSum = 0, count = 0
+        // Rounded corners and anti-aliased box edges leave a few see-through ring samples:
+        // they are skipped, and a ring with more than a tenth of them is no plate.
+        var rSum = 0, gSum = 0, bSum = 0, aSum = 0, count = 0, ringCount = 0
         func sample(_ x: Int, _ y: Int) {
             let i = y * bytesPerRow + x * bpp
+            ringCount += 1
+            guard data[i + 3] > 0 else { return }
             rSum += Int(data[i]); gSum += Int(data[i + 1]); bSum += Int(data[i + 2]); aSum += Int(data[i + 3])
             count += 1
         }
@@ -1475,7 +1479,7 @@ private extension UIImage {
             sample(minX, y)
             sample(maxX, y)
         }
-        guard count > 0 else { return nil }
+        guard count > 0, count * 10 >= ringCount * 9 else { return nil }
 
         let avgA = aSum / count
         // A transparent or semi-transparent border means there is no solid plate.
@@ -1492,7 +1496,7 @@ private extension UIImage {
         func dev(_ x: Int, _ y: Int) {
             let i = y * bytesPerRow + x * bpp
             let a = Double(data[i + 3]) / 255.0
-            guard a > 0 else { maxDev = .greatestFiniteMagnitude; return }
+            guard a > 0 else { return }
             let r = Double(data[i]) / 255.0 / a * 255.0
             let g = Double(data[i + 1]) / 255.0 / a * 255.0
             let b = Double(data[i + 2]) / 255.0 / a * 255.0

@@ -2,6 +2,9 @@ import Foundation
 
 public enum LiveChannelPlaybackFailure: Equatable, Sendable {
     case startupTimedOut
+    /// The audio plays and the engine reports a video track, but no frame was ever decoded.
+    /// `codec` is the engine's four-character video codec name, or nil when unknown.
+    case videoNotDecoded(codec: String?)
     case bufferingTimedOut
     case recoveryExhausted
     case engine(AppError)
@@ -13,6 +16,7 @@ public enum LiveChannelPlaybackFailure: Equatable, Sendable {
     public var message: LocalizedStringResource {
         switch self {
         case .startupTimedOut: "The player did not present channel video before the startup time limit."
+        case .videoNotDecoded: "Audio is playing, but this channel’s video could not be decoded."
         case .bufferingTimedOut: "The player did not resume channel video before the buffering time limit."
         case .recoveryExhausted: "The player could not recover this channel within its retry limit."
         case .engine(let error): Self.engineMessage(error)
@@ -48,9 +52,20 @@ public enum LiveChannelPlaybackFailure: Equatable, Sendable {
         }
     }
 
+    /// The Details field for a video that never decoded: a closed four-character codec name
+    /// (`avc1`, `hvc1`), never anything the engine reported verbatim.
+    var videoNotDecodedCodecField: String? {
+        guard case .videoNotDecoded(let codec) = self else { return nil }
+        let name = codec?.lowercased() ?? ""
+        let isFourCharacterName = (3...4).contains(name.count)
+            && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        return isFourCharacterName ? name : "unknown"
+    }
+
     var diagnosticCode: String {
         switch self {
         case .startupTimedOut: "startupTimedOut"
+        case .videoNotDecoded: "videoNotDecoded"
         case .bufferingTimedOut: "bufferingTimedOut"
         case .recoveryExhausted: "recoveryExhausted"
         case .input: "unsupportedSource"

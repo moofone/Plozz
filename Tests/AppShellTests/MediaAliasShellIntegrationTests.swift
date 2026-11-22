@@ -78,6 +78,8 @@ final class MediaAliasShellIntegrationTests: XCTestCase {
         expectedFiles.append("cloud-live-tv-state-v1.json")
         expectedSchemas.append(.liveTVSourcesV1)
         expectedFiles.append("cloud-live-tv-sources-v1.sealed")
+        expectedSchemas.append(.liveTVLogosV1)
+        expectedFiles.append("cloud-live-tv-logos-v1.json")
         XCTAssertEqual(schemas, expectedSchemas)
         XCTAssertEqual(
             stateFileURLs.map(\.lastPathComponent),

@@ -189,8 +189,6 @@ public final class IdentityIndexModel {
     @ObservationIgnored
     private var accountsAwaitingLaunchVerification: Set<String> = []
 
-    /// How long an account's index stays fresh before an opportunistic re-warm.
-    private let identityIndexTTL: TimeInterval = 600
 
     /// Per-library scan caps so building the index can never become an unbounded
     /// full-library walk that stalls launch on a huge catalogue.
@@ -231,7 +229,6 @@ public final class IdentityIndexModel {
         let activeIDs = Set(resolved.map(\.account.id))
         let serverInfo = resolved.sourceServerInfo()
         let index = _identityIndex
-        let ttl = identityIndexTTL
         let chunkSize = identityChunkSize
         let maxPerLibrary = identityMaxItemsPerLibrary
         let storeNamespace = namespace()
@@ -315,15 +312,24 @@ public final class IdentityIndexModel {
                     snapshot, phase: restoredMembership ? "restore" : "retain"
                 ))
             }
-            let stale = await index.staleAccounts(olderThan: ttl)
 
-            // Select the accounts that actually need a (re)scan: warm & fresh ones
-            // are skipped unless `force`. Resolved up front so the concurrent warm
-            // below only spawns real work.
+            // Select the accounts that actually need a (re)scan. Final data is cached
+            // forever: an account is re-indexed only when its provider's listing changed
+            // (fingerprint), on a forced warm, or once per launch for providers that
+            // cannot fingerprint their listing. There is no time-based re-scan.
             var accountsToWarm: [ResolvedAccount] = []
+            var listingFingerprints: [String: String] = [:]
             for resolvedAccount in resolved {
                 if Task.isCancelled { break }
-                let warm = await index.isWarm(resolvedAccount.account.id)
+                let accountID = resolvedAccount.account.id
+                let warm = await index.isWarm(accountID)
+                let fingerprint = await resolvedAccount.provider.catalogListingFingerprint()
+                if let fingerprint { listingFingerprints[accountID] = fingerprint }
+                if warm, !force, let fingerprint,
+                   await index.listingFingerprint(for: accountID) == fingerprint {
+                    await MainActor.run { _ = self?.accountsAwaitingLaunchVerification.remove(accountID) }
+                    continue
+                }
                 // A restored account is verified once per launch, however warm
                 // it looks. The scan is incremental and publishes as it goes, so
                 // this costs a background pass rather than a blank screen.
@@ -331,10 +337,7 @@ public final class IdentityIndexModel {
                     self?.accountsAwaitingLaunchVerification
                         .contains(resolvedAccount.account.id) ?? false
                 }
-                if warm, !force, !stale.contains(resolvedAccount.account.id),
-                   !needsVerification {
-                    continue
-                }
+                if warm, !force, fingerprint == nil, !needsVerification { continue }
                 accountsToWarm.append(resolvedAccount)
             }
 
@@ -342,7 +345,10 @@ public final class IdentityIndexModel {
             // need scanning: ask again rather than dropping the work silently.
             // Without this the wave that gets cancelled between the restore and
             // the selection is simply lost, and nothing re-triggers.
-            if Task.isCancelled, !stale.isEmpty, accountsToWarm.isEmpty {
+            let awaitingVerification = await MainActor.run {
+                !(self?.accountsAwaitingLaunchVerification.isEmpty ?? true)
+            }
+            if Task.isCancelled, awaitingVerification, accountsToWarm.isEmpty {
                 await MainActor.run { [weak self] in
                     guard let self, self.identityWarmTask?.isCancelled != false else { return }
                     self.identityWarmKey = nil
@@ -365,12 +371,13 @@ public final class IdentityIndexModel {
                 let warmOne: @Sendable (ResolvedAccount) async -> Void = { resolvedAccount in
                     let accountID = resolvedAccount.account.id
                     if Task.isCancelled { return }
-                    await Self.indexAccount(
+                    let outcome = await Self.indexAccount(
                         resolvedAccount,
                         into: index,
                         serverInfo: serverInfo[accountID],
                         chunkSize: chunkSize,
-                        maxPerLibrary: maxPerLibrary
+                        maxPerLibrary: maxPerLibrary,
+                        listingFingerprint: listingFingerprints[accountID]
                     )
                     if Task.isCancelled { return }
                     // Real membership changes remain progressive; an unchanged
@@ -381,7 +388,9 @@ public final class IdentityIndexModel {
                         FanoutDiagnostics.emit(FanoutDiagnostics.indexStateLine(snapshot, phase: "warm"))
                     }
                     // Verified against the live library — stop forcing a rescan
-                    // for this account until the next launch.
+                    // for this account until the next launch. A scan that stopped early
+                    // (rate limit, Live TV playing, failure) is not a verification.
+                    guard outcome == .completed else { return }
                     await MainActor.run {
                         guard let self,
                               self.isCurrentWarm(warmGeneration, namespace: storeNamespace) else { return }
@@ -449,13 +458,17 @@ public final class IdentityIndexModel {
 
     /// Scans one account's movie + series libraries in bounded pages and ingests
     /// every catalogue entry's identity → source into the index.
+    enum IndexOutcome: Equatable { case completed, inconclusive, rateLimited, stopped }
+
+    @discardableResult
     private static func indexAccount(
         _ resolved: ResolvedAccount,
         into index: IdentityIndex,
         serverInfo: SourceServerInfo?,
         chunkSize: Int,
-        maxPerLibrary: Int
-    ) async {
+        maxPerLibrary: Int,
+        listingFingerprint: String? = nil
+    ) async -> IndexOutcome {
         let provider = resolved.provider
         let accountID = resolved.account.id
         guard let libraries = try? await provider.libraries() else {
@@ -463,7 +476,7 @@ public final class IdentityIndexModel {
             // starts because the library list wouldn't load looks exactly like
             // a scan that was never asked for.
             FanoutDiagnostics.emit("index.account libraries FAILED")
-            return
+            return .inconclusive
         }
         FanoutDiagnostics.emit(
             "index.account libraries=\(libraries.count) kinds=\(libraries.map { "\($0.kind)" }.sorted())"
@@ -490,7 +503,10 @@ public final class IdentityIndexModel {
         // children are cancelled when `identityWarmTask.cancel()` fires; check right
         // before the mutating index calls (there are awaits above that can suspend
         // long enough for cancellation to land).
-        if Task.isCancelled { return }
+        if Task.isCancelled { return .stopped }
+        // Single-stream providers must never see background identity traffic while a live
+        // stream is playing; the scan resumes on the next warm trigger.
+        if await provider.hasActiveLiveStream { return .stopped }
         await index.beginRebuild(for: accountID)
         // `true` if any page needed an enrichment fetch that failed **or** a
         // catalogue page fetch itself failed, so we leave the account un-finished
@@ -499,10 +515,11 @@ public final class IdentityIndexModel {
         // never frozen as a "complete" (but truncated) scan until the TTL.
         var inconclusive = false
         for library in libraries where library.kind == .movie || library.kind == .series {
-            if Task.isCancelled { return }
+            if Task.isCancelled { return .stopped }
             var offset = 0
             while offset < maxPerLibrary {
-                if Task.isCancelled { return }
+                if Task.isCancelled { return .stopped }
+                if await provider.hasActiveLiveStream { return .stopped }
                 let page: MediaPage
                 do {
                     page = try await provider.items(
@@ -513,7 +530,8 @@ public final class IdentityIndexModel {
                     let failure = (error as? AppError) ?? (error is CancellationError ? .cancelled : .invalidResponse)
                     FanoutDiagnostics.emit("index.page failed reason=\(HandoffDiagnostics.errorCode(failure))")
                     switch failure {
-                    case .rateLimited, .unauthorized, .cancelled: return
+                    case .rateLimited: return .rateLimited
+                    case .unauthorized, .cancelled: return .stopped
                     default: break
                     }
                     // A page fetch threw (network / server error), not a clean end
@@ -533,18 +551,20 @@ public final class IdentityIndexModel {
                     page.items,
                     enrichIdentifiedItems: provider.catalogIdentityRequiresEnrichment
                 ) { item in
-                    try await provider.item(id: item.id)
+                    if await provider.hasActiveLiveStream { throw AppError.cancelled }
+                    return try await provider.item(id: item.id)
                 }
                 inconclusive = inconclusive || prepared.inconclusive
                 // Re-check just before the ingest: `provider.items` and the
                 // per-item enrichment above are awaits during which the warm may
                 // have been cancelled (account removed). Ingesting here would write
                 // into a bucket a concurrent retain/rebuild already cleared.
-                if Task.isCancelled { return }
+                if Task.isCancelled { return .stopped }
                 await index.ingest(prepared.indexable, accountID: accountID, serverInfo: liveServerInfo)
                 if let interruption = prepared.interruption {
                     FanoutDiagnostics.emit("index.enrichment stopped reason=\(HandoffDiagnostics.errorCode(interruption))")
-                    return
+                    if case .rateLimited = interruption { return .rateLimited }
+                    return .stopped
                 }
                 offset += page.items.count
                 // Only trust `totalCount` as an end-of-catalogue signal when the
@@ -562,8 +582,22 @@ public final class IdentityIndexModel {
         // inconclusive scan stays cold so the next warm retries it (never warm-and-
         // forget with a missing Plex copy).
         if !inconclusive {
-            await index.finishRebuild(for: accountID)
+            await index.finishRebuild(for: accountID, listingFingerprint: listingFingerprint)
+            return .completed
         }
+        return .inconclusive
+    }
+
+    /// Manual "rebuild library index" for one account: forgets the provider's fetched identity
+    /// details and the account's saved listing fingerprint, then re-scans it. The previous
+    /// membership keeps serving until the new scan replaces it.
+    public func rebuildLibraryIndex(accountID: String) async {
+        guard let resolved = activeAccounts().first(where: { $0.account.id == accountID }) else { return }
+        await resolved.provider.resetCatalogIdentityDetails()
+        await _identityIndex.clearListingFingerprint(for: accountID)
+        accountsAwaitingLaunchVerification.insert(accountID)
+        identityWarmKey = nil
+        warmIdentityIndex()
     }
 
     /// Fold and compare membership on the index actor. Generation and revision

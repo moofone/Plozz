@@ -211,3 +211,9 @@ Sources/MetadataKit/
 *Verification: `swift test` runs the pure-logic suite without linking
 AetherEngine's tvOS-only FFmpeg xcframeworks; the tvOS simulator/app build
 remains the authoritative compile/link check for the on-device engine.*
+
+## Live TV channel logos
+
+Live TV also reads TMDB network logos (`/3/network/{id}` and `/images`) through the same
+`TMDbAccess` and rate limiter as above, and the keyless daily network export. See
+[Live TV prototype › Channel logos](live-tv-prototype.md#channel-logos).

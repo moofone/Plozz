@@ -14,10 +14,62 @@ final class LiveTVPreviewControllerTests: XCTestCase {
         XCTAssertTrue(preview.hasRequestedInitialGuideFocus)
         XCTAssertTrue(preview.isRestoringGuideFocus)
         XCTAssertFalse(preview.restoresPlaybackFocus)
+        XCTAssertFalse(preview.guideFocusMayScroll)
         preview.completeGuideFocusRestore(preview.focusRestoreRequest)
         XCTAssertNil(preview.requestInitialGuideFocus(isActive: true, hasOverlay: false))
+        preview.requestBrowsingFocus()
+        XCTAssertTrue(preview.guideFocusMayScroll, "explicit guide entry may reveal its focus target")
         preview.stop()
         XCTAssertNil(preview.requestInitialGuideFocus(isActive: true, hasOverlay: false))
+    }
+
+    func testInitialGuideFocusPrefersTheSavedRowOnlyWhileItIsInTheGuide() throws {
+        let model = LiveTVPrototypeModel()
+        let rows = model.guideChannels.map(\.id)
+        XCTAssertGreaterThan(rows.count, 2)
+        let preview = LiveTVPreviewController(model: model)
+        XCTAssertEqual(preview.requestInitialGuideFocus(isActive: true, hasOverlay: false, preferring: rows[2]), rows[2])
+        let missing = LiveTVPreviewController(model: model)
+        XCTAssertEqual(
+            missing.requestInitialGuideFocus(
+                isActive: true, hasOverlay: false, preferring: .init(channelID: "removed")),
+            rows[0], "a saved row that is no longer shown falls back to the first row")
+    }
+
+    /// Back from the guide while a channel plays behind it expands the picture through `watch` on the
+    /// playing channel (the coordinator's `expandPreview`): a presentation change, not a tune.
+    func testBackFromTheGuideShowsTheWatchedChannelFullScreenWithoutRetuning() {
+        let model = LiveTVPrototypeModel()
+        let preview = LiveTVPreviewController(model: model)
+        let channelID = model.channels[1].id
+        preview.watch(channelID, expandsPlayer: false)
+        XCTAssertFalse(preview.isExpanded)
+        XCTAssertEqual(model.playingChannelID, channelID)
+
+        preview.watch(channelID, origin: preview.watchOrigin)
+        XCTAssertTrue(preview.isExpanded)
+        XCTAssertFalse(preview.isWatchingInline)
+        XCTAssertFalse(preview.isRestoringGuideFocus, "the guide behind keeps its position, nothing is restored")
+        XCTAssertFalse(model.tuneFailed)
+        XCTAssertNil(model.previousChannelID, "the playing channel is not replaced, so nothing is retuned")
+        XCTAssertEqual(model.playingChannelID, channelID)
+    }
+
+    func testFullScreenAndBackToTheGuideRoundTripsWithTheSameChannelPlaying() {
+        let model = LiveTVPrototypeModel()
+        let preview = LiveTVPreviewController(model: model)
+        let channelID = model.channels[2].id
+        preview.watch(channelID, expandsPlayer: false)
+        for _ in 0..<3 {
+            preview.watch(channelID, origin: preview.watchOrigin)
+            XCTAssertTrue(preview.isExpanded)
+            preview.returnToGuide()
+            XCTAssertFalse(preview.isExpanded)
+            XCTAssertTrue(preview.isRestoringGuideFocus)
+            preview.completeGuideFocusRestore(preview.focusRestoreRequest, focusedChannelID: channelID)
+            XCTAssertEqual(model.playingChannelID, channelID)
+            XCTAssertNil(model.previousChannelID)
+        }
     }
 
     func testInitialFocusWaitsForChannelsAndAnActiveUnobscuredGuide() {

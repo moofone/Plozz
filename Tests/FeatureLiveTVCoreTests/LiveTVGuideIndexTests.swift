@@ -55,9 +55,9 @@ final class LiveTVGuideIndexTests: XCTestCase {
         )
     }
 
-    private func document(title: String = "Bulletin") -> Data {
+    private func document(title: String = "Bulletin", newsName: String = "News") -> Data {
         Data("""
-        <tv><channel id="news"><display-name>News</display-name></channel>
+        <tv><channel id="news"><display-name>\(newsName)</display-name></channel>
         <programme channel="news" start="19700101000140 +0000" stop="19700101000820 +0000">
         <title>\(title)</title><desc>Synopsis</desc></programme>
         <channel id="sport"><display-name>Sport</display-name></channel>
@@ -80,12 +80,14 @@ final class LiveTVGuideIndexTests: XCTestCase {
         )
     }
 
-    private func httpDocument(_ metadata: XMLTVGuideCacheMetadata, title: String = "Bulletin") -> XMLTVDownloadedDocument {
-        .init(data: document(title: title), expiresAt: metadata.expiresAt,
+    private func httpDocument(
+        _ metadata: XMLTVGuideCacheMetadata, title: String = "Bulletin", newsName: String = "News"
+    ) -> XMLTVDownloadedDocument {
+        .init(data: document(title: title, newsName: newsName), expiresAt: metadata.expiresAt,
               permitsPersistence: metadata.permitsPersistence, cacheMetadata: metadata)
     }
 
-    func testSavedListingsAreReadWithoutADownloadAndOnlyWhileTheyMayBeReused() async throws {
+    func testSavedListingsAreReadWithoutADownloadAndNeverLapseByAge() async throws {
         let fixture = try CacheFixture()
         defer { fixture.removeOwnedFiles() }
         let clock = Mutex(now)
@@ -108,7 +110,7 @@ final class LiveTVGuideIndexTests: XCTestCase {
 
         clock.withLock { $0 = now.addingTimeInterval(3_601) }
         let overdue = try await index.cachedPrograms(from: url, channels: channels, range: range) { channels }
-        XCTAssertNil(overdue, "Past the chosen interval the caller must ask the server")
+        XCTAssertEqual(overdue?.map(\.title), ["Bulletin"], "Saved listings are final: reading them never waits on a server check")
 
         clock.withLock { $0 = now }
         await index.invalidate()
@@ -116,18 +118,17 @@ final class LiveTVGuideIndexTests: XCTestCase {
         XCTAssertNil(invalidated, "A requested refresh is not answered from the saved copy")
     }
 
-    func testChosenUpdateIntervalDecidesWhenASavedGuideIsCheckedAgain() async throws {
-        // (chosen interval, response headers, age that is still reused, age that is checked again)
+    /// STARTUP-10S / owner policy: saved listings never expire on read. The chosen interval (and a lifetime the server
+    /// stated) only decide when the scheduled update asks the server, never whether a screen can read the saved guide.
+    func testChosenUpdateIntervalDecidesOnlyWhenTheScheduledUpdateChecksAgainNeverAForegroundRead() async throws {
+        // (chosen interval, response headers, age before the check falls due, age after)
         let cases: [(TimeInterval?, [String: String], TimeInterval, TimeInterval)] = [
             (3_600, ["ETag": "\"v1\""], 3_599, 3_601),
-            // A day-long interval outlasts the built-in twelve-hour lifetime…
             (86_400, ["ETag": "\"v1\""], 13 * 3_600, 86_401),
-            // …but never a lifetime the server stated.
-            (86_400, ["ETag": "\"v1\"", "Cache-Control": "max-age=3600"], 3_599, 3_601),
-            // Off keeps the response's own lifetime.
+            (86_400, ["ETag": "\"v1\"", "Cache-Control": "max-age=3600"], 3_599, 86_401),
             (nil, ["ETag": "\"v1\""], 12 * 3_600 - 1, 12 * 3_600 + 1)
         ]
-        for (interval, headers, reusedAge, checkedAge) in cases {
+        for (interval, headers, earlyAge, lateAge) in cases {
             let fixture = try CacheFixture()
             defer { fixture.removeOwnedFiles() }
             let clock = Mutex(now)
@@ -138,20 +139,22 @@ final class LiveTVGuideIndexTests: XCTestCase {
             let original = try httpMetadata(headers: headers)
             let saved = httpDocument(original)
             _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { saved }
-            clock.withLock { $0 = now.addingTimeInterval(reusedAge) }
-            _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { _ in
-                XCTFail("A guide younger than the limit is reused (interval \(String(describing: interval)))")
-                throw URLError(.badServerResponse)
+            for age in [earlyAge, lateAge] {
+                clock.withLock { $0 = now.addingTimeInterval(age) }
+                let rows = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { _ in
+                    XCTFail("A foreground read never asks the server (age \(age), interval \(String(describing: interval)))")
+                    throw URLError(.badServerResponse)
+                }
+                XCTAssertEqual(rows.map(\.title), ["Bulletin"])
             }
-            let checked = now.addingTimeInterval(checkedAge)
-            clock.withLock { $0 = checked }
+            let checked = now.addingTimeInterval(lateAge)
             let unchanged = try httpMetadata(headers: headers, status: 304, previous: original, at: checked)
             let attempts = Mutex(0)
-            _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { _ in
+            _ = try await index.updateSaved(from: url, catalog: { channels }) { _ in
                 attempts.withLock { $0 += 1 }
                 return .notModified(unchanged)
             }
-            XCTAssertEqual(attempts.withLock { $0 }, 1, "interval \(String(describing: interval))")
+            XCTAssertEqual(attempts.withLock { $0 }, interval == nil ? 0 : 1, "interval \(String(describing: interval))")
         }
     }
 
@@ -202,6 +205,178 @@ final class LiveTVGuideIndexTests: XCTestCase {
         }
         XCTAssertEqual(attempts.withLock { $0 }, 1)
         XCTAssertEqual(due, checked.addingTimeInterval(3_600))
+    }
+
+    func testManualRefreshBypassesOnlyTheDueGateOfASavedGuide() async throws {
+        let fixture = try CacheFixture()
+        defer { fixture.removeOwnedFiles() }
+        let clock = Mutex(now)
+        let interval = Mutex<TimeInterval?>(3_600)
+        let index = LiveTVGuideIndex(
+            cache: fixture.cache, clock: { clock.withLock { $0 } }, updateInterval: { interval.withLock { $0 } }
+        )
+        let channels = [channel("a")]
+        let url = url
+        let neverSaved = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { _ in
+            XCTFail("A guide that was never saved is not downloaded by a manual refresh")
+            throw URLError(.badServerResponse)
+        }
+        XCTAssertEqual(neverSaved, SavedGuideRefreshReport(nextDue: nil, transferredGuides: 0))
+
+        let original = try httpMetadata()
+        let firstDocument = httpDocument(original)
+        _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { firstDocument }
+        // Not due: the scheduled trigger leaves it alone, the manual one asks the server once.
+        let scheduled = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .scheduled) { _ in
+            XCTFail("A guide that is not due is left alone by the timer")
+            throw URLError(.badServerResponse)
+        }
+        XCTAssertEqual(scheduled.transferredGuides, 0)
+        let manualAt = now.addingTimeInterval(60)
+        clock.withLock { $0 = manualAt }
+        let attempts = Mutex(0)
+        let confirmed = try httpMetadata(status: 304, previous: original, at: manualAt)
+        let manual = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { previous in
+            XCTAssertEqual(previous, original)
+            attempts.withLock { $0 += 1 }
+            return .notModified(confirmed)
+        }
+        XCTAssertEqual(attempts.withLock { $0 }, 1)
+        XCTAssertEqual(manual, SavedGuideRefreshReport(nextDue: manualAt.addingTimeInterval(3_600), transferredGuides: 1))
+
+        // Automatic updates off: the timer does nothing, a manual refresh still validates and reports no due date.
+        interval.withLock { $0 = nil }
+        clock.withLock { $0 = now.addingTimeInterval(7_200) }
+        let off = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .scheduled) { _ in
+            XCTFail("Automatic updates are off")
+            throw URLError(.badServerResponse)
+        }
+        XCTAssertEqual(off, SavedGuideRefreshReport(nextDue: nil, transferredGuides: 0))
+        let offAt = now.addingTimeInterval(7_200)
+        let offConfirmed = try httpMetadata(status: 304, previous: confirmed, at: offAt)
+        let offManual = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { previous in
+            attempts.withLock { $0 += 1 }
+            XCTAssertEqual(previous, confirmed)
+            return .notModified(offConfirmed)
+        }
+        XCTAssertEqual(attempts.withLock { $0 }, 2)
+        XCTAssertEqual(offManual, SavedGuideRefreshReport(nextDue: nil, transferredGuides: 1))
+        XCTAssertNil(interval.withLock { $0 }, "A manual refresh never changes the interval")
+    }
+
+    func testCommittedInputsAreEmptyForUnchangedValidationAndNameThePersistedChangeOnce() async throws {
+        let fixture = try CacheFixture()
+        defer { fixture.removeOwnedFiles() }
+        let clock = Mutex(now)
+        let index = LiveTVGuideIndex(
+            cache: fixture.cache, clock: { clock.withLock { $0 } }, updateInterval: { 3_600 }
+        )
+        let channels = [channel("a")]
+        let url = url
+        let original = try httpMetadata()
+        let first = httpDocument(original)
+        _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { first }
+        // The first foreground import is a committed input nobody has been told about yet: a not-due pass delivers it once.
+        let seed = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .scheduled) { _ in
+            XCTFail("Not due")
+            throw URLError(.badServerResponse)
+        }
+        XCTAssertEqual(seed.committedInputs.guideChanges.count, 1)
+
+        // 304: nothing changed, and nothing is pending any more.
+        clock.withLock { $0 = now.addingTimeInterval(60) }
+        let confirmed = try httpMetadata(status: 304, previous: original, at: now.addingTimeInterval(60))
+        let notModified = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { _ in
+            .notModified(confirmed)
+        }
+        XCTAssertEqual(notModified.transferredGuides, 1)
+        XCTAssertTrue(notModified.committedInputs.isEmpty)
+
+        // 200 with a byte-identical body: nothing changed.
+        clock.withLock { $0 = now.addingTimeInterval(120) }
+        let identicalDocument = httpDocument(
+            try httpMetadata(headers: ["ETag": "\"v2\""], at: now.addingTimeInterval(120))
+        )
+        let identical = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { _ in
+            .document(identicalDocument)
+        }
+        XCTAssertEqual(identical.transferredGuides, 1)
+        XCTAssertTrue(identical.committedInputs.isEmpty)
+
+        // 200 with only a programme changed: reported with a new revision and no station change.
+        clock.withLock { $0 = now.addingTimeInterval(180) }
+        let programmeDocument = httpDocument(
+            try httpMetadata(headers: ["ETag": "\"v3\""], at: now.addingTimeInterval(180)), title: "Late Bulletin"
+        )
+        let programme = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { _ in
+            .document(programmeDocument)
+        }
+        let programmeChange = try XCTUnwrap(programme.committedInputs.guideChanges.first)
+        XCTAssertEqual(programme.committedInputs.guideChanges.count, 1)
+        XCTAssertTrue(programmeChange.changedStationIDs.isEmpty)
+        XCTAssertEqual(programmeChange.sourceKey, LiveTVGuideIndex.sourceID(url))
+        XCTAssertFalse(programmeChange.sourceKey.contains("fixture"))
+
+        // 200 with a renamed station: the station is named, and it is reported once.
+        clock.withLock { $0 = now.addingTimeInterval(240) }
+        let renamedMetadata = try httpMetadata(headers: ["ETag": "\"v4\""], at: now.addingTimeInterval(240))
+        let renamedDocument = httpDocument(renamedMetadata, title: "Late Bulletin", newsName: "News HD")
+        let renamed = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { _ in
+            .document(renamedDocument)
+        }
+        let renamedChange = try XCTUnwrap(renamed.committedInputs.guideChanges.first)
+        XCTAssertEqual(renamedChange.changedStationIDs, ["news"])
+        XCTAssertNotEqual(renamedChange.contentRevision, programmeChange.contentRevision)
+
+        // A later unchanged validation reports nothing: the receipt is not replayed.
+        clock.withLock { $0 = now.addingTimeInterval(300) }
+        let again = try httpMetadata(status: 304, previous: renamedMetadata, at: now.addingTimeInterval(300))
+        let replay = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { _ in
+            .notModified(again)
+        }
+        XCTAssertTrue(replay.committedInputs.isEmpty)
+    }
+
+    func testFailedRefreshDoesNotReportAndForegroundImportIsReportedByTheNextRefresh() async throws {
+        let fixture = try CacheFixture()
+        defer { fixture.removeOwnedFiles() }
+        let clock = Mutex(now)
+        let index = LiveTVGuideIndex(
+            cache: fixture.cache, clock: { clock.withLock { $0 } }, updateInterval: { 3_600 }
+        )
+        let channels = [channel("a")]
+        let url = url
+        let original = try httpMetadata()
+        let first = httpDocument(original)
+        _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { first }
+        let firstChange = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .scheduled) { _ in
+            XCTFail("Not due")
+            throw URLError(.badServerResponse)
+        }
+        // The first foreground import is a committed input nobody has been told about yet.
+        XCTAssertEqual(firstChange.committedInputs.guideChanges.count, 1)
+
+        clock.withLock { $0 = now.addingTimeInterval(60) }
+        do {
+            _ = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { _ in
+                throw URLError(.timedOut)
+            }
+            XCTFail("A failed refresh must not return a report")
+        } catch let error as URLError { XCTAssertEqual(error.code, .timedOut) }
+
+        // A foreground request commits a changed guide; the scheduled gate then reports it without a transfer.
+        clock.withLock { $0 = now.addingTimeInterval(120) }
+        let changedMetadata = try httpMetadata(headers: ["ETag": "\"v2\""], at: now.addingTimeInterval(120))
+        let changed = httpDocument(changedMetadata, newsName: "News HD")
+        _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range, trustsGuideIDs: false, forcing: true) { _ in
+            .document(changed)
+        }
+        let report = try await index.refreshSaved(from: url, catalog: { channels }, trigger: .scheduled) { _ in
+            XCTFail("Not due")
+            throw URLError(.badServerResponse)
+        }
+        XCTAssertEqual(report.transferredGuides, 0)
+        XCTAssertEqual(report.committedInputs.guideChanges.first?.changedStationIDs, ["news"])
     }
 
     func testTemporarilyEmptyFeedRetriesOnDemandAcrossRestorationAndRevalidation() async throws {
@@ -298,11 +473,17 @@ final class LiveTVGuideIndexTests: XCTestCase {
         XCTAssertEqual(fresh.map(\.title), ["Bulletin"])
         let checked = metadata.checkedAt.addingTimeInterval(43_200)
         clock.withLock { $0 = checked }
+        let stale = try await restored.programs(from: url, catalog: channels, channels: channels, range: range) { _ in
+            XCTFail("A foreground read never revalidates a saved guide by age")
+            throw URLError(.badServerResponse)
+        }
+        XCTAssertEqual(stale, fresh)
         let updated = try httpMetadata(headers: ["ETag": "\"v2\""], status: 304, previous: metadata, at: checked)
-        let rows = try await restored.programs(from: url, catalog: channels, channels: channels, range: range) { prior in
+        _ = try await restored.refreshSaved(from: url, catalog: { channels }, trigger: .manual) { prior in
             XCTAssertEqual(prior, metadata)
             return .notModified(updated)
         }
+        let rows = stale
         let after = try await fixture.cache.guideIndexState(sourceID: LiveTVGuideIndex.sourceID(url), sourceURL: url)
         XCTAssertEqual(rows, fresh)
         XCTAssertEqual(before?.generation, after?.generation)
@@ -378,7 +559,9 @@ final class LiveTVGuideIndexTests: XCTestCase {
         let calls = Mutex(0)
         let cache = fixture.cache
         let url = url
-        let rows = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { previous in
+        let rows = try await index.programs(
+            from: url, catalog: channels, channels: channels, range: range, trustsGuideIDs: false, forcing: true
+        ) { previous in
             let count = calls.withLock { $0 += 1; return $0 }
             if count == 1 {
                 XCTAssertNotNil(previous)
@@ -405,7 +588,9 @@ final class LiveTVGuideIndexTests: XCTestCase {
         let saved = try await fixture.cache.guideIndexState(sourceID: sourceID, sourceURL: url)
         let state = try XCTUnwrap(saved)
         do {
-            _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { previous in
+            _ = try await index.programs(
+                from: url, catalog: channels, channels: channels, range: range, trustsGuideIDs: false, forcing: true
+            ) { previous in
                 XCTAssertEqual(previous, metadata)
                 throw URLError(.notConnectedToInternet)
             }
@@ -430,7 +615,9 @@ final class LiveTVGuideIndexTests: XCTestCase {
         _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { initial }
         let noStore = try httpMetadata(headers: ["Cache-Control": "no-store"], status: 304, previous: metadata)
         do {
-            _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range) { _ in
+            _ = try await index.programs(
+                from: url, catalog: channels, channels: channels, range: range, trustsGuideIDs: false, forcing: true
+            ) { _ in
                 withUnsafeCurrentTask { $0?.cancel() }
                 return .notModified(noStore)
             }
@@ -440,7 +627,7 @@ final class LiveTVGuideIndexTests: XCTestCase {
         XCTAssertNil(state)
     }
 
-    func testCachedProgramsAnswerOnlyFromAFreshValidatedIndexWithoutDownloading() async throws {
+    func testCachedProgramsAnswerFromAValidatedIndexRegardlessOfAge() async throws {
         let fixture = try CacheFixture()
         defer { fixture.removeOwnedFiles() }
         let clock = Mutex(now)
@@ -468,12 +655,11 @@ final class LiveTVGuideIndexTests: XCTestCase {
         XCTAssertNil(otherLineup, "Rows indexed for another lineup cannot answer.")
 
         clock.withLock { $0 = metadata.checkedAt.addingTimeInterval(43_200) }
-        let expired = try await restored.cachedPrograms(from: url, channels: channels, range: range) {
+        let aged = try await restored.cachedPrograms(from: url, channels: channels, range: range) {
             lineupReads.withLock { $0 += 1 }
             return channels
         }
-        XCTAssertEqual(lineupReads.withLock { $0 }, 0, "An expired index is a miss too.")
-        XCTAssertNil(expired, "An expired index must be revalidated by a loading request.")
+        XCTAssertEqual(aged?.map(\.title).sorted(), ["Bulletin", "Match"])
 
         clock.withLock { $0 = now }
         await restored.invalidate()
@@ -690,6 +876,114 @@ final class LiveTVGuideIndexTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    /// The stations a saved guide retains come from the matcher's rules, so a guide saved under other rules is read again once
+    /// (a parent had to delete the cache by hand to see call-sign matches).
+    func testAGuideSavedUnderOtherMatcherRulesIsIndexedAgainOnce() async throws {
+        let fixture = try CacheFixture()
+        defer { fixture.removeOwnedFiles() }
+        let channels = [channel("a")]
+        let data = Data("""
+        <tv><programme channel="news" start="19700101" stop="1970010101"><title>Listing</title></programme></tv>
+        """.utf8)
+        func hex(_ digest: SHA256.Digest) -> String { digest.map { String(format: "%02x", $0) }.joined() }
+        func projection(rules: String) throws -> String {
+            var hasher = SHA256()
+            hasher.update(data: try JSONEncoder().encode([
+                "account-xmltv-stations-v3", String(LiveTVXMLTVParser.cacheVersion), rules, nil
+            ] as [String?]))
+            for channel in channels {
+                hasher.update(data: try JSONEncoder().encode(
+                    [channel.id, channel.name, channel.guideID, channel.guideName, channel.country]
+                ))
+            }
+            return hex(hasher.finalize())
+        }
+        func save(rules: String, into cache: LiveTVIndexedCache) async throws {
+            let state = LiveTVGuideIndexState(
+                generation: UUID(), projection: try projection(rules: rules), digest: hex(SHA256.hash(data: Data("<tv/>".utf8))),
+                lowerBound: .distantPast, upperBound: .distantFuture, expiresAt: .distantFuture
+            )
+            _ = try await cache.importGuide(
+                data: Data("<tv/>".utf8), sourceID: LiveTVGuideIndex.sourceID(url), channels: channels,
+                provider: nil, now: now, sourceURL: url, preferredLanguage: nil, indexState: state
+            )
+        }
+        let current = LiveTVGuideStationIndex.rulesFingerprint
+        try await save(rules: current, into: fixture.cache)
+        let reused = LiveTVGuideIndex(cache: fixture.reopen(), preferredLanguage: nil)
+        let unchanged = DownloadCounter(response(data))
+        _ = try await reused.programs(from: url, catalog: channels, channels: channels, range: range, download: { await unchanged.get() })
+        let unchangedCount = await unchanged.count
+        XCTAssertEqual(unchangedCount, 0, "A guide saved under the current rules is reused")
+
+        try await save(rules: "an-older-rules-version", into: fixture.cache)
+        let stale = LiveTVGuideIndex(cache: fixture.reopen(), preferredLanguage: nil)
+        let changed = DownloadCounter(response(data))
+        let rows = try await stale.programs(from: url, catalog: channels, channels: channels, range: range, download: { await changed.get() })
+        XCTAssertEqual(rows.map(\.title), ["Listing"])
+        let changedCount = await changed.count
+        XCTAssertEqual(changedCount, 1, "A guide saved under other rules is downloaded and indexed again")
+        let again = DownloadCounter(response(data))
+        _ = try await stale.programs(from: url, catalog: channels, channels: channels, range: range, download: { await again.get() })
+        let againCount = await again.count
+        XCTAssertEqual(againCount, 0, "…and only once")
+    }
+
+    /// STARTUP-10S: a saved guide for the SAME lineup that was indexed under older matcher rules still answers at once; the
+    /// current index is built behind the read, once. A guide saved for another lineup is never answered from.
+    func testAGuideSavedUnderOlderRulesAnswersAtOnceWhileTheCurrentIndexIsBuiltInTheBackground() async throws {
+        let fixture = try CacheFixture()
+        defer { fixture.removeOwnedFiles() }
+        let channels = [channel("a")]
+        func hex(_ digest: SHA256.Digest) -> String { digest.map { String(format: "%02x", $0) }.joined() }
+        func saveUnderOlderRules(_ title: String, lineup: [LiveTVPrototypeChannel]) async throws {
+            let data = Data("""
+            <tv><programme channel="news" start="19700101000140" stop="19700101000820"><title>\(title)</title></programme></tv>
+            """.utf8)
+            let state = LiveTVGuideIndexState(
+                generation: UUID(), projection: "projection-of-older-rules",
+                lineupKey: try LiveTVGuideIndex.lineupKey(lineup, language: nil), digest: hex(SHA256.hash(data: data)),
+                lowerBound: .distantPast, upperBound: .distantFuture, expiresAt: .distantFuture
+            )
+            _ = try await fixture.cache.importGuide(
+                data: data, sourceID: LiveTVGuideIndex.sourceID(url), channels: lineup,
+                provider: nil, now: now, sourceURL: url, preferredLanguage: nil, indexState: state
+            )
+        }
+        try await saveUnderOlderRules("Saved", lineup: channels)
+        let current = Data("""
+        <tv><programme channel="news" start="19700101000140" stop="19700101000820"><title>Current</title></programme></tv>
+        """.utf8)
+        let currentDocument = response(current)
+        let release = Mutex(false)
+        let downloads = Mutex(0)
+        let index = LiveTVGuideIndex(cache: fixture.reopen(), preferredLanguage: nil)
+        let served = try await index.programs(from: url, catalog: channels, channels: channels, range: range) {
+            downloads.withLock { $0 += 1 }
+            while !release.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(20)) }
+            return currentDocument
+        }
+        XCTAssertEqual(served.map(\.title), ["Saved"], "the older index answers without waiting for the download")
+        release.withLock { $0 = true }
+        await index.waitForReindexForTesting()
+        XCTAssertEqual(downloads.withLock { $0 }, 1, "the current index is built once, behind the read")
+        let after = try await index.programs(from: url, catalog: channels, channels: channels, range: range) {
+            XCTFail("indexed under the current rules: no further download")
+            throw URLError(.badServerResponse)
+        }
+        XCTAssertEqual(after.map(\.title), ["Current"])
+
+        // Another lineup: the older index says nothing about the new channels, so nothing is answered from it.
+        try await saveUnderOlderRules("Saved", lineup: channels)
+        let changed = channels + [channel("b", guideID: "sport", name: "Sport")]
+        let other = LiveTVGuideIndex(cache: fixture.reopen(), preferredLanguage: nil)
+        let counter = DownloadCounter(currentDocument)
+        let rows = try await other.programs(from: url, catalog: changed, channels: changed, range: range) { await counter.get() }
+        XCTAssertEqual(rows.map(\.title), ["Current"])
+        let count = await counter.count
+        XCTAssertEqual(count, 1, "a changed lineup is indexed before it answers")
+    }
+
     func testIndexedQueryEnforcesLanguageEpisodeAndRatingTextBudget() async throws {
         let fixture = try CacheFixture()
         defer { fixture.removeOwnedFiles() }
@@ -739,7 +1033,7 @@ final class LiveTVGuideIndexTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
-    func testExpiredUnchangedBodyRevalidatesWithoutReplacingGeneration() async throws {
+    func testExplicitlyRevalidatingUnchangedBodyKeepsGeneration() async throws {
         let fixture = try CacheFixture()
         defer { fixture.removeOwnedFiles() }
         let index = LiveTVGuideIndex(cache: fixture.cache)
@@ -747,7 +1041,9 @@ final class LiveTVGuideIndexTests: XCTestCase {
         let download = DownloadCounter(response(document(), expires: .distantPast))
         _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range, download: { await download.get() })
         let first = try await fixture.cache.guideIndexState(sourceID: LiveTVGuideIndex.sourceID(url), sourceURL: url)
-        _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range, download: { await download.get() })
+        _ = try await index.programs(
+            from: url, catalog: channels, channels: channels, range: range, trustsGuideIDs: false, forcing: true
+        ) { _ in .document(await download.get()) }
         let second = try await fixture.cache.guideIndexState(sourceID: LiveTVGuideIndex.sourceID(url), sourceURL: url)
         let count = await download.count
         XCTAssertEqual(count, 2)
@@ -766,7 +1062,9 @@ final class LiveTVGuideIndexTests: XCTestCase {
         let state = try XCTUnwrap(saved)
         let invalid = response(Data("<tv><programme".utf8))
         do {
-            _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range, download: { invalid })
+            _ = try await index.programs(
+                from: url, catalog: channels, channels: channels, range: range, trustsGuideIDs: false, forcing: true
+            ) { _ in .document(invalid) }
             XCTFail("Malformed replacement must fail.")
         } catch { XCTAssertEqual(error as? LiveTVSourceImportError, .invalidGuide) }
         let current = try await fixture.cache.guideIndexState(sourceID: sourceID, sourceURL: url)
@@ -787,7 +1085,9 @@ final class LiveTVGuideIndexTests: XCTestCase {
         _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range, download: { initial })
         let invalid = response(Data("<tv>".utf8), persists: false)
         do {
-            _ = try await index.programs(from: url, catalog: channels, channels: channels, range: range, download: { invalid })
+            _ = try await index.programs(
+                from: url, catalog: channels, channels: channels, range: range, trustsGuideIDs: false, forcing: true
+            ) { _ in .document(invalid) }
             XCTFail("Invalid no-store body must fail.")
         } catch { XCTAssertEqual(error as? LiveTVSourceImportError, .invalidGuide) }
         let state = try await fixture.cache.guideIndexState(sourceID: LiveTVGuideIndex.sourceID(url), sourceURL: url)
@@ -941,11 +1241,8 @@ final class LiveTVGuideIndexTests: XCTestCase {
         let outside = DateInterval(start: now.addingTimeInterval(10 * 86_400), duration: 3_600)
         let missing = try await index.cachedPrograms(from: url, channels: [], range: outside, catalog: catalog)
         XCTAssertNil(missing)
-        clock.withLock { $0 = now.addingTimeInterval(3_601) }
-        let expired = try await index.cachedPrograms(from: url, channels: [], range: range, catalog: catalog)
-        XCTAssertNil(expired)
         XCTAssertEqual(reads.withLock { $0 }, 0)
-        clock.withLock { $0 = now }
+        clock.withLock { $0 = now.addingTimeInterval(3_601) }
         let empty = try await index.cachedPrograms(from: url, channels: [], range: range, catalog: catalog)
         XCTAssertEqual(empty, [])
         await index.cancel()

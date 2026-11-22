@@ -9,6 +9,7 @@ import FeatureAuth
 import FeatureDiscovery
 import FeatureDiscoveryCore
 import FeatureMusic
+import FeatureLiveTV
 import FeatureLiveTVCore
 import FeatureProfiles
 import FeatureSyncSetup
@@ -56,6 +57,10 @@ public final class AppState {
               self.plexHomeUsers.pendingPlexPINRequest == nil,
               !self.accountsProviders.activeProfileAwaitsIdentity else { return nil }
         return self.accountsProviders.liveTVProviderResolver()(id)
+    }
+
+    @ObservationIgnored public lazy var extraGuides = accountsProviders.makeExtraGuidesModel { [weak self] id in
+        self?.guidePreparation.start(accountID: id, refresh: true)
     }
 
     private static func seerrAccountConnectionStore() -> SeerAccountConnectionStore {
@@ -1213,6 +1218,7 @@ public final class AppState {
             validator: { token in await tmdbKeyMediaShare.validateTMDBUserKey(token) },
             onCredentialSuperseded: { token in await tmdbKeyMediaShare.invalidateTMDBCredential(forToken: token) }
         )
+        LiveTVChannelLogoRuntime.configure()
         self.systemBridge = systemBridge ?? Self.makeDefaultSystemBridge()
         self.ratingsProvider = ratingsProvider ?? RatingsServiceFactory.make()
 
@@ -1580,6 +1586,9 @@ public final class AppState {
             PlozzLog.auth.error("Credential recovery failed; incomplete shares remain hidden")
         }
         accountsProviders.reloadAccounts()
+        accountsProviders.applyLaunchExtraGuide(model: extraGuides) { [weak self] in
+            self?.guidePreparation.start(accountID: $0, refresh: true)
+        }
         // Self-heal any stale server names (older accounts stored the placeholder
         // provider name instead of the server's real name). Shared with iOS.
         accountsProviders.refreshServerNames()
@@ -1687,6 +1696,10 @@ public final class AppState {
     /// playback or details once the user is signed in.
     public func handle(url: URL) {
         if ExternalPlaybackRuntime.shared.receive(url) { return }
+        #if DEBUG
+        // `plozz-debug://livetv/…` drives Live TV from `xcrun simctl openurl`; compiled out of Release.
+        if LiveTVDebugRemote.shared.handle(url: url) { return }
+        #endif
         // `plozz://shots/…` is the capture rig asking for a screen. Checked
         // first because it shares the scheme; outside DEBUG this always
         // declines, so a shipped build falls straight through to Top Shelf.

@@ -1041,6 +1041,15 @@ final class IPTVIntegrationTests: XCTestCase {
         func cancel() {}
     }
 
+    /// The provider's `epg_channel_id` must reach the lineup the Live TV catalogue is built from.
+    func testXtreamLineupCarriesTheProviderGuideIDs() async throws {
+        IPTVFixture.state.handler = Self.twoChannelXtream
+        let provider = try await makeXtreamGuideProvider(guideIndex: SavedGuideIndex(saved: [])) { _, _, _, _, _ in [] }
+        let channels = try await provider.liveTVChannels()
+        XCTAssertEqual(channels.map(\.guideID), ["news", "sports"])
+        await provider.teardown()
+    }
+
     func testXtreamReadsSavedGuideThenBatchWithoutChannelRequests() async throws {
         IPTVFixture.state.handler = Self.twoChannelXtream
         let from = Date(timeIntervalSince1970: 100), to = Date(timeIntervalSince1970: 500)
@@ -1077,8 +1086,8 @@ final class IPTVIntegrationTests: XCTestCase {
         }
         let from = Date(timeIntervalSince1970: 100), to = Date(timeIntervalSince1970: 500)
         let provider = try await makeXtreamGuideProvider { _, _, channels, _, _ in
-            XCTAssertEqual(channels.map(\.id), ["live:10"], "Only XMLTV identities belong in the batch projection")
-            XCTAssertEqual(channels.map(\.guideID), ["news"])
+            XCTAssertEqual(channels.map(\.id), ["live:12", "live:10", "live:13"], "A row without a guide ID is read by name and country")
+            XCTAssertEqual(channels.map(\.guideID), [nil, "news", nil])
             return []
         }
         let rows = try await provider.liveTVGuide(channelIDs: ["live:12", "live:10", "live:13"], from: from, to: to)
@@ -2427,8 +2436,10 @@ final class IPTVIntegrationTests: XCTestCase {
             XCTAssertEqual(IPTVFixture.state.requests.filter { $0.url?.path == "/prefix/xmltv.php" }.count, 1)
             let cached = await index.cachedRequests
             let downloads = await index.downloadsFor
-            XCTAssertEqual(cached, [[], []], "Saved XMLTV lookup excludes blank and missing guide IDs")
-            XCTAssertEqual(downloads, [[]], "Even an empty XMLTV projection must discover the unavailable batch")
+            XCTAssertEqual(
+                cached, [["live:13", "live:10", "live:12"], ["live:13", "live:10", "live:12"]],
+                "Saved XMLTV lookup asks for every requested row: one with a blank or missing guide ID is read by name and country")
+            XCTAssertEqual(downloads, [["live:13", "live:10", "live:12"]], "Even an empty XMLTV projection must discover the unavailable batch")
             await provider.teardown()
         }
     }
@@ -2457,8 +2468,8 @@ final class IPTVIntegrationTests: XCTestCase {
             XCTAssertEqual(listingRequests(), unguidedOnly ? ["12"] : ["12", "10"], "Unrequested guided stream 11 must never be fetched")
             let cached = await index.cachedRequests
             let downloads = await index.downloadsFor
-            XCTAssertEqual(cached, unguidedOnly ? [[]] : [["live:10"]])
-            XCTAssertEqual(downloads, unguidedOnly ? [[]] : [["live:10"]])
+            XCTAssertEqual(cached, unguidedOnly ? [["live:12"]] : [["live:12", "live:10"]])
+            XCTAssertEqual(downloads, unguidedOnly ? [["live:12"]] : [["live:12", "live:10"]])
             XCTAssertEqual(IPTVFixture.state.requests.filter { $0.url?.path == "/prefix/xmltv.php" }.count, 1)
             await provider.teardown()
         }
@@ -2489,7 +2500,7 @@ final class IPTVIntegrationTests: XCTestCase {
         let rows = try await provider.liveTVGuide(channelIDs: ["live:12"], from: Date(timeIntervalSince1970: 100), to: Date(timeIntervalSince1970: 500))
         XCTAssertTrue(rows.isEmpty)
         let requests = await index.cachedRequests
-        XCTAssertEqual(requests, [[]])
+        XCTAssertEqual(requests, [["live:12"]], "The row is offered to the saved guide, which reads it by name and country")
         XCTAssertEqual(IPTVFixture.state.requests.count, before)
     }
 

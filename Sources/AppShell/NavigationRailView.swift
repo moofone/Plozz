@@ -155,6 +155,7 @@ struct NavigationRailView: View {
     @Environment(\.themePalette) private var palette
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.liveTVGlassLayout) private var glassLayout
     @Namespace private var railFocusScope
     @FocusState private var focusedTarget: RailFocusTarget?
     @State private var pendingFocusRequest: Int?
@@ -252,6 +253,22 @@ struct NavigationRailView: View {
         )
         .frame(width: animatedRailWidth, alignment: .leading)
         .frame(maxHeight: .infinity, alignment: .top)
+        .overlay(alignment: .bottomLeading) {
+            if selection == .liveTV {
+                // Collapsed: the time over AM/PM on the icons' axis. Expanded: one line and the date, centred in the sheet. Both
+                // boxes share one vertical centre, so opening the menu does not move the clock.
+                let placement = NavigationRailClock.Placement(layout: glassLayout, isExpanded: isExpanded)
+                Group {
+                    if isExpanded { NavigationRailExpandedClock() } else { NavigationRailClock() }
+                }
+                .frame(width: placement.width, height: placement.height)
+                .offset(
+                    x: placement.centerX - placement.width / 2,
+                    // The rail sits inside the safe area; the clock is placed from the screen's bottom edge.
+                    y: -(placement.centerFromBottom - placement.height / 2 - physicalVerticalInset)
+                )
+            }
+        }
         .onGeometryChange(for: CGFloat.self) { proxy in
             max(proxy.frame(in: .global).minY, 0)
         } action: { inset in
@@ -587,12 +604,14 @@ struct NavigationRailView: View {
             NavigationRailItemStyle(
                 expansionProgress: expansionProgress,
                 isSelected: selection == destination,
-                accent: palette.accent
+                accent: palette.accent,
+                usesNeutralSelection: destination == .liveTV
             )
         )
         .padding(.vertical, NavigationRailMetrics.itemVerticalPadding)
         .offset(x: animatedContentOffset)
         .accessibilityLabel(label)
+        .accessibilityIdentifier("navigation-rail-\(destination.storageValue)")
         .accessibilityValue(isOffline ? Text("Offline") : Text(verbatim: ""))
         .accessibilityAddTraits(selection == destination ? [.isSelected] : [])
     }
@@ -619,6 +638,7 @@ struct NavigationRailView: View {
         if focused {
             return colorScheme == .dark ? .black : .white
         }
+        if isSelected, case .destination(.liveTV) = target { return .primary }
         return isSelected ? palette.accent : .primary
     }
 
@@ -724,6 +744,8 @@ struct NavigationRailItemStyle: ButtonStyle {
     let expansionProgress: CGFloat
     let isSelected: Bool
     let accent: Color
+    /// A quiet white disc instead of the accent wash (the Live TV glass screen).
+    var usesNeutralSelection = false
     var horizontalPadding: CGFloat = NavigationRailMetrics.rowHorizontalPadding
     var verticalPadding: CGFloat = NavigationRailMetrics.rowInnerPadding
     @Environment(\.isFocused) private var isFocused
@@ -734,12 +756,12 @@ struct NavigationRailItemStyle: ButtonStyle {
         let invertedText: Color = colorScheme == .dark ? .black : .white
         let foreground: AnyShapeStyle = isFocused
             ? AnyShapeStyle(invertedText)
-            : AnyShapeStyle(isSelected ? AnyShapeStyle(accent) : AnyShapeStyle(.primary))
+            : AnyShapeStyle(isSelected && !usesNeutralSelection ? AnyShapeStyle(accent) : AnyShapeStyle(.primary))
         let fill: AnyShapeStyle = isFocused
             ? AnyShapeStyle(invertedFill)
             : AnyShapeStyle(
                 isSelected
-                    ? accent.opacity(0.20)
+                    ? (usesNeutralSelection ? invertedFill.opacity(0.20) : accent.opacity(0.20))
                     : Color.clear
             )
         return configuration.label
@@ -757,6 +779,160 @@ struct NavigationRailItemStyle: ButtonStyle {
                             * expansionProgress
                     )
             )
+    }
+}
+
+/// The time, shown at the foot of the collapsed rail on Live TV: the guide has no
+/// "now" marker, so this is the screen's only clock.
+struct NavigationRailClock: View {
+    /// The 1080p sizes; `Metrics` scales them for the layout in force (4K: × `uiScale`, the mockup's `AL(true).z`).
+    /// The box's height, which fixes the column's vertical centre.
+    static let size: CGFloat = 84
+    /// The box's width. Wider than it is tall so the widest time ("12:59", "23:59") fits at full size with room to spare; the box
+    /// stays centred on `centerX`, so the column's centre is unchanged.
+    static let width: CGFloat = 132
+    static let timeFontSize: CGFloat = 31
+    static let periodFontSize: CGFloat = 20
+    static let centerX: CGFloat = 60
+    /// The two-line column's centre, 81 pt above the screen's bottom edge at 1080p (72.9 at 4K): the mockup's clock box
+    /// sits at `H − railTop`, which puts the time at y ≈ 990 and "PM" at ≈ 1013 at 1080p. Supersedes POLISH-1's 1031 / 1054.
+    static let centerFromBottom: CGFloat = 81
+
+    /// The clock's sizes for one layout.
+    struct Metrics: Equatable {
+        let size, width, timeFontSize, periodFontSize, centerX, centerFromBottom: CGFloat
+
+        init(layout: LiveTVGlassLayout) {
+            size = layout.ui(NavigationRailClock.size)
+            width = layout.ui(NavigationRailClock.width)
+            timeFontSize = layout.ui(NavigationRailClock.timeFontSize)
+            periodFontSize = layout.ui(NavigationRailClock.periodFontSize)
+            centerX = layout.ui(NavigationRailClock.centerX)
+            centerFromBottom = layout.ui(NavigationRailClock.centerFromBottom)
+        }
+    }
+
+    /// Where the clock's box sits on screen, from the screen's leading and bottom edges (the rail's overlay offsets it).
+    struct Placement: Equatable {
+        let centerX, width, height, centerFromBottom: CGFloat
+
+        init(layout: LiveTVGlassLayout, isExpanded: Bool) {
+            let metrics = Metrics(layout: layout)
+            height = metrics.size
+            centerFromBottom = metrics.centerFromBottom
+            if isExpanded {
+                // The open menu's glass sheet: the rail's expanded width less the panel inset either side.
+                width = NavigationRailMetrics.expandedWidth - 2 * NavigationRailMetrics.expandedPanelLayoutInset
+                centerX = NavigationRailMetrics.expandedWidth / 2
+            } else {
+                width = metrics.width
+                centerX = metrics.centerX
+            }
+        }
+    }
+
+    @Environment(\.locale) private var locale
+    @Environment(\.liveTVGlassLayout) private var layout
+
+    var body: some View {
+        let metrics = Metrics(layout: layout)
+        TimelineView(.everyMinute) { context in
+            let parts = Self.parts(for: context.date, locale: locale)
+            // Line boxes of 1.05 × the font size, pulled together so "6:52" and "PM" sit 23 pt
+            // apart, as in the mockup.
+            VStack(spacing: -3.8 * layout.uiScale) {
+                Text(verbatim: parts.time)
+                    .font(.system(size: metrics.timeFontSize, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(height: metrics.timeFontSize * 1.05)
+                if let period = parts.period {
+                    Text(verbatim: period)
+                        .font(.system(size: metrics.periodFontSize, weight: .semibold))
+                        .tracking(0.8 * layout.uiScale)
+                        .opacity(0.62)
+                        .frame(height: metrics.periodFontSize * 1.05)
+                }
+            }
+            .monospacedDigit()
+            .foregroundStyle(.white.opacity(0.9))
+            .shadow(color: .black.opacity(0.45), radius: 6 * layout.uiScale, y: 1)
+            .frame(width: metrics.width, height: metrics.size)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// "6:52" over "PM"; a 24-hour locale has no period.
+    static func parts(for date: Date, locale: Locale) -> (time: String, period: String?) {
+        let pattern = DateFormatter.dateFormat(fromTemplate: "j:mm", options: 0, locale: locale) ?? "h:mm a"
+        let uses12Hour = pattern.contains("a")
+        var calendar = Calendar.current
+        calendar.locale = locale
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        let hour = components.hour ?? 0, minute = components.minute ?? 0
+        let minuteText = String(format: "%02d", minute)
+        guard uses12Hour else { return ("\(hour):\(minuteText)", nil) }
+        let display = hour % 12 == 0 ? 12 : hour % 12
+        let period = hour < 12 ? calendar.amSymbol : calendar.pmSymbol
+        return ("\(display):\(minuteText)", period)
+    }
+}
+/// The clock in the open menu (mockup `.aclock.wide`): the time on one line, its AM/PM smaller and dimmer, the day under it
+/// (weekday, month, day in the viewer's language), centred in the sheet.
+struct NavigationRailExpandedClock: View {
+    /// The 1080p sizes; `Metrics` scales them for the layout in force.
+    static let timeFontSize: CGFloat = 34
+    static let periodFontSize: CGFloat = 24
+    static let dateFontSize: CGFloat = 22
+    static let lineGap: CGFloat = 4
+
+    struct Metrics: Equatable {
+        let timeFontSize, periodFontSize, dateFontSize, lineGap: CGFloat
+
+        init(layout: LiveTVGlassLayout) {
+            timeFontSize = layout.ui(NavigationRailExpandedClock.timeFontSize)
+            periodFontSize = layout.ui(NavigationRailExpandedClock.periodFontSize)
+            dateFontSize = layout.ui(NavigationRailExpandedClock.dateFontSize)
+            lineGap = layout.ui(NavigationRailExpandedClock.lineGap)
+        }
+    }
+
+    @Environment(\.locale) private var locale
+    @Environment(\.liveTVGlassLayout) private var layout
+
+    var body: some View {
+        let metrics = Metrics(layout: layout)
+        TimelineView(.everyMinute) { context in
+            let parts = NavigationRailClock.parts(for: context.date, locale: locale)
+            VStack(spacing: metrics.lineGap) {
+                HStack(alignment: .firstTextBaseline, spacing: metrics.timeFontSize * 0.25) {
+                    Text(verbatim: parts.time)
+                        .font(.system(size: metrics.timeFontSize, weight: .semibold))
+                    if let period = parts.period {
+                        Text(verbatim: period)
+                            .font(.system(size: metrics.periodFontSize, weight: .semibold))
+                            .tracking(0.48 * layout.uiScale)
+                            .opacity(0.72)
+                    }
+                }
+                .lineLimit(1)
+                Text(verbatim: Self.dateText(for: context.date, locale: locale))
+                    .font(.system(size: metrics.dateFontSize, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .monospacedDigit()
+            .foregroundStyle(.white.opacity(0.9))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// "Saturday, November 14": weekday, month and day in the viewer's language and order.
+    static func dateText(for date: Date, locale: Locale) -> String {
+        date.formatted(.dateTime.weekday(.wide).month(.wide).day().locale(locale))
     }
 }
 #endif

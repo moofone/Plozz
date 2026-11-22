@@ -2,6 +2,9 @@ import CoreUI
 import CoreModels
 import FeatureLiveTVCore
 import SwiftUI
+#if DEBUG && canImport(QuartzCore)
+import QuartzCore
+#endif
 
 #if DEBUG
 public enum LiveTVPrototypeEntry {
@@ -74,6 +77,10 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     @State private var model: LiveTVPrototypeModel
     @State private var preview: LiveTVPreviewController
     @State private var imports: LiveTVPrototypeImportModel
+    /// My Channels: which channels are loaded at all (see `LiveTVLineupState`).
+    @State private var lineup: LiveTVLineupState
+    /// A grown-up setting: Kids profiles have no Set Up My Channels.
+    private let allowsManagingChannels: Bool
     @State private var playback: LiveTVPlaybackCoordinator
     @State private var playbackResolvers: LiveTVPlaybackResolverContext
     @State private var sourceAuthority: LiveTVPlaybackSourceAuthority
@@ -111,12 +118,17 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     @State private var categoryFocusRequest = 0
     @State private var sidebarRestoresCategoryFocus = false
     @State private var guideHasFocus = false
+    #if os(tvOS)
+    /// The heading and hero buttons stay out of the focus chain while the first
+    /// lineup loads, so its replacing the saved rows cannot hand entry focus to the heading.
+    @State private var heroAcceptsFocus = false
+    #endif
     @State private var toolbarFocusRequest = 0
     @State private var focusedProgram: LiveTVPrototypeProgram?
     @State private var loadedRequest: Int?
     @State private var guideOffset: TimeInterval = 0
     @State private var timelineOffset: CGFloat = 0
-    @State private var timeAnchor = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 1_800) * 1_800)
+    @State private var timeAnchor = LiveTVGuideClock.windowStart(for: Date())
     @State private var pendingTuneID: String?
     @State private var pendingServerConnection = false
     @State private var pendingIPTVConnection = false
@@ -145,13 +157,34 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     @State private var scanBinding: LiveTVScanCatalogBinding
     @State private var showsScanSources = false
     @State private var pendingScanOfferSourceID: String?
+    /// What the glass browse screen presents above the guide (tvOS).
+    /// Changes only through `glassTransition(_:)`.
+    @State private var glassPresentation = LiveTVPrototypeGlassPresentation.none
+    #if os(tvOS)
+    /// The Favourite Filters row focus returns to (the filter just edited, saved or the New row).
+    @State private var filtersPageFocusID: String?
+    /// The tray row that opened a page: Back from the page returns to the tray with focus on this row.
+    @State private var quickMenuReturnFocusID: String?
+    @Namespace private var glassFocusScope
+    @State private var glassReturnsFocusToHeading = false
+    @Environment(\.resetFocus) private var resetFocus
+    #endif
+    /// Screen frame of the guide cell the context menu was opened from.
+    @State private var glassCellFrame = CGRect.zero
     /// Settings › Live TV › Preview after watching.
     @State private var previewAfterWatching = true
     @Environment(\.themePalette) private var palette
     @Environment(\.plozzNavigationContentInset) private var navigationInset
+    #if os(tvOS)
+    @FocusState private var horizontalHeadingFocused: Bool
+    @State private var horizontalPlateRequest: PrototypeGuidePlateRequest?
+    @Environment(\.plozzPinnedSidebarInteraction) private var pinnedSidebarInteraction
+    #endif
     @Environment(\.plozzTopNavigationContentInsets) private var topNavigationInsets
     @Environment(\.plozzReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorContrast
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.liveTVGlassLayout) private var glassLayout
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.layoutDirection) private var layoutDirection
@@ -215,6 +248,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         importModel: LiveTVPrototypeImportModel? = nil,
         profileID: String = ProfileStore.defaultProfileID,
         preferencesNamespace: String?,
+        allowsManagingChannels: Bool = true,
         libraryService: LibraryChannelService? = nil,
         libraryHistory: LibraryChannelHistorySettings? = nil,
         libraryIssue: LibraryChannelError? = nil,
@@ -283,6 +317,11 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             serverProviderResolver: currentResolver, cache: catalogCache, lastSeen: lastSeenStore
         )
         _imports = State(initialValue: imports)
+        let lineup = LiveTVLineupState(store: preferencesStore == nil ? nil : LiveTVLineupStore(namespace: preferencesNamespace))
+        _lineup = State(initialValue: lineup)
+        self.allowsManagingChannels = allowsManagingChannels
+        // Only a profile with stored preferences has a lineup; fixtures and previews load every channel.
+        if preferencesStore != nil { imports.lineupState = lineup }
         self.onExpandedChange = onExpandedChange
         self.onOpenTitle = onOpenTitle
         self.onShowSettings = onShowSettings
@@ -295,7 +334,9 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         let model = LiveTVPrototypeModel(
             now: Date(), scenario: .noGuide,
             isLargeCatalog: isLargeCatalog,
-            channels: [], preferencesStore: preferencesStore
+            channels: [], preferencesStore: preferencesStore,
+            logoService: LiveTVChannelLogoService.shared,
+            favoriteFilterStore: preferencesStore == nil ? nil : LiveTVFavoriteFilterStore(namespace: preferencesNamespace)
         )
         _model = State(initialValue: model)
         if startsWithCategories { model.category = nil }
@@ -309,9 +350,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         _scanBinding = State(initialValue: scanBinding)
         #if os(tvOS)
         _needsPreviewChoice = State(initialValue: initialViewSettings?.hasChosenAutoPreview == false)
-        let preview = LiveTVPreviewController(
-            model: model, followsFocus: initialViewSettings?.allowsAutomaticPreview ?? true
-        )
+        let preview = LiveTVPreviewController(model: model, followsFocus: false)
         #else
         let preview = LiveTVPreviewController(model: model, followsFocus: false)
         #endif
@@ -388,9 +427,11 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 nativeNavigation: usesNativeFullscreen && !isMultiviewWorkspace,
                 topNavigationInsets: isMultiviewWorkspace ? EdgeInsets() : topNavigationInsets,
                 largeText: typeSize.isAccessibilitySize,
-                isSearching: isSearching, showsCategories: showsCategoryDirectory,
+                isSearching: isSearching, hidesSidebar: Self.hidesCategorySidebar,
+                showsCategories: showsCategoryDirectory,
                 showsVideoPreview: playback.preparation.current != nil || playback.pendingWatchChannelID != nil,
-                toolbarControlsBottom: toolbarControlsBottom.map { $0 - geometry.frame(in: .global).minY }
+                toolbarControlsBottom: toolbarControlsBottom.map { $0 - geometry.frame(in: .global).minY },
+                glass: guideGlassLayout
             )
             let expanded = multiviewSelection == nil && (preview.isExpanded || multiview.isEnabled)
             #if os(iOS)
@@ -469,7 +510,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                             ],
                             startPoint: .leading, endPoint: .trailing
                         )
-                        .opacity(expanded || usesMultiviewLayout || layout.compact ? 0 : 1)
+                        .opacity(expanded || hidesGuideForPopup || usesMultiviewLayout || layout.compact
+                            || usesGuideSheet ? 0 : 1)
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
                         #endif
@@ -541,24 +583,44 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                             ? geometry.size.width - layout.bounds.midX : layout.bounds.midX,
                         y: layout.bounds.midY
                     )
-                    .opacity(expanded || model.channels.isEmpty ? 0 : 1)
+                    .opacity(expanded || hidesGuideForPopup || model.channels.isEmpty || !hasMountedPicture
+                        || usesGuideSheet ? 0 : 1)
+                    .animation(isMultiviewWorkspace && expanded ? nil : playerTransition, value: expanded)
+                // Plozz's own scrims over a playing picture (the guide is on the glass sheet).
+                PrototypePlayingScrim()
+                    .frame(width: layout.bounds.width, height: layout.bounds.height)
+                    .position(
+                        x: layoutDirection == .rightToLeft
+                            ? geometry.size.width - layout.bounds.midX : layout.bounds.midX,
+                        y: layout.bounds.midY
+                    )
+                    .opacity(expanded || hidesGuideForPopup || model.channels.isEmpty || !usesGuideSheet ? 0 : 1)
                     .animation(isMultiviewWorkspace && expanded ? nil : playerTransition, value: expanded)
                 #endif
 
                 guideContent(layout, canvasWidth: geometry.size.width)
                 #if os(tvOS)
+                .environment(\.prototypeGuideSheetPlan, guideSheetPlan(layout))
                 .focusSection()
+                .focusScope(glassFocusScope)
+                .disabled(glassPresentation.trapsFocus)
+                .onExitCommand(perform: guideBackAction.handledByGuide ? { performGuideBack(guideBackAction) } : nil)
                 #else
                 .environment(\.prototypeScrollTopBoundary, geometry.frame(in: .global).minY + layout.bounds.minY)
                 #endif
                 .frame(width: geometry.size.width, height: geometry.size.height)
+                #if os(tvOS)
+                .background(alignment: .topLeading) {
+                    if let plan = guideSheetPlan(layout) { PrototypeGuideSheet(plan: plan, origin: layout.bounds.origin) }
+                }
+                #endif
                 #if os(iOS)
                 .contentShape(PrototypeGuideHitRegion(
                     top: layout.heroHeight > 0 ? max(0, layout.videoFrame.maxY) : 0,
                     sidebarWidth: layout.sidebarWidth > 0 ? max(0, layout.videoFrame.minX) : 0,
                     sidebarOnTrailing: layoutDirection == .rightToLeft))
                 #endif
-                .opacity(expanded ? 0 : 1)
+                .opacity(expanded || hidesGuideForPopup ? 0 : 1)
                 #if os(iOS)
                 .offset(y: expanded && !reduceMotion ? 24 : 0)
                 #else
@@ -566,9 +628,13 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 #endif
                 .disabled(expanded || !isActive || showsPreviewIntroduction)
                 .allowsHitTesting(!expanded && isActive && !showsPreviewIntroduction)
-                .accessibilityHidden(expanded || !isActive || showsPreviewIntroduction)
+                .accessibilityHidden(expanded || hidesGuideForPopup || !isActive || showsPreviewIntroduction)
                 .animation(isMultiviewWorkspace && expanded ? nil : playerTransition, value: expanded)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isSearching)
+                #if os(tvOS)
+                glassPresentationLayer(canvas: geometry.size)
+                    .zIndex(1)
+                #endif
                 if showingMultiview {
                     LiveTVMultiviewOverlay(
                         coordinator: multiview,
@@ -813,7 +879,10 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             ordered = (model.channel(id: channelID).map { [$0] } ?? []) + lineup
         }
         return ordered.prefix(Self.onNowLimit).map { channel in
-            channel.playerItem(program: model.currentProgram(for: channel.id)?.playerInfo)
+            channel.playerItem(
+                program: model.currentProgram(for: channel.id)?.playerInfo,
+                resolvedLogoURL: model.effectiveLogoURL(for: channel)
+            )
         }
     }
 
@@ -882,6 +951,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
 
     private var sheetContent: some View {
         playerAndGuideSurface
+        .environment(model)
+        .environment(\.changeChannelLogo, { sheet = .changeLogo($0) })
         .onGeometryChange(for: Bool.self) { $0.size.height > $0.size.width } action: { isPortraitCanvas = $0 }
         .modifier(PrototypeSheetPresentation(selection: $sheet, onDismiss: {
             if let item = pendingLibraryNavigation {
@@ -929,6 +1000,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 },
                 canMutate: { isActive && isProfileAuthorized() }
             )
+            .environment(model)
             .environment(\.themePalette, palette)
             .tint(palette.accent)
         })
@@ -1029,11 +1101,64 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 to: model.now, into: model
             )
         }
-        .task(id: isActive) {
-            while isActive && !Task.isCancelled {
-                model.synchronizeClock()
-                try? await Task.sleep(for: .seconds(30))
-            }
+        .task(id: isActive) { await runGuideClock() }
+        .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in
+            if isActive { catchUpGuideClock() }
+        }
+        #if os(iOS) || os(tvOS)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
+            if isActive { catchUpGuideClock() }
+        }
+        #endif
+    }
+
+    /// The guide's one clock. It ticks at the next programme boundary of the rows in view, at every
+    /// :00/:30 and at least every 30 s, and each tick re-derives state from `model.now`; it never moves focus.
+    private func runGuideClock() async {
+        guard isActive else { return }
+        syncGuideClock(animated: false)
+        while isActive && !Task.isCancelled {
+            let wait = model.nextClockDeadline(channelIDs: clockChannelIDs).timeIntervalSince(model.now)
+            try? await Task.sleep(for: .seconds(max(0.25, wait)))
+            guard !Task.isCancelled else { return }
+            syncGuideClock(animated: true)
+        }
+    }
+
+    /// The rows whose programme boundaries matter: the selection, the playing channel and the screenful around them.
+    private var clockChannelIDs: [String] {
+        var ids = [selectedChannelID, model.playingChannelID, heroChannel?.id].compactMap { $0 }
+        let rows = model.guideRowIDs
+        if let anchor = model.guideRowIndex(near: selectedRowID), rows.indices.contains(anchor) {
+            ids += rows[max(0, anchor - 4)..<min(rows.count, anchor + 9)].map(\.channelID)
+        }
+        return ids
+    }
+
+    private func syncGuideClock(animated: Bool) {
+        // A panel over the guide doesn't hold the window: the guide behind it keeps time, and the
+        // guide moves focus only while it owns focus (`refocusIfProgramLeftWindow`).
+        model.synchronizeClock()
+        applyGuideWindow(animated: animated)
+    }
+
+    /// Back on the tab, in the foreground or from the player: everything is recomputed in one
+    /// pass and the window lands on the current slot at once, without animation.
+    private func catchUpGuideClock() {
+        model.synchronizeClock()
+        model.alignGuideWindowToNow()
+        applyGuideWindow(animated: false)
+    }
+
+    /// Follows the model's window start while the guide sits on the default window; a guide the
+    /// viewer moved to another time (or scrolled) stays where it is until "Now".
+    private func applyGuideWindow(animated: Bool) {
+        let start = model.guideWindowStart
+        guard timeAnchor != start, guideOffset == 0, timelineOffset == 0 else { return }
+        if animated, !reduceMotion {
+            withAnimation(.easeInOut(duration: LiveTVGuideClock.shiftAnimationDuration)) { timeAnchor = start }
+        } else {
+            timeAnchor = start
         }
     }
 
@@ -1064,6 +1189,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         .onChange(of: model.favoriteOrder) { _, _ in publishHomeSnapshot() }
         .onChange(of: model.hiddenChannels) { _, _ in publishHomeSnapshot() }
         .onChange(of: model.preferencesIssue) { _, _ in publishHomeSnapshot() }
+        .onChange(of: model.logoRevision) { _, _ in publishHomeSnapshot() }
         .onChange(of: homeModel?.pendingRequest, initial: true) { _, _ in
             updatePreviewAvailability()
             handleHomeSelection()
@@ -1192,9 +1318,43 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         .onChange(of: controlsActive) { _, active in
             updatePreviewAvailability()
         }
-        .onChange(of: guideHasFocus) { _, focused in
+        .onChange(of: guideHasFocus) { _, _ in
             updatePreviewAvailability()
         }
+        #if os(tvOS)
+        .modifier(LiveTVRailExpansionObserver { expanded in
+            TVBackDiagnostics.notice("page sees rail expanded=\(expanded) presentation=\(String(describing: glassPresentation)) focus=\(TVBackDiagnostics.focusSummary())")
+            glassTransition(expanded ? .railOpened : .railClosed)
+        })
+        .onAppear { pinnedSidebarInteraction?.pageBackHandler = { performGlassPageBack() } }
+        .onDisappear {
+            pinnedSidebarInteraction?.pageBackHandler = nil
+            pinnedSidebarInteraction?.setPageHoldsFocus(false)
+        }
+        .onChange(of: scenePhase) { _, _ in glassTransition(.reset) }
+        .onChange(of: isActive) { _, _ in
+            glassTransition(.reset)
+            // The shell owns the rail: a stale `.rail` never outlives the rail it mirrors.
+            glassTransition(pinnedSidebarInteraction?.railIsExpanded == true ? .railOpened : .railClosed)
+        }
+        .onChange(of: model.playingChannelID) { _, _ in glassTransition(.reset) }
+        // A republished channel list (guide import, refresh) does not close what the user just opened: a panel whose channel went
+        // away closes through `glassContentIsAvailable`.
+        .onChange(of: isProfileAuthorized()) { _, _ in glassTransition(.reset) }
+        .onChange(of: sheet?.id) { _, id in if id != nil { glassTransition(.reset) } }
+        .onChange(of: glassContentIsAvailable) { _, available in
+            if !available { glassTransition(.contentUnavailable) }
+        }
+        #if DEBUG
+        .modifier(LiveTVDebugRemoteReceiver(perform: performDebugRemote))
+        #endif
+        #endif
+        #if os(tvOS)
+        .onChange(of: imports.catalogPhase) { old, new in
+            if old == .loading, new != .loading { heroAcceptsFocus = true }
+        }
+        .onChange(of: isActive) { _, _ in heroAcceptsFocus = false }
+        #endif
         .onChange(of: sheet?.id) { _, _ in
             if sheet != nil { playback.cancelWatch() }
             else {
@@ -1212,7 +1372,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
 
     private var lifecycleContent: some View {
         browsingObservedContent
-        .onChange(of: scenePhase, initial: true) { _, _ in
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            if phase == .active, isActive { catchUpGuideClock() }
             recordSourceDiagnostics(.guideState)
             updatePlaybackAvailability()
             handleHomeSelection()
@@ -1254,11 +1415,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             if active {
                 hasBeenActive = true
                 // The view may have been created long before it is shown; start from now.
-                model.synchronizeClock()
-                if guideOffset == 0, timelineOffset == 0 {
-                    let current = Date(timeIntervalSince1970: floor(model.now.timeIntervalSince1970 / 1_800) * 1_800)
-                    if timeAnchor != current { timeAnchor = current }
-                }
+                catchUpGuideClock()
                 model.reloadPreferences()
                 applyViewSettings()
             }
@@ -1270,6 +1427,9 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         .onChange(of: hidesAppNavigation, initial: true) { _, hidesChrome in
             onExpandedChange(hidesChrome)
         }
+        .onChange(of: preview.isExpanded) { _, expanded in
+            markBackPresented(expanded ? .guideToPlayer : .playerToGuide)
+        }
         .onChange(of: multiview.panes.count) { previous, current in
             if previous > 1, current == 1 { finishSinglePictureMultiview() }
         }
@@ -1278,7 +1438,12 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             workspace?.isPresented = presented
         }
         #endif
-        .onAppear(perform: updatePlaybackAvailability)
+        .onAppear {
+            #if DEBUG && os(tvOS)
+            LiveTVOpenTrace.mark("view.rootOnAppear")
+            #endif
+            updatePlaybackAvailability()
+        }
         .onDisappear(perform: handleDisappearance)
     }
 
@@ -1621,6 +1786,9 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     private var loadsCatalog: Bool { catalogActivation.loadsCatalog }
 
     private func reloadCatalog() async {
+        #if DEBUG && os(tvOS)
+        LiveTVOpenTrace.mark("view.reloadCatalogEntry")
+        #endif
         recordSourceDiagnostics(.guideReload)
         defer { recordSourceDiagnostics(.guideReloaded) }
         guard loadsCatalog, isProfileAuthorized(), loadedRequest != reloadRequest else { return }
@@ -1769,7 +1937,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 } else {
                     guideBrowser(
                         closeSearch: closeSearch,
-                        leadingExit: layout.availableSidebarWidth > 0 ? revealCategories : nil
+                        leadingExit: layout.sidebarWidth > 0 ? revealCategories : nil
                     )
                     .disabled(usesNativeFullscreen && controlsActive)
                 }
@@ -1821,11 +1989,14 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 channel: heroChannel, program: heroProgram, layout: layout,
                 watch: { if let id = heroChannel?.id { tune(id) } },
                 watchTitle: multiviewSelection?.title,
-                isLoading: isInitialCatalogLoading
+                isLoading: isInitialCatalogLoading,
+                glass: glassHeroInputs
             )
             .opacity(isSearching ? 0 : 1)
             .allowsHitTesting(!isSearching)
             .accessibilityHidden(isSearching)
+            // The guide, not the heading, takes entry focus (the first programme cell).
+            .disabled(blocksBrowseControls || heroHoldsBackFocus)
         }
         .frame(height: layout.heroHeight, alignment: layout.heroAlignment)
         #endif
@@ -1867,6 +2038,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     ) -> some View {
         PrototypeBrowser(
             model: model, imports: imports,
+            lineupNotice: model.favoriteFilters.selectedFilter.flatMap { lineup.missingCountryNotice(forTagIDs: $0.tagIDs) },
             selectedID: $selectedChannelID, selectedRowID: $selectedRowID,
             railActive: $controlsActive, focusedProgram: $focusedProgram, hasFocus: $guideHasFocus,
             topRequest: topRequest, nowRequest: nowRequest, guideOffset: $guideOffset,
@@ -1874,7 +2046,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             restoreFocusRequest: preview.focusRestoreRequest,
             isPresented: isActive && isGuidePresented && sheet == nil,
             isRestoringFocus: preview.isRestoringGuideFocus,
-            restoresPlaybackFocus: preview.restoresPlaybackFocus, watchOrigin: preview.watchOrigin,
+            restoresPlaybackFocus: preview.restoresPlaybackFocus, guideFocusMayScroll: preview.guideFocusMayScroll,
+            watchOrigin: preview.watchOrigin,
             focusRestored: {
                 preview.completeGuideFocusRestore($0, focusedChannelID: selectedChannelID)
             },
@@ -1910,10 +2083,29 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             libraryCatalog: libraryCatalogRevision,
             loadLibraryGuide: publishLibraryGuide,
             openLibraryItem: onOpenTitle == nil ? nil : openLibraryItem,
-            leadingExit: leadingExit,
-            previewChannel: previewChannelSelection
+            leadingExit: guideLeadingExit(fallback: leadingExit),
+            plateRequest: guidePlateRequest,
+            previewChannel: previewChannelSelection,
+            onChannelSelect: glassChannelSelect,
+            onProgramHold: glassProgramHold
         )
     }
+
+    #if os(tvOS)
+    private var glassChannelSelect: ((LiveTVPrototypeChannel) -> Void)? {
+        { channel in glassTransition(.openRightPanel(channelID: channel.id)) }
+    }
+
+    private var glassProgramHold: ((LiveTVPrototypeChannel, LiveTVPrototypeProgram?, CGRect) -> Void)? {
+        { channel, program, frame in
+            glassCellFrame = frame
+            glassTransition(.openContext(channelID: channel.id, programID: program?.id))
+        }
+    }
+    #else
+    private var glassChannelSelect: ((LiveTVPrototypeChannel) -> Void)? { nil }
+    private var glassProgramHold: ((LiveTVPrototypeChannel, LiveTVPrototypeProgram?, CGRect) -> Void)? { nil }
+    #endif
 
     private var previewChannelSelection: ((LiveTVGuideRowID) -> Void)? {
         #if os(iOS)
@@ -1923,6 +2115,24 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         }
         #else
         nil
+        #endif
+    }
+
+    private var guidePlateRequest: Binding<PrototypeGuidePlateRequest?>? {
+        #if os(tvOS)
+        if isSearching || glassPresentation.trapsFocus { return nil }
+        return $horizontalPlateRequest
+        #else
+        return nil
+        #endif
+    }
+
+    private func guideLeadingExit(fallback: (() -> Void)?) -> (() -> Void)? {
+        #if os(tvOS)
+        guard guidePlateRequest != nil, !blocksBrowseControls, !heroHoldsBackFocus else { return nil }
+        return { horizontalHeadingFocused = true }
+        #else
+        return fallback
         #endif
     }
 
@@ -2005,6 +2215,9 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     private var hidesAppNavigation: Bool {
         #if os(tvOS)
         if multiview.isEnabled { return isActive }
+        // A tray or context menu over playback is the bare picture and the popup: the shell rail hides through the same
+        // `onExpandedChange` path as full-screen playback and returns when the popup closes.
+        if isActive, glassPresentation.hidesAppSidebar(isPlaying: isPlayingBehindGuide) { return true }
         return preview.suppressesNavigation(isActive: isActive, isSearching: isSearching)
         #else
         if showingMultiview { return isActive }
@@ -2068,6 +2281,14 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         return preview.isRestoringGuideFocus
     }
 
+    #if os(tvOS)
+    /// While the lineup loads and replaces the saved rows, only the guide may hold focus;
+    /// the first completed load releases the heading and hero buttons.
+    private var heroHoldsBackFocus: Bool {
+        !heroAcceptsFocus && imports.catalogPhase == .loading && !model.guideChannels.isEmpty
+    }
+    #endif
+
     private func focusInitialChannelIfNeeded() {
         #if os(tvOS)
         if startsWithCategories && preview.requestInitialCategoryFocus(
@@ -2079,7 +2300,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             return
         }
         guard let row = preview.requestInitialGuideFocus(
-            isActive: isActive, hasOverlay: isSearching || sheet != nil || needsPreviewChoice
+            isActive: isActive, hasOverlay: isSearching || sheet != nil || needsPreviewChoice,
+            preferring: imports.restoredGuideViewport.map { $0.focus ?? $0.anchor }
         ) else { return }
         selectedRowID = row
         selectedChannelID = row.channelID
@@ -2087,6 +2309,504 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         controlsActive = false
         #endif
     }
+
+    /// The category sidebar has no place on the tvOS glass screen: the guide takes the full width.
+    private static var hidesCategorySidebar: Bool {
+        #if os(tvOS)
+        true
+        #else
+        false
+        #endif
+    }
+
+    /// A video picture is mounted under the guide (a preview, a pending Watch or multiview).
+    private var hasMountedPicture: Bool {
+        playback.preparation.current != nil || playback.pendingWatchChannelID != nil
+            || multiview.panes.contains { $0.preparation.current != nil }
+    }
+
+    /// The layout the guide is placed with: lower, with a shorter ruler, while it sits on the glass sheet.
+    private var guideGlassLayout: LiveTVGlassLayout {
+        #if os(tvOS)
+        usesGuideSheet ? glassLayout.withGuideSheet() : glassLayout
+        #else
+        glassLayout
+        #endif
+    }
+
+    #if os(tvOS)
+    /// A picture plays under the guide and the system glass can carry it: the times and rows sit on one glass sheet and the dark edge
+    /// scrims give way to Plozz's own. Reduce Transparency, increased contrast and tvOS before 26 keep the scrims.
+    private var usesGuideSheet: Bool {
+        var sdkHasLiquidGlass = false
+        if #available(tvOS 26.0, *) { sdkHasLiquidGlass = true }
+        return PrototypePlayingGlass.usesSDKGlass(
+            hasPicture: hasMountedPicture, isMultiview: multiview.isEnabled, reduceTransparency: reduceTransparency,
+            increasedContrast: colorContrast == .increased, sdkHasLiquidGlass: sdkHasLiquidGlass)
+    }
+
+    /// The sheet's geometry while the guide is on it (nil when there are no rows to hold, or no sheet).
+    private func guideSheetPlan(_ layout: PrototypePreviewLayout) -> PrototypeGuideSheetPlan? {
+        guard usesGuideSheet, !model.guideRowIDs.isEmpty, !isSearching else { return nil }
+        return PrototypeGuideSheetPlan(glass: glassLayout, canvas: layout.bounds.size, rowCount: model.guideRowIDs.count)
+    }
+
+    private func requestPlateFromHeading(_ request: PrototypeGuidePlateRequest) {
+        if request == .firstVisibleRow {
+            guard isActive, isGuidePresented, sheet == nil, !preview.isRestoringGuideFocus,
+                  guidePlateRequest != nil, pinnedSidebarInteraction?.railIsExpanded != true else { return }
+            // Native heading focus can coexist with the legacy category/toolbar gate.
+            // Release it before the browser consumes Down's plate request.
+            controlsActive = false
+        }
+        horizontalPlateRequest = request
+    }
+
+    private var glassHeroInputs: PrototypeGlassHeroInputs {
+        let channelID = heroChannel?.id
+        return PrototypeGlassHeroInputs(
+            headingTitle: glassHeadingTitle,
+            headingCount: LiveTVGlassFormatting.shortCount(model.visibleChannels.count),
+            isHeadingOpen: glassPresentation == .quickMenu || glassPresentation == .favouriteFilters || glassPresentation == .lineup,
+            openHeading: { glassTransition(.toggleQuickMenu) },
+            focusScope: glassFocusScope,
+            prefersFocus: glassReturnsFocusToHeading,
+            navigation: .init(
+                focus: $horizontalHeadingFocused,
+                openSidebar: pinnedSidebarInteraction.map { interaction in { interaction.requestOpen() } },
+                requestPlate: requestPlateFromHeading
+            ),
+            isPlaying: channelID != nil && channelID == model.playingChannelID,
+            now: model.now,
+            isFavorite: channelID.map { model.favoriteIDs.contains($0) } ?? false,
+            toggleFavorite: { if let channelID { model.toggleFavoriteWithFeedback(channelID) } },
+            multiview: multiviewSelection == nil ? { presentSheetAfterGlassCloses(.multiviewFavorites) } : nil,
+            info: {
+                if let channelID { glassTransition(.openRightPanel(channelID: channelID)) }
+            },
+            glassBacking: usesGuideSheet
+        )
+    }
+
+    /// The panels above the guide: tray, right channel panel and context menu.
+    /// Pure views; this screen owns what they present and what their entries do.
+    @ViewBuilder
+    private func glassPresentationLayer(canvas: CGSize) -> some View {
+        ZStack {
+            LiveTVPrototypeGlassScrim(dimming: glassPresentation.dimming, reduceTransparency: reduceTransparency)
+            glassPanel(canvas: canvas)
+        }
+        .frame(width: canvas.width, height: canvas.height)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: glassPresentation.dimming)
+    }
+
+    @ViewBuilder
+    private func glassPanel(canvas: CGSize) -> some View {
+        switch glassPresentation {
+        case .none, .rail:
+            EmptyView()
+        case .favouriteFilters:
+            // Laid out in 1080p units and drawn scaled, like the tray. It opens where the tray's heading was: its "‹ title" row takes
+            // the heading's place, 14 pt (1080p) above the pill (mockup `y = head.top − 14`), at the tray's top.
+            let scale = glassLayout.uiScale
+            let top = (glassLayout.heroBlockBottom - glassLayout.ui(54.5)) / scale
+            let size = LiveTVGlassFavouriteFiltersPlan.size(rowCount: model.favoriteFilterList.count, maxHeight: canvas.height / scale - top - 30)
+            LiveTVGlassUnitScale(scale: scale) {
+                LiveTVGlassFavouriteFiltersPage(
+                    model: model, top: top, canvasHeight: canvas.height / scale, preferredFocusID: filtersPageFocusID,
+                    onNew: {
+                        filtersPageFocusID = LiveTVGlassFavouriteFiltersPlan.newRowID
+                        glassTransition(.openTagPicker(editing: nil))
+                    },
+                    onEdit: { id in
+                        filtersPageFocusID = id
+                        glassTransition(.openTagPicker(editing: id))
+                    },
+                    onBack: { glassTransition(.back) })
+            }
+            .position(x: glassLayout.headingLeadingX - glassLayout.ui(16) + size.width * scale / 2, y: top * scale + size.height * scale / 2)
+            .frame(width: canvas.width, height: canvas.height)
+        case .lineup:
+            let scale = glassLayout.uiScale
+            let leading = glassLayout.headingLeadingX - glassLayout.ui(12)
+            let size = CGSize(
+                width: LiveTVGlassTagPickerMetrics.width(leading: leading, canvasWidth: canvas.width, scale: scale),
+                height: LiveTVGlassTagPickerMetrics.height(canvasHeight: canvas.height, scale: scale))
+            LiveTVGlassUnitScale(scale: scale) {
+                LiveTVGlassLineupSheet(state: lineup, size: size, onApply: applyGlassLineup, onBack: backFromGlassLineup)
+            }
+            .position(
+                x: leading + size.width * scale / 2,
+                y: LiveTVGlassTagPickerMetrics.top + size.height * scale / 2)
+            .frame(width: canvas.width, height: canvas.height)
+        case let .tagPicker(editing, _):
+            // The whole screen with the same margin all round (mockup `tagLayout`), in 1080p units drawn scaled.
+            let scale = glassLayout.uiScale
+            let margin = LiveTVGlassTagSheetMetrics.margin
+            let size = LiveTVGlassTagSheetMetrics.size(canvas: canvas, scale: scale)
+            LiveTVGlassUnitScale(scale: scale) {
+                LiveTVGlassTagPicker(
+                    model: model, size: size, editingID: editing,
+                    onSave: { saveGlassFilter($0, name: $1, editing: editing) },
+                    onDelete: editing.map { id in { deleteGlassFilter(id) } },
+                    onBack: { glassTransition(.back) })
+            }
+            .position(x: margin + size.width * scale / 2, y: margin + size.height * scale / 2)
+            .frame(width: canvas.width, height: canvas.height)
+        case .quickMenu:
+            // Laid out at 1080p and drawn scaled (`LiveTVGlassUnitScale`). The menu opens over the heading: the ticked row is centred
+            // on the heading pill (as a pop-up opens on its current choice), so the pill itself is not drawn while it is open.
+            let menuScale = glassLayout.uiScale
+            let layout = glassQuickMenuLayout
+            let top = layout.top(headingCenter: glassLayout.heroBlockBottom / menuScale - Self.glassHeadingCenterAboveHeroBottom)
+            let height = layout.height(available: canvas.height / menuScale - top - LiveTVGlassQuickMenuLayout.bottomMargin)
+            LiveTVGlassUnitScale(scale: menuScale) {
+                LiveTVGlassQuickMenu(
+                    entries: glassQuickMenuEntries,
+                    headingWidth: glassQuickMenuHeadingWidth,
+                    caption: LiveTVGlassQuickMenuCaption.updated(imports.lastGuideRefresh),
+                    maxHeight: height,
+                    initialFocusID: quickMenuReturnFocusID,
+                    onSelect: selectGlassQuickMenuEntry,
+                    onClose: { glassTransition(.back) }
+                )
+            }
+            .position(
+                x: glassLayout.headingLeadingX - glassLayout.ui(16) + layout.width * menuScale / 2,
+                y: top * menuScale + height * menuScale / 2)
+            .frame(width: canvas.width, height: canvas.height)
+        case let .rightPanel(channelID):
+            if let content = glassChannelPanelContent(channelID) {
+                LiveTVGlassChannelPanel(
+                    content: content,
+                    canvasHeight: canvas.height,
+                    onWatch: { glassTransition(.close); tune(channelID) },
+                    onMultiview: { presentSheetAfterGlassCloses(.multiviewFavorites) },
+                    onToggleFavorite: { model.toggleFavoriteWithFeedback(channelID) },
+                    onClose: { glassTransition(.back) }
+                )
+                .padding(.trailing, glassLayout.panelMargin)
+                // As in the mockup: the panel is as tall as its content and centred between the screen's margins.
+                .frame(width: canvas.width, height: canvas.height, alignment: .trailing)
+            }
+        case let .context(channelID, programID):
+            let entries = glassContextEntries(channelID, programID: programID)
+            // Placed in 1080p units and drawn scaled, like the tray.
+            let scale = glassLayout.uiScale
+            let origin = LiveTVGlassContextMenuGeometry.origin(
+                forCellFrame: CGRect(
+                    x: glassCellFrame.minX / scale, y: glassCellFrame.minY / scale,
+                    width: glassCellFrame.width / scale, height: glassCellFrame.height / scale),
+                canvas: CGSize(width: canvas.width / scale, height: canvas.height / scale), entryCount: entries.count)
+            LiveTVGlassUnitScale(scale: scale) {
+                LiveTVGlassContextMenu(
+                    entries: entries,
+                    onSelect: { selectGlassContextEntry($0, channelID: channelID, programID: programID) },
+                    onClose: { glassTransition(.back) }
+                )
+                .fixedSize()
+            }
+            .position(x: (origin.x + LiveTVGlassListMetrics.contextMenu.width / 2) * scale,
+                      y: (origin.y + LiveTVGlassContextMenuGeometry.height(entryCount: entries.count) / 2) * scale)
+            .frame(width: canvas.width, height: canvas.height)
+        }
+    }
+
+    /// The only writer of `glassPresentation`. An event that is invalid for the current
+    /// presentation is dropped (and logged in DEBUG); focus returns to the anchor when a
+    /// presentation closes, because the guide behind it was out of the focus chain.
+    private func glassTransition(_ event: LiveTVPrototypeGlassEvent) {
+        #if os(tvOS)
+        // A `.rail` the shell no longer shows would refuse every open: the shell's live state decides.
+        if let interaction = pinnedSidebarInteraction, glassPresentation == .rail, event != .railOpened, event != .railClosed,
+           !interaction.railIsExpanded {
+            TVBackDiagnostics.notice("glass stale rail cleared before \(String(describing: event))")
+            glassPresentation = .none
+        }
+        #endif
+        let previous = glassPresentation
+        guard let next = previous.applying(event, canPresent: glassCanPresent) else {
+            if let reason = previous.dropReason(of: event, canPresent: glassCanPresent) {
+                TVBackDiagnostics.notice("event=glassInputDropped reason=\(reason) input=\(String(describing: event)) state=\(String(describing: previous)) active=\(isActive) sheet=\(sheet != nil) expandedPicture=\(preview.isExpanded) multiview=\(multiview.isEnabled) intro=\(showsPreviewIntroduction)")
+            }
+            return
+        }
+        glassPresentation = next
+        // The tray remembers its opener only while it is being returned to; a fresh opening starts at the top.
+        if next == .none { quickMenuReturnFocusID = nil }
+        TVBackDiagnostics.notice("glass event=\(String(describing: event)) \(String(describing: previous)) -> \(String(describing: next))")
+        // The rail stays out of the focus chain while a panel is open and until focus is back in the page, so removing the panel's
+        // focused view cannot hand focus to the sidebar (which then expands).
+        if next.trapsFocus { pinnedSidebarInteraction?.setPageHoldsFocus(true) }
+        if next == .none, previous.focusReturn != nil {
+            glassReturnsFocusToHeading = previous.focusReturn == .heading
+            Task { @MainActor in
+                await Task.yield()
+                resetFocus(in: glassFocusScope)
+                glassReturnsFocusToHeading = false
+                await Task.yield()
+                TVBackDiagnostics.notice("glass closed: focus after reset = \(TVBackDiagnostics.focusSummary()) expectedReturn=\(String(describing: previous.focusReturn))")
+                // A panel opened again meanwhile keeps its hold; only a closed page releases the sidebar.
+                if !glassPresentation.trapsFocus { pinnedSidebarInteraction?.setPageHoldsFocus(false) }
+            }
+        } else if !next.trapsFocus {
+            pinnedSidebarInteraction?.setPageHoldsFocus(false)
+        }
+    }
+
+    /// The shell asks before it treats Back as its own: with a panel open the press closes that panel (and only it).
+    private func performGlassPageBack() -> Bool {
+        guard glassPresentation.handlesBack else {
+            TVBackDiagnostics.notice("page back: no panel open (presentation=\(String(describing: glassPresentation)))")
+            return false
+        }
+        TVBackConsumption.closePanel("page:\(String(describing: glassPresentation))") { glassTransition(.back) }
+        return true
+    }
+
+    /// Search and sheets present only after the presentation has closed, never in its transaction.
+    private func presentSheetAfterGlassCloses(_ presented: PrototypeSheet) {
+        afterGlassCloses { sheet = presented }
+    }
+
+    private func afterGlassCloses(_ action: @escaping @MainActor () -> Void) {
+        glassTransition(.closeForSheet)
+        Task { @MainActor in
+            await Task.yield()
+            guard glassPresentation == .none else { return }
+            action()
+        }
+    }
+
+    /// Whether a presentation may open: the screen is live and nothing else owns the picture or a sheet.
+    private var glassCanPresent: Bool {
+        isActive && sheet == nil && !preview.isExpanded && !multiview.isEnabled && !showsPreviewIntroduction
+    }
+
+    /// The presentation's content still exists; otherwise it resets at once.
+    private var glassContentIsAvailable: Bool {
+        switch glassPresentation {
+        case .none, .rail, .favouriteFilters: true
+        case .lineup: allowsManagingChannels
+        case let .tagPicker(editing, _): editing.map { id in model.favoriteFilterList.contains { $0.id == id } } ?? true
+        case .quickMenu: !glassQuickMenuEntries.isEmpty
+        case let .rightPanel(id), let .context(id, _): model.channel(id: id) != nil
+        }
+    }
+
+    /// The heading pill's centre, above the hero block's bottom (1080p): the pill is 60 tall and hangs `headingDrop` below it.
+    private static var glassHeadingCenterAboveHeroBottom: CGFloat { PrototypeGlassHero.buttonHeight / 2 - PrototypeGlassHero.headingDrop }
+
+    private var glassQuickMenuHeadingWidth: CGFloat {
+        LiveTVGlassQuickMenuLayout.headingWidth(
+            title: glassHeadingTitle, count: LiveTVGlassFormatting.shortCount(model.visibleChannels.count))
+    }
+
+    private var glassQuickMenuLayout: LiveTVGlassQuickMenuLayout {
+        LiveTVGlassQuickMenuLayout(
+            entries: glassQuickMenuEntries, headingWidth: glassQuickMenuHeadingWidth,
+            caption: LiveTVGlassQuickMenuCaption.updated(imports.lastGuideRefresh))
+    }
+
+    /// My Channels, then the saved favourite filters, then Edit Favourite Filters (New Favourite Filter while there are none),
+    /// then Search, Multiview and Set Up My Channels. A Kids profile has one list (the channels a grown-up approved) and only
+    /// the tools that look around it. There is no Events row: Live Events is a tag of a favourite filter.
+    private var glassQuickMenuEntries: [LiveTVGlassQuickMenuEntry] {
+        var entries: [LiveTVGlassQuickMenuEntry]
+        if allowsManagingChannels {
+            let filters = model.favoriteFilterList
+            entries = [LiveTVGlassQuickMenuEntry.myChannels(
+                id: "all", title: String(localized: "My Channels"), count: model.visibleChannels.count,
+                mergedTotal: lineup.totalCount, showsTotal: model.source == nil,
+                isSelected: model.category == nil && model.selectedFavoriteFilterID == nil)]
+            entries += filters.map { filter in
+                LiveTVGlassQuickMenuEntry(
+                    id: glassFilterEntryPrefix + filter.id, kind: .favoriteFilter, title: model.favoriteFilterName(filter),
+                    count: LiveTVGlassFormatting.shortCount(model.favoriteFilterCount(filter)),
+                    isSelected: filter.id == model.selectedFavoriteFilterID)
+            }
+            if filters.isEmpty {
+                entries.append(.init(id: "newFilter", kind: .newFilter, title: String(localized: "New Favourite Filter"), glyph: .plus))
+            } else {
+                entries.append(.init(id: "editFilters", kind: .facet, title: String(localized: "Edit Favourite Filters"), glyph: .pencil))
+            }
+        } else {
+            entries = [LiveTVGlassQuickMenuEntry(
+                id: "all", kind: .myChannels, title: String(localized: "Kids' Channels"),
+                count: LiveTVGlassFormatting.shortCount(model.visibleChannels.count), isSelected: true)]
+        }
+        entries.append(.init(id: "search", kind: .tool, title: String(localized: "Search"), glyph: .search))
+        if multiviewSelection == nil {
+            entries.append(.init(id: "multiview", kind: .tool, title: String(localized: "Multiview"), glyph: .multiview))
+        }
+        if allowsManagingChannels {
+            entries.append(.init(id: "manage", kind: .tool, title: String(localized: "Set Up My Channels"), glyph: .sliders))
+        }
+        return entries
+    }
+
+    private func selectGlassQuickMenuEntry(_ id: String) {
+        quickMenuReturnFocusID = LiveTVGlassQuickMenuLayout.returnFocusID(afterOpeningEntry: id)
+        switch id {
+        case "manage":
+            lineup.beginEditing()
+            glassTransition(.openLineup)
+        case "editFilters": glassTransition(.openFavouriteFilters)
+        case "newFilter": glassTransition(.openTagPicker(editing: nil))
+        case let id where id.hasPrefix(glassFilterEntryPrefix):
+            glassTransition(.close)
+            showFavoriteFilter(String(id.dropFirst(glassFilterEntryPrefix.count)))
+        case "all": glassTransition(.close); showCategory(nil)
+        case "search": afterGlassCloses { openSearch() }
+        case "multiview": presentSheetAfterGlassCloses(.multiviewFavorites)
+        default: glassTransition(.close)
+        }
+    }
+
+    /// Apply on Set Up My Channels: saves it and, when it changed, reloads the catalogue (the existing progress UI) with the guide back at its
+    /// first row. Back to the tray either way.
+    private func applyGlassLineup() {
+        let changed = lineup.apply()
+        glassTransition(.back)
+        guard changed else { return }
+        showCategory(model.category, enteringGuide: false, keepsFavoriteFilter: true)
+        reloadRequest &+= 1
+    }
+
+    /// Back on Set Up My Channels drops what was changed.
+    private func backFromGlassLineup() {
+        lineup.discard()
+        glassTransition(.back)
+    }
+
+    /// Save from the tag picker: a new filter, or the edit of one. Back to where the picker was opened from on success.
+    private func saveGlassFilter(_ tagIDs: [String], name: String?, editing: String?) -> Bool {
+        if let editing {
+            guard model.updateFavoriteFilter(id: editing, tagIDs: tagIDs, name: name) else { return false }
+        } else {
+            guard let created = model.createFavoriteFilter(tagIDs: tagIDs, name: name) else { return false }
+            filtersPageFocusID = created.id
+            // The mockup returns to the menu with the new filter in effect.
+            if model.selectFavoriteFilter(created.id) { showCategory(model.category, enteringGuide: false, keepsFavoriteFilter: true) }
+        }
+        glassTransition(.back)
+        return true
+    }
+
+    private func deleteGlassFilter(_ id: String) {
+        let rows = model.favoriteFilterList.map { LiveTVGlassFilterRow(id: $0.id, name: "", count: 0) }
+        guard model.deleteFavoriteFilter(id: id) else { return }
+        filtersPageFocusID = LiveTVGlassFavouriteFiltersPlan.focusID(afterDeleting: id, rows: rows)
+        glassTransition(.back)
+    }
+
+    private func glassChannelPanelContent(_ channelID: String) -> LiveTVGlassChannelPanelContent? {
+        guard let channel = model.channel(id: channelID) else { return nil }
+        let now = model.now
+        let current = model.currentProgram(for: channelID)
+        let upcoming = model.programs(for: channelID, from: now, hours: 72)
+            .filter { $0.start > now }
+            .sorted { $0.start < $1.start }
+        let calendar = Calendar.current
+        // The mockup's panel: the programme on now, or (none airing) the next one as "Starts 7:00"; Upcoming is what follows it.
+        let split = LiveTVGlassChannelPanelLayout.headlineAndLater(current: current, next: upcoming)
+        let nowContent = split.headline.map { program -> LiveTVGlassChannelPanelContent.Now in
+            let isAiring = program.id == current?.id
+            return LiveTVGlassChannelPanelContent.Now(
+                title: program.title,
+                meta: !isAiring ? String(localized: "Starts \(LiveTVGlassFormatting.clock(program.start))")
+                    : program.isContinuousLoop ? LiveTVPrototypeProgram.loopTag
+                    : LiveTVGlassFormatting.leftLong(remaining: program.end.timeIntervalSince(now))
+                        .map { String(localized: $0) } ?? "",
+                progress: isAiring && program.end > program.start && !program.isContinuousLoop
+                    ? now.timeIntervalSince(program.start) / program.end.timeIntervalSince(program.start) : nil,
+                description: program.details?.description)
+        }
+        let matchup = model.sportsMatchup(for: channel).map { matchup in
+            LiveTVGlassMatchup(
+                leftTeam: matchup.leftTeam, rightTeam: matchup.rightTeam, crests: model.sportsCrests(for: channel),
+                leagueBadgeURL: model.effectiveLogoURL(for: channel), glyphSymbol: matchup.league.glyphSymbolName,
+                hasAwayHome: matchup.hasAwayHome, isLive: current != nil,
+                startText: current == nil ? upcoming.first.map { $0.start.formatted(date: .omitted, time: .shortened) } : nil)
+        }
+        let isEvent = channel.eventSlot != nil
+        return LiveTVGlassChannelPanelContent(
+            // An event slot's name is the whole playlist line (title, date, service): the panel shows the service, and the title once.
+            channelName: isEvent ? (LiveTVEventSlotClassifier.service(in: channel.name) ?? "") : channel.name,
+            matchup: matchup, logoURL: isEvent ? nil : model.effectiveLogoURL(for: channel),
+            logoNeedsDarkBackground: channel.logoNeedsDarkBackground,
+            placeholderScreeningKey: model.placeholderScreeningKey(for: channel),
+            qualityBadge: channel.guideQualityBadgeText(),
+            isEvent: isEvent,
+            numberText: LiveTVGlassChannelPanelContent.numberText(forChannelNumber: channel.number, isEvent: isEvent),
+            sourceNames: LiveTVGlassChannelPanelContent.sourceNames(
+                playlistSourceID: channel.playlistSourceID,
+                playlists: imports.configuration.playlists.map { (id: $0.id, name: $0.name) }),
+            now: nowContent,
+            isFavorite: model.favoriteIDs.contains(channelID),
+            watchTitle: channelID == model.playingChannelID ? String(localized: "Resume") : String(localized: "Watch"),
+            canWatch: channel.eventSlot?.isIdle != true,
+            upcoming: LiveTVGlassChannelPanelLayout.mergingConsecutiveTitles(split.later.map { program in
+                LiveTVGlassUpcomingProgram(
+                    id: program.id, title: program.title,
+                    timeText: LiveTVGlassFormatting.clock(program.start),
+                    startsTomorrow: !calendar.isDate(program.start, inSameDayAs: now))
+            }).prefix(LiveTVGlassChannelPanelLayout.maxUpcoming).map { $0 })
+    }
+
+    private func glassContextEntries(_ channelID: String, programID: String?) -> [LiveTVGlassContextEntry] {
+        let program = programID.flatMap { id in
+            model.programs(for: channelID, from: model.now.addingTimeInterval(-6 * 3_600), hours: 36).first { $0.id == id }
+        }
+        let ended = program.map { LiveTVProgramPhase(program: $0, now: model.now) == .ended } ?? false
+        let channel = model.channel(id: channelID)
+        return LiveTVGlassContextEntry.entries(
+            // An idle event slot and an ended programme have nothing to watch.
+            offersWatch: channel?.eventSlot?.isIdle != true && !ended,
+            isPlayingChannel: channelID == model.playingChannelID,
+            offersMultiview: multiviewSelection == nil,
+            isFavorite: model.favoriteIDs.contains(channelID),
+            canChangeLogo: channel.map { model.canChangeLogo(of: $0) } ?? false)
+    }
+
+    private func selectGlassContextEntry(_ id: String, channelID: String, programID: String?) {
+        switch id {
+        case "watch": glassTransition(.close); tune(channelID, origin: model.guideRow(for: channelID))
+        case "multiview": presentSheetAfterGlassCloses(.multiviewFavorites)
+        case "favorite": glassTransition(.close); model.toggleFavoriteWithFeedback(channelID)
+        case "logo":
+            if let channel = model.channel(id: channelID) { presentSheetAfterGlassCloses(.changeLogo(channel)) }
+        case "details":
+            if let program = programID.flatMap({ id in
+                model.programs(for: channelID, from: model.now.addingTimeInterval(-6 * 3_600), hours: 36)
+                    .first { $0.id == id }
+            }) {
+                presentSheetAfterGlassCloses(.program(program))
+            } else {
+                afterGlassCloses { glassTransition(.openRightPanel(channelID: channelID)) }
+            }
+        default: glassTransition(.close)
+        }
+    }
+
+    /// The guide's heading: the category (or My Channels) and the filters in effect.
+    private var glassHeadingTitle: String {
+        var parts = [model.showsEvents ? String(localized: "Events")
+                     : model.favoriteFilterHeadingTitle ?? model.category ?? String(localized: "My Channels")]
+        if let source = model.source {
+            switch source {
+            case .iptv: parts.append("IPTV")
+            case .jellyfin: parts.append("Jellyfin")
+            case .plex: parts.append("Plex")
+            case .emby: parts.append("Emby")
+            case .plozz: parts.append(String(localized: "Plozz channels"))
+            }
+        }
+        if let language = model.language { parts.append(language) }
+        if let country = model.country { parts.append(country) }
+        return parts.joined(separator: " · ")
+    }
+    #endif
 
     private var heroChannel: LiveTVPrototypeChannel? {
         (selectedChannelID ?? model.playingChannelID).flatMap { model.channel(id: $0) }
@@ -2220,21 +2940,176 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         return true
     }
 
+    /// A popup is open over the playing picture: the guide chrome is not drawn (it stays mounted, so closing restores its focus).
+    private var hidesGuideForPopup: Bool {
+        #if os(tvOS)
+        !glassPresentation.showsGuideChrome(isPlaying: isPlayingBehindGuide)
+        #else
+        false
+        #endif
+    }
+
+    #if os(tvOS)
+    /// Something plays in the picture under the guide (not multiview, which owns its own Back).
+    private var isPlayingBehindGuide: Bool {
+        !multiview.isEnabled && playback.preparation.current != nil && model.playingChannelID != nil
+    }
+
+    private var guideBackAction: LiveTVPrototypeBackAction {
+        .resolve(
+            presentation: glassPresentation, isPlaying: isPlayingBehindGuide,
+            isFullScreen: preview.isExpanded || multiview.isEnabled)
+    }
+
+    /// Back on the guide: a presentation closes first, then the playing picture goes full-screen
+    /// through the coordinator's own expand (profile and authorization checks included). Playback
+    /// is never interrupted; only presentation changes.
+    private func performGuideBack(_ action: LiveTVPrototypeBackAction) {
+        guard !TVBackConsumption.wasJustConsumed() else {
+            TVBackDiagnostics.notice("guide back ignored: a panel spent this press")
+            return
+        }
+        TVBackDiagnostics.notice("guide back entered action=\(String(describing: action)) presentation=\(String(describing: glassPresentation))")
+        switch action {
+        case .closePresentation:
+            glassTransition(.back)
+        case .showVideoFullScreen:
+            guard let prepared = playback.preparation.current else { return }
+            BackLatencyProbe.shared.pressed(.guideToPlayer)
+            playback.expandPreview(presentationID: playback.presentationID, preparedID: prepared.id)
+        case .shell, .player:
+            break
+        }
+    }
+    #endif
+
+    #if DEBUG && os(tvOS)
+    /// The DEBUG URL channel (`plozz-debug://livetv/…`, see `LiveTVDebugRemote`). Each command goes through the same paths as the
+    /// matching remote press; nothing here bypasses the activity, profile or playback authorization checks.
+    private func performDebugRemote(_ command: LiveTVDebugRemoteCommand) -> LiveTVDebugRemoteOutcome {
+        guard isActive else { return .ignored("live-tv-inactive") }
+        guard isProfileAuthorized() else { return .ignored("profile-not-authorized") }
+        switch command {
+        case .open:
+            return .ok
+        case let .tune(name, group):
+            switch debugRemoteChannel(name: name, group: group) {
+            case let .failure(refusal): return .ignored(refusal.reason)
+            case let .success(id):
+                glassTransition(.close)
+                tune(id)
+                return .ok
+            }
+        case .guide:
+            guard preview.isExpanded, !multiview.isEnabled else { return .ignored("not-full-screen") }
+            guard playback.ownsPlayerPresentation(playback.presentationID) else { return .ignored("player-not-presented") }
+            leavePlaybackForGuide()
+            return .ok
+        case .quickMenu:
+            guard glassPresentation != .quickMenu else { return .ignored("already-open") }
+            return debugRemoteGlass(.toggleQuickMenu)
+        case .context:
+            guard guideHasFocus, let channelID = selectedRowID?.channelID else { return .ignored("no-focused-row") }
+            let program = focusedProgram?.channelID == channelID ? focusedProgram : nil
+            glassCellFrame = LiveTVDebugRemote.focusedFrame() ?? glassCellFrame
+            return debugRemoteGlass(.openContext(channelID: channelID, programID: program?.id))
+        case .panel:
+            guard guideHasFocus, let channelID = selectedRowID?.channelID else { return .ignored("no-focused-row") }
+            return debugRemoteGlass(.openRightPanel(channelID: channelID))
+        case let .focus(name, group):
+            guard !preview.isExpanded, !multiview.isEnabled else { return .ignored("full-screen") }
+            guard glassPresentation == .none else { return .ignored("presentation-open") }
+            switch debugRemoteChannel(name: name, group: group) {
+            case let .failure(refusal): return .ignored(refusal.reason)
+            case let .success(id):
+                guard let row = model.guideRow(for: id) else { return .ignored("not-in-guide") }
+                selectedChannelID = id
+                selectedRowID = row
+                focusedProgram = nil
+                preview.requestBrowsingFocus()
+                return .ok
+            }
+        case .back:
+            if multiview.isEnabled { return .ignored("multiview") }
+            if preview.isExpanded {
+                guard playback.ownsPlayerPresentation(playback.presentationID) else { return .ignored("player-not-presented") }
+                leavePlaybackForGuide()
+                return .ok
+            }
+            let action = guideBackAction
+            guard action.handledByGuide else { return .ignored("back-belongs-to-shell") }
+            performGuideBack(action)
+            return .ok
+        case .stop:
+            glassTransition(.reset)
+            pendingTuneID = nil
+            externalPlayback = nil
+            multiviewSelection = nil
+            preview.stop()
+            multiview.stop()
+            playback.stop()
+            onExpandedChange(false)
+            updatePlaybackAvailability()
+            return .ok
+        }
+    }
+
+    private func debugRemoteChannel(name: String, group: String?) -> Result<String, LiveTVDebugRemoteRefusal> {
+        let keys = model.visibleChannels.map {
+            LiveTVDebugRemoteChannelKey(id: $0.id, name: $0.name, groups: $0.categories)
+        }
+        switch LiveTVDebugRemoteParser.resolve(name: name, group: group, in: keys) {
+        case let .match(id): return .success(id)
+        case .missing: return .failure(LiveTVDebugRemoteRefusal("channel-not-found"))
+        case .ambiguous: return .failure(LiveTVDebugRemoteRefusal("channel-ambiguous"))
+        }
+    }
+
+    private func debugRemoteGlass(_ event: LiveTVPrototypeGlassEvent) -> LiveTVDebugRemoteOutcome {
+        let before = glassPresentation
+        glassTransition(event)
+        return glassPresentation == before ? .ignored("presentation-refused") : .ok
+    }
+    #endif
+
+    /// Ends a Back timing at the next Core Animation commit, once the destination is on screen.
+    private func markBackPresented(_ transition: BackLatencyProbe.Transition) {
+        #if DEBUG && canImport(QuartzCore)
+        CATransaction.setCompletionBlock {
+            MainActor.assumeIsolated { _ = BackLatencyProbe.shared.presented(transition) }
+        }
+        #endif
+    }
+
     /// Leaving fullscreen for the guide. Without Preview after watching the
     /// channel stops rather than carrying on behind the guide, and auto-preview
     /// leaves it alone until focus moves to another channel.
     private func leavePlaybackForGuide() {
-        let leaving = playback.preparation.current?.channel.id
-        returnToGuide()
-        guard !previewAfterWatching, !multiview.isEnabled, !hasAuthorizedExternalPlayback else { return }
-        playback.stop(suppressingPreviewOf: leaving)
-        multiview.stop()
-        updatePlaybackAvailability()
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            let leaving = playback.preparation.current?.channel.id
+            returnToGuide()
+            guard !previewAfterWatching, !multiview.isEnabled, !hasAuthorizedExternalPlayback else { return }
+            playback.stop(suppressingPreviewOf: leaving)
+            multiview.stop()
+            updatePlaybackAvailability()
+        }
     }
 
     private func returnToGuide() {
         playback.cancelWatch()
-        model.synchronizeClock()
+        // The guide stays mounted behind the picture, so Back only changes presentation. A clock
+        // that is fresh catches up one turn later instead of ahead of the first frame.
+        switch model.returnCatchUp() {
+        case .immediate:
+            catchUpGuideClock()
+        case .deferred:
+            Task { @MainActor in
+                await Task.yield()
+                catchUpGuideClock()
+            }
+        }
         controlsActive = false
         #if os(tvOS)
         preview.returnToGuide()
@@ -2264,7 +3139,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         #endif
         guideOffset = 0
         timelineOffset = 0
-        timeAnchor = Date(timeIntervalSince1970: floor(model.now.timeIntervalSince1970 / 1_800) * 1_800)
+        model.alignGuideWindowToNow()
+        timeAnchor = model.guideWindowStart
         #if os(tvOS)
         selectedRowID = model.guideChannels.first?.id
         selectedChannelID = selectedRowID?.channelID
@@ -2311,9 +3187,17 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         isSearching = false
     }
 
-    private func showCategory(_ category: String?, enteringGuide: Bool = true) {
+    /// Narrows the guide to a saved favourite filter (`nil`: all channels), starting the guide at its top.
+    private func showFavoriteFilter(_ id: String?) {
+        guard model.selectFavoriteFilter(id) else { return }
+        showCategory(model.category, keepsFavoriteFilter: true)
+    }
+
+    private func showCategory(_ category: String?, enteringGuide: Bool = true, keepsFavoriteFilter: Bool = false) {
         playback.cancelWatch()
         model.query = ""
+        // A provider group or Events and a favourite filter are separate ways to narrow the guide.
+        if !keepsFavoriteFilter { model.selectFavoriteFilter(nil) }
         model.category = category
         categoryDirectoryReturnID = category
         showsCategoryDirectory = false
@@ -2402,14 +3286,22 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         }
         model.sort = settings.sortByName ? .name : .channelNumber
         model.cleanChannelNames = settings.cleanChannelNames
+        model.showsChannelNumbers = settings.showsChannelNumbers
         model.favoritesOnly = settings.favoritesOnly
         model.guideOnly = settings.guideOnly
+        // The tvOS glass guide has no pinned Recently watched row or section labels.
+        #if os(tvOS)
+        model.showsRecentChannels = false
+        #else
         model.showsRecentChannels = settings.showsRecentChannels
+        #endif
         previewAfterWatching = settings.previewAfterWatching
         preview.setKeepWatchingWhileBrowsing(settings.keepWatchingWhileBrowsing)
         #if os(tvOS)
         needsPreviewChoice = !settings.hasChosenAutoPreview
-        preview.setFollowsFocus(settings.allowsAutomaticPreview)
+        // The glass guide is the flat guide until Watch: nothing connects, and no picture is
+        // mounted behind it, because focus no longer starts a preview.
+        preview.setFollowsFocus(false)
         #endif
     }
 
@@ -2454,6 +3346,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             )
             return
         }
+        guard model.channel(id: id)?.eventSlot?.isIdle != true else { return }
         showsCategoryDirectory = false
         if let selection = multiviewSelection {
             guard let channel = model.channel(id: id) else {
@@ -2549,3 +3442,31 @@ struct PrototypeImportStatus: View {
         }
     }
 }
+
+#if os(tvOS)
+/// Reports the shell's rail opening and closing so the page's presentation follows it.
+private struct LiveTVRailExpansionObserver: ViewModifier {
+    @Environment(\.plozzPinnedSidebarInteraction) private var interaction
+    let onChange: (Bool) -> Void
+
+    func body(content: Content) -> some View {
+        content.background {
+            if let interaction {
+                RailObserver(interaction: interaction, onChange: onChange)
+            }
+        }
+    }
+
+    private struct RailObserver: View {
+        @ObservedObject var interaction: PlozzPinnedSidebarInteraction
+        let onChange: (Bool) -> Void
+        var body: some View {
+            Color.clear.frame(width: 0, height: 0)
+                .onChange(of: interaction.railIsExpanded) { _, expanded in onChange(expanded) }
+        }
+    }
+}
+#endif
+
+/// Quick-menu entry ids of the saved favourite filters are this prefix and the filter's id.
+private let glassFilterEntryPrefix = "filter:"

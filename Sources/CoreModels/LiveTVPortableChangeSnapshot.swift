@@ -19,7 +19,8 @@ public struct LiveTVPortableChangeSnapshot: Equatable {
                 preferences[profile.id] = LiveTVPreferences(
                     favoriteIDs: saved.favoriteIDs, hiddenChannels: saved.hiddenChannels,
                     favoriteOrder: saved.favoriteOrder, favoriteChannels: saved.favoriteChannels,
-                    channelOverrides: saved.channelOverrides, organization: saved.organization
+                    channelOverrides: saved.channelOverrides, organization: saved.organization,
+                    stableChannelNumbers: saved.stableChannelNumbers
                 )
             }
             consent[profile.id] = LiveTVPortableSyncPreferenceStore(

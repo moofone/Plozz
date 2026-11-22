@@ -13,11 +13,12 @@ public struct LiveTVGuideMatcher: Sendable {
         channels: [LiveTVPrototypeChannel],
         guideChannels: [String: [String]],
         trustsGuideIDs: Bool = false,
-        spellings: [String: [String]]? = nil
+        spellings: [String: [String]]? = nil,
+        stations: LiveTVGuideStationIndex? = nil
     ) -> [String: [LiveTVPrototypeChannel]] {
         matching(
             channels: channels, guideChannels: guideChannels, trustsGuideIDs: trustsGuideIDs,
-            spellings: spellings
+            spellings: spellings, stations: stations
         ).channelsByGuideID
     }
 
@@ -30,7 +31,8 @@ public struct LiveTVGuideMatcher: Sendable {
         guideChannels: [String: [String]],
         overrides: [String: String] = [:],
         trustsGuideIDs: Bool = false,
-        spellings preparedSpellings: [String: [String]]? = nil
+        spellings preparedSpellings: [String: [String]]? = nil,
+        stations preparedStations: LiveTVGuideStationIndex? = nil
     ) -> (channelsByGuideID: [String: [LiveTVPrototypeChannel]], assignments: [String: LiveTVGuideMatch]) {
         if trustsGuideIDs {
             var result: [String: [LiveTVPrototypeChannel]] = [:]
@@ -45,17 +47,80 @@ public struct LiveTVGuideMatcher: Sendable {
                 let others = (spellings?[Self.foldedGuideID(guideID)] ?? []).filter { $0 != guideID }
                 return (guideChannels[guideID] == nil ? [] : [guideID]) + others
             }
+            // A row without a station of its own id is read by name and country, the same way for every country.
+            var nameIndex = preparedStations
+            var classifier = LiveTVLineupClassifier()
             for channel in channels {
                 if let override = overrides[channel.id], guideChannels[override] != nil {
                     result[override, default: []].append(channel)
                     assignments[channel.id] = LiveTVGuideMatch(guideChannelID: override, method: .userConfirmed)
                     continue
                 }
-                guard let guideID = channel.guideID, !Self.foldedGuideID(guideID).isEmpty else { continue }
-                let ids = stations(for: guideID)
-                guard let first = ids.first else { continue }
-                for id in ids { result[id, default: []].append(channel) }
-                assignments[channel.id] = LiveTVGuideMatch(guideChannelID: first, method: .exactID)
+                let rowName = channel.guideName ?? channel.name
+                // A time-shifted row (`ITV2 +1`) never takes the base station's schedule; only a station of its own shift serves it.
+                let facts = LiveTVGuideStationIndex.RowFacts(name: rowName, groups: channel.categories)
+                let shifted = facts.shifted
+                if nameIndex == nil { nameIndex = LiveTVGuideStationIndex(guideChannels: guideChannels) }
+                let names = nameIndex!
+                // The country is read only for a row that needs it: a call sign, an unrelated id, or a name lookup.
+                var knownCountry: String??
+                func country() -> String? {
+                    if let knownCountry { return knownCountry }
+                    let found = LiveTVGuideStationIndex.country(of: channel, classifier: &classifier)
+                    knownCountry = .some(found)
+                    return found
+                }
+                let language = channel.languages.first(where: { $0.count == 2 })?.uppercased()
+                func assign(_ found: LiveTVGuideStationIndex.Resolution) {
+                    result[found.id, default: []].append(channel)
+                    assignments[channel.id] = LiveTVGuideMatch(guideChannelID: found.id, method: found.method)
+                }
+                // A call sign the row names beats the provider's id unless the id is the same station.
+                let signAnswer: LiveTVGuideCallSignTable.Answer = shifted || facts.callSign == nil
+                    ? .unknown : names.callSignAnswer(facts: facts, country: country())
+                let signStations: [String] = { if case .station(let ids) = signAnswer { return ids } else { return [] } }()
+                let signStation = signStations.first
+                // A placeholder id (`TS`) is no id; an id of another region, channel number or market's call sign is not trusted.
+                if let guideID = channel.guideID, !Self.foldedGuideID(guideID).isEmpty,
+                   !LiveTVGuideStationIndex.isPlaceholderID(guideID),
+                   !LiveTVGuideStationIndex.idContradictsName(id: guideID, facts: facts),
+                   !LiveTVGuideStationIndex.idCallSignDiffers(id: guideID, facts: facts),
+                   !LiveTVGuideStationIndex.idIsSiblingOfName(id: guideID, facts: facts),
+                   signStation.map({ Self.foldedGuideID($0) == Self.foldedGuideID(guideID) }) ?? true,
+                   !shifted || LiveTVGuideStationIndex.isTimeShiftedStation(guideID) {
+                    let ids = stations(for: guideID)
+                    if let first = ids.first {
+                        // An exact name of the row's own country beats an id that names something else (`SKY KIDS` carrying `CBeebies`).
+                        if !shifted, LiveTVGuideStationIndex.idUnrelatedToName(id: guideID, facts: facts),
+                           let named = names.resolution(facts: facts, country: country(), language: language, exactOnly: true),
+                           Self.foldedGuideID(named.id) != Self.foldedGuideID(first) {
+                            assign(named)
+                            continue
+                        }
+                        for id in ids { result[id, default: []].append(channel) }
+                        assignments[channel.id] = LiveTVGuideMatch(
+                            guideChannelID: first, method: guideChannels[guideID] == nil ? .idCase : .exactID)
+                        continue
+                    }
+                }
+                if let signStation {
+                    assign(.init(id: signStation, method: .displayName))
+                    // The station's other feeds of the same schedule (`@SD` after `@HD`): the reader takes the first with listings.
+                    for other in signStations.dropFirst() { result[other, default: []].append(channel) }
+                    continue
+                }
+                // The guide knows this call sign but not this subchannel or network: no name rule may overrule that.
+                if signAnswer == .refused { continue }
+                // A bare call sign the guide has (`KIRO 7 NEWS`): weaker evidence than a bracketed one, so it never overrules an id.
+                switch names.freeCallSignAnswer(facts: facts, country: country()) {
+                case .station(let ids):
+                    assign(.init(id: ids[0], method: .displayName))
+                    for other in ids.dropFirst() { result[other, default: []].append(channel) }
+                    continue
+                case .refused, .unknown: break
+                }
+                if LiveTVGuideStationIndex.isLocalWithoutCallSign(facts) { continue }
+                if let found = names.resolution(facts: facts, country: country(), language: language) { assign(found) }
             }
             return (result, assignments)
         }
@@ -175,6 +240,30 @@ public struct LiveTVGuideMatcher: Sendable {
             }
         }
         return (result.filter { !$0.value.isEmpty }, assignments)
+    }
+
+    /// Gives each matched channel the icon its guide declares for the matched guide channel.
+    /// `guideFor` names the guide that supplies a channel's programmes; no matching rule is involved.
+    static func channels(
+        _ channels: [LiveTVPrototypeChannel],
+        withGuideIconsFrom guideFor: (LiveTVPrototypeChannel) -> LiveTVGuideImport?
+    ) -> [LiveTVPrototypeChannel] {
+        channels.map { channel in
+            guard let guide = guideFor(channel), !guide.guideIcons.isEmpty,
+                  let guideID = guide.matches[channel.id]?.guideChannelID,
+                  let icon = guide.guideIcons[guideID], icon != channel.guideLogoURL else { return channel }
+            return LiveTVPrototypeChannel(
+                id: channel.id, number: channel.number, name: channel.name, category: channel.category,
+                symbol: channel.symbol, accent: channel.accent, source: channel.source,
+                tagline: channel.tagline, logoURL: channel.logoURL, streamURL: channel.streamURL,
+                logoNeedsDarkBackground: channel.logoNeedsDarkBackground, guideID: channel.guideID,
+                guideName: channel.guideName, httpHeaders: channel.httpHeaders,
+                playlistSourceID: channel.playlistSourceID, language: channel.language,
+                country: channel.country, groups: channel.groups,
+                plozzChannelMood: channel.plozzChannelMood, tags: channel.tags, eventSlot: channel.eventSlot,
+                guideLogoURL: icon, loopTitle: channel.loopTitle
+            )
+        }
     }
 
     private func shareOneIdentity(_ channels: [LiveTVPrototypeChannel]) -> Bool {

@@ -40,6 +40,30 @@ final class PlaybackDiagnosticReportTests: XCTestCase {
         XCTAssertNotEqual(ordinary.message, report.message)
     }
 
+    func testVideoNotDecodedReportCarriesCodecAndNoURL() {
+        let report = LiveChannelFailureReport(failure: .videoNotDecoded(codec: "avc1"))
+        let text = PlaybackDiagnosticReport.playback(report).supportText
+        XCTAssertTrue(text.contains("failure=videoNotDecoded"))
+        XCTAssertTrue(text.contains("video=none-decoded"))
+        XCTAssertTrue(text.contains("codec=avc1"))
+        XCTAssertFalse(text.contains("://"))
+        XCTAssertNotEqual(report.message, LiveChannelPlaybackFailure.startupTimedOut.message)
+    }
+
+    func testVideoNotDecodedCodecIsAClosedFourCharacterVocabulary() {
+        for (raw, expected) in [
+            ("AVC1", "avc1"), ("hvc1", "hvc1"), (nil, "unknown"), ("", "unknown"),
+            ("https://host/x", "unknown"), ("avc1 title=Secret", "unknown"), ("averyveryverylongcodec", "unknown")
+        ] as [(String?, String)] {
+            let text = PlaybackDiagnosticReport.playback(.init(failure: .videoNotDecoded(codec: raw))).supportText
+            XCTAssertTrue(text.contains("codec=\(expected)"), "\(String(describing: raw)) → \(text)")
+            XCTAssertFalse(text.contains("Secret"))
+        }
+        XCTAssertFalse(
+            PlaybackDiagnosticReport.playback(.init(failure: .startupTimedOut)).supportText.contains("video=")
+        )
+    }
+
     func testOnDemandReportPreservesFactsWithoutInventingSessionExpiry() {
         let report = PlaybackDiagnosticReport.onDemand(
             error: .playback(.init(kind: .unavailable, httpStatus: 410, engineFailure: .sourceRefused)),

@@ -30,6 +30,16 @@ public protocol IPTVGuideIndexLoading: Sendable {
         url: URL, catalog: @escaping @Sendable () async throws -> [IPTVProvider.IPTVGuideChannel],
         download: @escaping @Sendable (XMLTVGuideCacheMetadata?) async throws -> XMLTVGuideResponse
     ) async throws -> Date?
+    /// `updateSaved` for either trigger. `.manual` validates a saved guide even when it is not due or automatic
+    /// updates are off; it never downloads a guide that was not saved. Nil when the index cannot do that.
+    func refreshSaved(
+        url: URL, catalog: @escaping @Sendable () async throws -> [IPTVProvider.IPTVGuideChannel],
+        download: @escaping @Sendable (XMLTVGuideCacheMetadata?) async throws -> XMLTVGuideResponse,
+        trigger: SavedGuideRefreshTrigger
+    ) async throws -> SavedGuideRefreshReport?
+    /// The saved guide's stations and the programmes starting in the window, for the debug snapshot only
+    /// (`LiveTVGuideSnapshot`). Nil when nothing is saved.
+    func snapshotRecords(url: URL, from: Date, to: Date) async throws -> [LiveTVGuideSnapshot.GuideRecord]?
     /// The profile's automatic update interval; nil when automatic updates are off.
     var updateInterval: TimeInterval? { get }
     func invalidate() async
@@ -38,6 +48,19 @@ public protocol IPTVGuideIndexLoading: Sendable {
 
 public extension IPTVGuideIndexLoading {
     var updateInterval: TimeInterval? { nil }
+
+    func refreshSaved(
+        url: URL, catalog: @escaping @Sendable () async throws -> [IPTVProvider.IPTVGuideChannel],
+        download: @escaping @Sendable (XMLTVGuideCacheMetadata?) async throws -> XMLTVGuideResponse,
+        trigger: SavedGuideRefreshTrigger
+    ) async throws -> SavedGuideRefreshReport? {
+        guard trigger == .scheduled else { return nil }
+        return SavedGuideRefreshReport(
+            nextDue: try await updateSaved(url: url, catalog: catalog, download: download), transferredGuides: 0
+        )
+    }
+
+    func snapshotRecords(url: URL, from: Date, to: Date) async throws -> [LiveTVGuideSnapshot.GuideRecord]? { nil }
 
     func cachedProgrammes(
         url: URL, channels: [IPTVProvider.IPTVGuideChannel], from: Date, to: Date,

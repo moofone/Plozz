@@ -4,6 +4,66 @@ import Vision
 
 final class LiveTVMultiviewRemoteTests: XCTestCase {
     @MainActor
+    func testLiveRootHeadingDownFocusesFirstVisiblePlateThenNextRow() {
+        continueAfterFailure = false
+        let app = fixtureApplication()
+        app.launchArguments = ["--live-root-fixture", "--visual-focus-fixture", "--live-root-pinned-guide"]
+        app.launch()
+        defer { app.terminate() }
+
+        let heading = app.buttons["live-tv-heading"]
+        let first = app.buttons["live-tv-channel-channels-1"]
+        let second = app.buttons["live-tv-channel-channels-2"]
+        XCTAssertTrue(first.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(heading.label.hasPrefix("My Channels"), heading.label)
+        if !heading.hasFocus {
+            select(first, in: app, activate: false)
+            assertNativeFocus(first, in: app)
+            XCUIRemote.shared.press(.left)
+        }
+        assertNativeFocus(heading, in: app)
+        XCUIRemote.shared.press(.down)
+        assertNativeFocus(first, in: app)
+        XCUIRemote.shared.press(.down)
+        let onNextRow = NSPredicate { _, _ in
+            guard second.exists else { return false }
+            if second.hasFocus { return true }
+            let focused = self.focusedElement(in: app)
+            guard focused.exists else { return false }
+            return abs(focused.frame.midY - second.frame.midY) < second.frame.height / 2
+                && (focused.identifier.hasPrefix("live-tv-") || focused.label == "Championship final")
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: onNextRow, object: nil)], timeout: 5),
+                       .completed, "Second Down did not reach row 2. \(nativeFocus(in: app)). \(app.debugDescription)")
+    }
+
+    @MainActor
+    func testRemoteExitRestoresRetainedProgrammeWithDisplayFadeEnabled() {
+        continueAfterFailure = false
+        let app = fixtureApplication()
+        app.launchArguments = ["--live-root-fixture", "--instant-guide-escape-fixture"]
+        app.launch()
+        defer { app.terminate() }
+
+        let title = "Sports 2 Championship final"
+        let programme = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", title)).firstMatch
+        XCTAssertTrue(programme.waitForExistence(timeout: 10), app.debugDescription)
+        select(programme, in: app, activate: false)
+        assertNativeFocus(programme, in: app)
+        capture("instant-guide-before-watch", in: app)
+        XCUIRemote.shared.press(.select)
+        assertMetrics("Engines 1 loads 1 stops 0 audible 1", in: app)
+        assertVideoFrame(1, equals: app.frame, in: app)
+        capture("instant-guide-before-exit", in: app)
+
+        XCUIRemote.shared.press(.menu)
+        XCTAssertTrue(app.buttons["live-tv-search"].waitForExistence(timeout: 5))
+        capture("instant-guide-after-exit", in: app)
+        assertNativeFocus(programme, in: app)
+        assertMetrics("Engines 1 loads 1 stops 1 audible 0", in: app)
+    }
+
+    @MainActor
     func testFullscreenEntryAndFirstFocusDoNotReverseVideoSizing() throws {
         continueAfterFailure = false
         let app = fixtureApplication()
@@ -2400,5 +2460,147 @@ final class LiveTVMultiviewRemoteTests: XCTestCase {
             XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: matches, object: nil)], timeout: 5),
             .completed, app.debugDescription, file: file, line: line
         )
+    }
+}
+
+extension LiveTVMultiviewRemoteTests {
+    @MainActor
+    func testFourWayGuideNavigationLatency() throws {
+        try replayGuideNavigation(loops: false)
+    }
+
+    @MainActor
+    func testRepeatedVerticalNavigationOnFullWidthLoops() throws {
+        try replayGuideNavigation(loops: true)
+    }
+
+    @MainActor
+    private func replayGuideNavigation(loops: Bool) throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let path = env["PLOZZ_GUIDE_PROFILE_DIR"] else {
+            throw XCTSkip("Set PLOZZ_GUIDE_PROFILE_DIR to an empty capture directory to run this diagnostic")
+        }
+        continueAfterFailure = true
+        let dir = URL(fileURLWithPath: path, isDirectory: true)
+        let app = fixtureApplication()
+        app.launchArguments = ["--live-root-fixture", "--visual-focus-fixture"]
+        if loops { app.launchArguments += ["--live-root-pinned-guide", "--live-root-loop-run"] }
+        app.launchEnvironment["PLOZZ_GUIDE_PROFILE_DIR"] = path
+        app.launchEnvironment["PLOZZ_GUIDE_PROFILE_TRACE"] = env["PLOZZ_GUIDE_PROFILE_TRACE"] ?? "0"
+        app.launch()
+        defer { app.terminate() }
+        let remote = XCUIRemote.shared
+        var part = 0
+        var runner = "step\tphase\tdirection\tstart\tend\texpected\n"
+        defer { try? runner.write(to: dir.appendingPathComponent("runner.tsv"), atomically: true, encoding: .utf8) }
+        var step = 0
+        func checkpoint() throws -> String {
+            part += 1
+            try String(part).write(to: dir.appendingPathComponent("checkpoint-request"), atomically: true, encoding: .utf8)
+            let url = dir.appendingPathComponent("app-\(part).tsv")
+            let deadline = CACurrentMediaTime() + 7
+            repeat {
+                if let data = try? String(contentsOf: url, encoding: .utf8) { return data }
+                Thread.sleep(forTimeInterval: 0.025)
+            } while CACurrentMediaTime() < deadline
+            throw NSError(domain: "Guide profile checkpoint \(part) missing", code: 1)
+        }
+        func destination(_ samples: String) -> String? {
+            for line in samples.split(separator: "\n").reversed() {
+                let fields = line.split(separator: "\t")
+                if fields.count >= 11 && fields[0] == "frame" { return String(fields[6]) }
+            }
+            return nil
+        }
+        func issue(_ button: XCUIRemote.Button, _ phase: String, _ expected: String, hold: TimeInterval? = nil) {
+            step += 1
+            let start = CACurrentMediaTime()
+            if let hold { remote.press(button, forDuration: hold) }
+            else { remote.press(button) }
+            let direction: String
+            switch button {
+            case .up: direction = "up"
+            case .down: direction = "down"
+            case .left: direction = "left"
+            case .right: direction = "right"
+            default: direction = String(describing: button)
+            }
+            runner += "\(step)\t\(phase)\t\(direction)\t\(start)\t\(CACurrentMediaTime())\t\(expected)\n"
+        }
+        func single(_ button: XCUIRemote.Button, _ phase: String, _ expected: String) throws {
+            issue(button, phase, expected)
+            let samples = try checkpoint()
+            XCTAssertTrue(destination(samples).map { expected.hasSuffix(":") ? $0.hasPrefix(expected) : $0 == expected } == true,
+                          "step \(step) \(phase) \(button): expected \(expected), got \(destination(samples) ?? "missing")")
+        }
+        let start = app.buttons["live-tv-channel-channels-1"]
+        try XCTUnwrap(start.waitForExistence(timeout: 15) ? start : nil)
+        let startDestination = loops ? "row-1:loop" : "row-1:0"
+        var initial = destination(try checkpoint())
+        if !loops, initial != startDestination, app.buttons["live-tv-heading"].hasFocus {
+            issue(.select, "entry-menu", "observe")
+            let all = app.buttons["My Channels"].firstMatch
+            if all.waitForExistence(timeout: 3), all.hasFocus { issue(.select, "entry-my-channels", "observe") }
+            initial = destination(try checkpoint())
+        }
+        if initial != startDestination {
+            issue(.down, "entry-down", "observe")
+            initial = destination(try checkpoint())
+        }
+        if initial == "row-1:station" || initial == "other" {
+            issue(.right, "entry-right", "observe")
+            initial = destination(try checkpoint())
+        }
+        guard initial == startDestination else {
+            XCTFail("No valid start focus: \(initial ?? "missing")")
+            return
+        }
+        if env["PLOZZ_GUIDE_PROFILE_TRACE"] == "1" {
+            let gate = dir.appendingPathComponent("go").path
+            let deadline = CACurrentMediaTime() + 45
+            while !FileManager.default.fileExists(atPath: gate) && CACurrentMediaTime() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: gate), "Time Profiler gate timed out")
+        }
+        if loops {
+            for row in 2...32 { try single(.down, "loop-traverse", "row-\(row):loop") }
+            for row in (1..<32).reversed() { try single(.up, "loop-traverse", "row-\(row):loop") }
+            return
+        }
+        for _ in 0..<6 {
+            try single(.down, "vertical-single", "row-2:")
+            try single(.up, "vertical-single", "row-1:")
+        }
+        for row in 2...32 { try single(.down, "vertical-traverse", "row-\(row):") }
+        try single(.down, "bottom-boundary", "row-32:")
+        for row in (1..<32).reversed() { try single(.up, "vertical-traverse", "row-\(row):") }
+        for _ in 0..<6 {
+            try single(.right, "horizontal-single", "row-1:1")
+            try single(.left, "horizontal-single", "row-1:0")
+        }
+        for slot in 1...9 { try single(.right, "horizontal-traverse", "row-1:\(slot)") }
+        for slot in (0..<9).reversed() { try single(.left, "horizontal-traverse", "row-1:\(slot)") }
+        for _ in 0..<6 {
+            issue(.down, "vertical-reversal", "row-2:")
+            issue(.up, "vertical-reversal", "row-1:")
+        }
+        XCTAssertEqual(destination(try checkpoint())?.split(separator: ":").first, "row-1")
+        for _ in 0..<6 {
+            issue(.right, "horizontal-reversal", "row-1:1")
+            issue(.left, "horizontal-reversal", "row-1:0")
+        }
+        XCTAssertEqual(destination(try checkpoint()), "row-1:0")
+        for row in 2...10 { issue(.down, "vertical-repeat", "row-\(row):") }
+        for row in (1..<10).reversed() { issue(.up, "vertical-repeat", "row-\(row):") }
+        XCTAssertEqual(destination(try checkpoint())?.split(separator: ":").first, "row-1")
+        for slot in 1...7 { issue(.right, "horizontal-repeat", "row-1:\(slot)") }
+        for slot in (0..<7).reversed() { issue(.left, "horizontal-repeat", "row-1:\(slot)") }
+        XCTAssertEqual(destination(try checkpoint()), "row-1:0")
+        try single(.left, "leading-station", "row-1:station")
+        try single(.left, "leading-sidebar", "other")
+        try single(.right, "sidebar-return", "row-1:")
+        issue(.down, "held-repeat", "observe", hold: 0.8)
+        _ = try checkpoint()
     }
 }

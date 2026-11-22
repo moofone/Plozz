@@ -215,6 +215,21 @@ final class IPTVAuthViewModelTests: XCTestCase {
         XCTAssertEqual(try model.makeCredential().guideURL, guide)
     }
 
+    func testReconnectKeepsExtraGuidesManagedInSettings() throws {
+        let extra = try XCTUnwrap(URL(string: "https://guide.example/guide.xml.gz"))
+        let credential = try IPTVCredential(
+            mode: .xtream, address: XCTUnwrap(URL(string: "https://provider.test/prefix")),
+            username: "fixture-user", password: "fixture-password", extraGuideURLs: [extra]
+        )
+        let session = UserSession(
+            server: .init(id: "fixture", name: "Fixture", baseURL: credential.address, provider: .iptv),
+            userID: "fixture", userName: "IPTV", deviceID: "fixture", accessToken: try credential.encoded()
+        )
+        let model = IPTVAuthViewModel(deviceID: "fixture", reconnecting: session, onAuthenticated: { _ in })
+        XCTAssertEqual(try model.makeCredential().extraGuideURLs, [extra])
+        XCTAssertTrue(try model.makeCredential().explicitGuideURLs.isEmpty)
+    }
+
     func testHTTPWarningTracksOnlyAddressesUsedByTheSelectedMode() {
         let model = IPTVAuthViewModel(deviceID: "fixture", onAuthenticated: { _ in })
         for address in ["", "   ", "https://playlist.example/list", "playlist.example/list"] {

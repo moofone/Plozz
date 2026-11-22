@@ -4,6 +4,9 @@ public enum RuntimeFeatureFlag: String, CaseIterable, Codable, Hashable, Sendabl
     case universalWatchlist
     case wetrakr
     case offlineMode
+    /// Schedules Direct guide-data account. Off in release builds until the
+    /// provider approves Plozz in writing; on in DEBUG builds for research.
+    case schedulesDirect
 }
 
 /// Typed runtime rollout values shared by both application shells. The flag
@@ -32,5 +35,11 @@ public struct RuntimeFeatureFlags: Codable, Hashable, Sendable {
         enabled: [.universalWatchlist, .wetrakr, .offlineMode]
     )
 
+    #if DEBUG
+    public static let buildDefault = RuntimeFeatureFlags(
+        enabled: productionDefault.enabled.union([.schedulesDirect])
+    )
+    #else
     public static let buildDefault = productionDefault
+    #endif
 }

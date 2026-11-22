@@ -1,0 +1,712 @@
+{
+  "source": "mockups/live-tv-liquid-glass.html",
+  "constants": {
+    "view": "browse r=1080 q4t=1 corner badge, no suffix",
+    "base1080": {
+      "plateW": 244,
+      "numW": 52,
+      "pPad": 8,
+      "logoPad": 30,
+      "rowH": 88,
+      "fsQ4c": 18.5,
+      "sfx": 16
+    },
+    "guideOverride": {
+      "rowH": 82,
+      "rowGap": 10,
+      "plateW": 252,
+      "padR": 8
+    },
+    "padR": 20,
+    "bw": 164,
+    "bh": 52,
+    "fsQ4c": 18.5,
+    "badgeW": 46,
+    "room": 118,
+    "k": 0.42,
+    "alphaTrim": 12,
+    "alphaDark": 128,
+    "darkThreshold": 0.28,
+    "lighten": [
+      "paramount-plus-us"
+    ]
+  },
+  "failures": [],
+  "logos": {
+    "bbc-news-uk": {
+      "naturalW": 320,
+      "naturalH": 205,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 205
+      },
+      "aspect": 1.5609756097560976,
+      "meanLum": 254.99999999999994,
+      "meanLum01": 0.9999999999999998,
+      "ink4thCount": 8706,
+      "dark": false,
+      "guideSize": {
+        "w": 74.77325725150669,
+        "h": 47.901617926746475
+      },
+      "guideSizeWithBadge": {
+        "w": 74.77325725150669,
+        "h": 47.901617926746475
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "bbc-one-uk": {
+      "naturalW": 320,
+      "naturalH": 208,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 208
+      },
+      "aspect": 1.5384615384615385,
+      "meanLum": 113.41498660581364,
+      "meanLum01": 0.4447646533561319,
+      "ink4thCount": 7451,
+      "dark": false,
+      "guideSize": {
+        "w": 74.2320685418371,
+        "h": 48.25084455219411
+      },
+      "guideSizeWithBadge": {
+        "w": 74.2320685418371,
+        "h": 48.25084455219411
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "channel-4-uk": {
+      "naturalW": 236,
+      "naturalH": 320,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 236,
+        "h": 320
+      },
+      "aspect": 0.7375,
+      "meanLum": 227.10984760355953,
+      "meanLum01": 0.8906268533472923,
+      "ink4thCount": 6155,
+      "dark": false,
+      "guideSize": {
+        "w": 38.35,
+        "h": 52
+      },
+      "guideSizeWithBadge": {
+        "w": 38.35,
+        "h": 52
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "comedy-central-uk": {
+      "naturalW": 320,
+      "naturalH": 110,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 110
+      },
+      "aspect": 2.909090909090909,
+      "meanLum": 230.95503020152952,
+      "meanLum01": 0.9057060007903118,
+      "ink4thCount": 3523,
+      "dark": false,
+      "guideSize": {
+        "w": 102.07676255909301,
+        "h": 35.088887129688224
+      },
+      "guideSizeWithBadge": {
+        "w": 102.07676255909301,
+        "h": 35.088887129688224
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "discovery-channel-uk": {
+      "naturalW": 320,
+      "naturalH": 66,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 66
+      },
+      "aspect": 4.848484848484849,
+      "meanLum": 254.99999999999997,
+      "meanLum01": 0.9999999999999999,
+      "ink4thCount": 1906,
+      "dark": false,
+      "guideSize": {
+        "w": 131.78053380871202,
+        "h": 27.17973509804685
+      },
+      "guideSizeWithBadge": {
+        "w": 118,
+        "h": 24.3375
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "eurosport-1-uk": {
+      "naturalW": 320,
+      "naturalH": 32,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 32
+      },
+      "aspect": 10,
+      "meanLum": 225.47847054322932,
+      "meanLum01": 0.8842292962479581,
+      "ink4thCount": 1307,
+      "dark": false,
+      "guideSize": {
+        "w": 164,
+        "h": 16.4
+      },
+      "guideSizeWithBadge": {
+        "w": 118,
+        "h": 11.799999999999999
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "itv-1-uk": {
+      "naturalW": 320,
+      "naturalH": 118,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 118
+      },
+      "aspect": 2.711864406779661,
+      "meanLum": 171.51943209996065,
+      "meanLum01": 0.6726252239214143,
+      "ink4thCount": 4081,
+      "dark": false,
+      "guideSize": {
+        "w": 98.55580884771388,
+        "h": 36.34245451259449
+      },
+      "guideSizeWithBadge": {
+        "w": 98.55580884771388,
+        "h": 36.34245451259449
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "national-geographic-wild-uk": {
+      "naturalW": 320,
+      "naturalH": 87,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 87
+      },
+      "aspect": 3.67816091954023,
+      "meanLum": 240.8471389162549,
+      "meanLum01": 0.9444985839853133,
+      "ink4thCount": 2233,
+      "dark": false,
+      "guideSize": {
+        "w": 114.7793084801107,
+        "h": 31.205624493030097
+      },
+      "guideSizeWithBadge": {
+        "w": 114.7793084801107,
+        "h": 31.205624493030097
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "now-tv": {
+      "naturalW": 320,
+      "naturalH": 70,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 70
+      },
+      "aspect": 4.571428571428571,
+      "meanLum": 111.14744292497954,
+      "meanLum01": 0.4358723251959982,
+      "ink4thCount": 3159,
+      "dark": false,
+      "guideSize": {
+        "w": 127.9599937480461,
+        "h": 27.991248632385087
+      },
+      "guideSizeWithBadge": {
+        "w": 118,
+        "h": 25.812500000000004
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "paramount-plus-us": {
+      "naturalW": 320,
+      "naturalH": 199,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 199
+      },
+      "aspect": 1.6080402010050252,
+      "meanLum": 112.59517661046524,
+      "meanLum01": 0.4415497121979029,
+      "ink4thCount": 4626,
+      "dark": true,
+      "guideSize": {
+        "w": 75.89212126664901,
+        "h": 47.19541291269735
+      },
+      "guideSizeWithBadge": {
+        "w": 75.89212126664901,
+        "h": 47.19541291269735
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "sky-cinema-premiere-uk": {
+      "naturalW": 320,
+      "naturalH": 105,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 105
+      },
+      "aspect": 3.0476190476190474,
+      "meanLum": 102.94750985074461,
+      "meanLum01": 0.40371572490488083,
+      "ink4thCount": 4355,
+      "dark": false,
+      "guideSize": {
+        "w": 104.47889739081283,
+        "h": 34.282138206360464
+      },
+      "guideSizeWithBadge": {
+        "w": 104.47889739081283,
+        "h": 34.282138206360464
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "sky-history-light-uk": {
+      "naturalW": 320,
+      "naturalH": 57,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 57
+      },
+      "aspect": 5.614035087719298,
+      "meanLum": 205.58056655683697,
+      "meanLum01": 0.8061983002228901,
+      "ink4thCount": 3642,
+      "dark": false,
+      "guideSize": {
+        "w": 141.80312519754094,
+        "h": 25.25868167581198
+      },
+      "guideSizeWithBadge": {
+        "w": 117.99999999999999,
+        "h": 21.01875
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "sky-news-uk": {
+      "naturalW": 320,
+      "naturalH": 77,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 77
+      },
+      "aspect": 4.1558441558441555,
+      "meanLum": 131.918216044444,
+      "meanLum01": 0.5173263374291921,
+      "ink4thCount": 4500,
+      "dark": false,
+      "guideSize": {
+        "w": 122.00506695886185,
+        "h": 29.357469236976133
+      },
+      "guideSizeWithBadge": {
+        "w": 118,
+        "h": 28.39375
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "sky-sports-f1-uk": {
+      "naturalW": 320,
+      "naturalH": 117,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 117
+      },
+      "aspect": 2.735042735042735,
+      "meanLum": 117.38558841192473,
+      "meanLum01": 0.46033564083107736,
+      "ink4thCount": 4729,
+      "dark": false,
+      "guideSize": {
+        "w": 98.97609138911612,
+        "h": 36.18813341414558
+      },
+      "guideSizeWithBadge": {
+        "w": 98.97609138911612,
+        "h": 36.18813341414558
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "sky-sports-golf-uk": {
+      "naturalW": 320,
+      "naturalH": 124,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 124
+      },
+      "aspect": 2.5806451612903225,
+      "meanLum": 105.17326668200533,
+      "meanLum01": 0.41244418306668756,
+      "ink4thCount": 4346,
+      "dark": false,
+      "guideSize": {
+        "w": 96.14183071329163,
+        "h": 37.254959401400505
+      },
+      "guideSizeWithBadge": {
+        "w": 96.14183071329163,
+        "h": 37.254959401400505
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "sky-sports-main-event-uk": {
+      "naturalW": 320,
+      "naturalH": 117,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 117
+      },
+      "aspect": 2.735042735042735,
+      "meanLum": 113.80330935126753,
+      "meanLum01": 0.4462874876520295,
+      "ink4thCount": 4609,
+      "dark": false,
+      "guideSize": {
+        "w": 98.97609138911612,
+        "h": 36.18813341414558
+      },
+      "guideSizeWithBadge": {
+        "w": 98.97609138911612,
+        "h": 36.18813341414558
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "sky-sports-tennis-uk": {
+      "naturalW": 320,
+      "naturalH": 117,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 117
+      },
+      "aspect": 2.735042735042735,
+      "meanLum": 109.33296611946975,
+      "meanLum01": 0.4287567298802735,
+      "ink4thCount": 4386,
+      "dark": false,
+      "guideSize": {
+        "w": 98.97609138911612,
+        "h": 36.18813341414558
+      },
+      "guideSizeWithBadge": {
+        "w": 98.97609138911612,
+        "h": 36.18813341414558
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "tnt-sports-1-uk": {
+      "naturalW": 320,
+      "naturalH": 90,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 90
+      },
+      "aspect": 3.5555555555555554,
+      "meanLum": 175.49323574181415,
+      "meanLum01": 0.6882087676149574,
+      "ink4thCount": 2076,
+      "dark": false,
+      "guideSize": {
+        "w": 112.85010707423659,
+        "h": 31.739092614629044
+      },
+      "guideSizeWithBadge": {
+        "w": 112.85010707423659,
+        "h": 31.739092614629044
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "cbc-ca": {
+      "naturalW": 320,
+      "naturalH": 83,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 83
+      },
+      "aspect": 3.855421686746988,
+      "meanLum": 206.6106828851637,
+      "meanLum01": 0.8102379720986812,
+      "ink4thCount": 3161,
+      "dark": false,
+      "guideSize": {
+        "w": 117.5125320156233,
+        "h": 30.479812991552294
+      },
+      "guideSizeWithBadge": {
+        "w": 117.5125320156233,
+        "h": 30.479812991552294
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "ctv-ca": {
+      "naturalW": 320,
+      "naturalH": 102,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 102
+      },
+      "aspect": 3.1372549019607843,
+      "meanLum": 110.88040034940447,
+      "meanLum01": 0.43482509940942926,
+      "ink4thCount": 5724,
+      "dark": false,
+      "guideSize": {
+        "w": 106.00421745217055,
+        "h": 33.78884431287936
+      },
+      "guideSizeWithBadge": {
+        "w": 106.00421745217055,
+        "h": 33.78884431287936
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "global-ca": {
+      "naturalW": 320,
+      "naturalH": 150,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 150
+      },
+      "aspect": 2.1333333333333333,
+      "meanLum": 176.10225792093445,
+      "meanLum01": 0.6905970898860174,
+      "ink4thCount": 3415,
+      "dark": false,
+      "guideSize": {
+        "w": 87.41331706324843,
+        "h": 40.974992373397704
+      },
+      "guideSizeWithBadge": {
+        "w": 87.41331706324843,
+        "h": 40.974992373397704
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "cbc-news-network-ca": {
+      "naturalW": 320,
+      "naturalH": 92,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 92
+      },
+      "aspect": 3.4782608695652173,
+      "meanLum": 123.91433724378004,
+      "meanLum01": 0.4859385774265884,
+      "ink4thCount": 3171,
+      "dark": false,
+      "guideSize": {
+        "w": 111.61673553806305,
+        "h": 32.08981146719313
+      },
+      "guideSizeWithBadge": {
+        "w": 111.61673553806305,
+        "h": 32.08981146719313
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "tsn-1-ca": {
+      "naturalW": 320,
+      "naturalH": 55,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 55
+      },
+      "aspect": 5.818181818181818,
+      "meanLum": 98.81610904625862,
+      "meanLum01": 0.3875141531225828,
+      "ink4thCount": 2443,
+      "dark": false,
+      "guideSize": {
+        "w": 144.3583420142075,
+        "h": 24.811590033691914
+      },
+      "guideSizeWithBadge": {
+        "w": 118,
+        "h": 20.28125
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "sportsnet-sn-ca": {
+      "naturalW": 320,
+      "naturalH": 185,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 185
+      },
+      "aspect": 1.7297297297297298,
+      "meanLum": 199.3666903579177,
+      "meanLum01": 0.7818301582663438,
+      "ink4thCount": 8577,
+      "dark": false,
+      "guideSize": {
+        "w": 78.7113508762031,
+        "h": 45.50499972530491
+      },
+      "guideSizeWithBadge": {
+        "w": 78.7113508762031,
+        "h": 45.50499972530491
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    },
+    "ytv-ca": {
+      "naturalW": 320,
+      "naturalH": 263,
+      "trim": {
+        "x": 0,
+        "y": 0,
+        "w": 320,
+        "h": 263
+      },
+      "aspect": 1.2167300380228137,
+      "meanLum": 151.81383484190482,
+      "meanLum01": 0.5953483719290386,
+      "ink4thCount": 14959,
+      "dark": false,
+      "guideSize": {
+        "w": 63.269961977186306,
+        "h": 52
+      },
+      "guideSizeWithBadge": {
+        "w": 63.269961977186306,
+        "h": 52
+      },
+      "png": {
+        "colorType": 6,
+        "depth": 8
+      }
+    }
+  }
+}

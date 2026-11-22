@@ -23,7 +23,7 @@ public enum TMDbAccess: Sendable, Equatable {
     case userToken(String)
     case disabled
 
-    var isEnabled: Bool {
+    public var isEnabled: Bool {
         if case .disabled = self { return false }
         return true
     }

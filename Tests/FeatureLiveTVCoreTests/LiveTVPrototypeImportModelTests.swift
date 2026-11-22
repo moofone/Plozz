@@ -39,9 +39,9 @@ final class LiveTVPrototypeImportModelTests: XCTestCase {
         XCTAssertEqual(imports.channelNamePreviewSamples, originals)
         model.cleanChannelNames = true
         XCTAssertEqual(imports.channelNamePreviewSamples, originals)
-        let custom = try XCTUnwrap(model.channels.first { $0.name == "News HD" })
+        let custom = try XCTUnwrap(model.channels.first { $0.name == "News" })
         XCTAssertTrue(model.setMetadataOverride(.init(name: "My news"), channelID: custom.id))
-        let hidden = try XCTUnwrap(model.channels.first { $0.name == "UK | Sport UHD" })
+        let hidden = try XCTUnwrap(model.channels.first { $0.name == "Sport" })
         XCTAssertTrue(model.hideChannel(hidden))
         XCTAssertEqual(imports.channelNamePreviewSamples, ["** Films F H D **"])
         authorized = false
@@ -66,9 +66,10 @@ final class LiveTVPrototypeImportModelTests: XCTestCase {
         await imports.reload(into: model)
         let submitted = await loader.submittedChannels
         XCTAssertEqual(submitted, [channel])
-        XCTAssertEqual(model.channel(id: channel.id)?.name, "UK | BBC One HD")
+        XCTAssertEqual(model.channel(id: channel.id)?.name, "BBC One")
+        XCTAssertEqual(model.channel(id: channel.id)?.tags, [.country("GB"), .hd])
         model.cleanChannelNames = false
-        XCTAssertEqual(model.channel(id: channel.id), channel)
+        XCTAssertEqual(model.channel(id: channel.id)?.name, channel.name)
         let loads = await loader.guideLoads
         XCTAssertEqual(loads, 1, "A presentation change must not reload a guide")
     }

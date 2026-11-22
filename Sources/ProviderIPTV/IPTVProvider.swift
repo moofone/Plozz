@@ -1,6 +1,7 @@
 import CoreModels
 import CoreNetworking
 import Foundation
+import Synchronization
 
 public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFieldProviding,
     ServerLiveTVProviding, ProviderHTTPResourceResolving, PlayedStateWriting,
@@ -15,6 +16,13 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
     private let playback: IPTVPlaybackSessions
     private let guideLoader: IPTVGuideLoader?
     private let guideIndex: (any IPTVGuideIndexLoading)?
+    /// Lineup changes committed but not yet returned in a report (a later step threw), and the last lineup reported.
+    private let lineupReceipt = Mutex(LineupReceipt())
+
+    private struct LineupReceipt {
+        var reported: (revision: String, channels: [String: String])?
+        var pending = SavedGuideCommittedInputs()
+    }
 
     public init(
         context: ProviderResolutionContext, durableStore: DurableLocalStateStore? = nil,
@@ -41,6 +49,17 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
 
     public var capabilities: ProviderCapability { [.video] }
     public var catalogIdentityRequiresEnrichment: Bool { true }
+
+    public func catalogListingFingerprint() async -> String? {
+        try? await client.listingFingerprint()
+    }
+
+    public func resetCatalogIdentityDetails() async {
+        do { try await client.forgetFetchedDetails() }
+        catch { PlozzLog.networking.error("IPTV details markers could not be cleared") }
+    }
+
+    public var hasActiveLiveStream: Bool { get async { await playback.hasLiveSession } }
 
     public static func signIn(
         credential: IPTVCredential, name: String, deviceID: String,
@@ -279,25 +298,116 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
     }
 
     public func updateSavedLiveTVGuide() async throws -> Date? {
+        try await refreshSavedLiveTVGuide(trigger: .scheduled)?.nextDue
+    }
+
+    /// One algorithm for both triggers. The saved lineup is refreshed only when its interval is due; `.manual`
+    /// bypasses just the due gate of saved guides (and works with automatic updates off, when the lineup is skipped).
+    public func refreshSavedLiveTVGuide(trigger: SavedGuideRefreshTrigger) async throws -> SavedGuideRefreshReport? {
         guard let guideIndex else { return nil }
         var next: Date?
+        var transferred = 0
+        var committed = SavedGuideCommittedInputs()
         // The lineup first, so the guide is matched against current channels.
         if let interval = guideIndex.updateInterval {
+            if lineupReceipt.withLock({ $0.reported == nil }) {
+                let baseline = try await client.committedLineupFingerprints()
+                lineupReceipt.withLock { $0.reported = $0.reported ?? baseline }
+            }
             next = try await client.refreshSavedLiveLineup(olderThan: interval)
+            try Task.checkCancellation()
+            try await recordLineupChanges()
         }
         for url in try await client.savedGuideURLs() {
             try Task.checkCancellation()
-            let due = try await guideIndex.updateSaved(
+            guard let report = try await guideIndex.refreshSaved(
                 url: url,
                 catalog: { [client] in
                     guard let channels = try await client.savedGuideChannels() else { throw AppError.notFound }
                     return channels
                 },
-                download: { [client] previous in try await client.guideResponse(from: url, previous: previous) }
-            )
-            if let due { next = min(next ?? due, due) }
+                download: { [client] previous in try await client.guideResponse(from: url, previous: previous) },
+                trigger: trigger
+            ) else { return nil }
+            transferred += report.transferredGuides
+            committed = committed.merged(with: report.committedInputs)
+            if let due = report.nextDue { next = min(next ?? due, due) }
         }
-        return next
+        // The extras follow the same cadence; one failing never stops the provider's guide or another extra.
+        let credential = client.credential
+        for url in credential.extraGuideURLs {
+            try Task.checkCancellation()
+            do {
+                guard let report = try await guideIndex.refreshSaved(
+                    url: url,
+                    catalog: { [client] in
+                        guard let channels = try await client.savedGuideChannels() else { throw AppError.notFound }
+                        return channels
+                    },
+                    download: { [client] previous in
+                        try await client.guideResponse(from: url, previous: previous, isExtra: true)
+                    },
+                    trigger: trigger
+                ) else { return nil }
+                transferred += report.transferredGuides
+                committed = committed.merged(with: report.committedInputs)
+                if let due = report.nextDue { next = min(next ?? due, due) }
+                if report.nextDue != nil || report.transferredGuides > 0 {
+                    IPTVExtraGuideStatusStore.shared.recordLoaded(url, source: credential.identity, channels: nil)
+                }
+            } catch {
+                try Task.checkCancellation()
+                IPTVExtraGuideStatusStore.shared.recordFailure(url, source: credential.identity)
+                PlozzLog.networking.info("IPTV_GUIDE event=extraGuideUpdateFailed")
+            }
+        }
+        try Task.checkCancellation()
+        let lineup = lineupReceipt.withLock { receipt in
+            defer { receipt.pending = SavedGuideCommittedInputs() }
+            return receipt.pending
+        }
+        return SavedGuideRefreshReport(
+            nextDue: next, transferredGuides: transferred, committedInputs: lineup.merged(with: committed)
+        )
+    }
+
+    /// Compares the committed lineup with the last one reported. An unchanged revision costs no scan, and an identical
+    /// re-download (new revision, same rows) produces no changed channel.
+    private func recordLineupChanges() async throws {
+        let revision = try await client.guideCatalogRevision()
+        if let revision, lineupReceipt.withLock({ $0.reported?.revision == revision }) { return }
+        guard let current = try await client.committedLineupFingerprints() else { return }
+        lineupReceipt.withLock { receipt in
+            guard let reported = receipt.reported else { receipt.reported = current; return }
+            guard reported.revision != current.revision else { return }
+            let changed = Set(reported.channels.keys).union(current.channels.keys)
+                .filter { reported.channels[$0] != current.channels[$0] }
+            receipt.reported = current
+            guard !changed.isEmpty else { return }
+            receipt.pending = receipt.pending.merged(with: SavedGuideCommittedInputs(
+                lineupRevision: current.revision, changedLineupChannelIDs: changed.sorted()
+            ))
+        }
+    }
+
+    public func liveTVExtraGuideSnapshotRecords(from: Date, to: Date) async throws -> [LiveTVGuideSnapshot.GuideRecord]? {
+        guard let guideIndex else { return nil }
+        let urls = client.credential.extraGuideURLs
+        var records: [LiveTVGuideSnapshot.GuideRecord] = []
+        for url in urls {
+            try Task.checkCancellation()
+            if let saved = try await guideIndex.snapshotRecords(url: url, from: from, to: to) { records += saved }
+        }
+        return urls.isEmpty ? nil : records
+    }
+
+    public func liveTVGuideSnapshotRecords(from: Date, to: Date) async throws -> [LiveTVGuideSnapshot.GuideRecord]? {
+        guard let guideIndex, let url = try await client.savedGuideURLs().first else { return nil }
+        return try await guideIndex.snapshotRecords(url: url, from: from, to: to)
+    }
+
+    public func liveTVEPGProbe(channelID: String, limit: Int) async -> LiveTVEPGProbeResult {
+        await client.shortEPGProbe(channelID: channelID, limit: limit)
     }
 
     public func completeLiveTVGuideDiscovery() async throws -> Bool? {
@@ -340,7 +450,85 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
         }
     }
 
+    /// The provider's own guide first; the user's extra guides then fill the rows it has no listings for.
     private func retrieveGuide(
+        channelIDs: [String], from: Date, to: Date, diagnostics: IPTVGuideDiagnostics
+    ) async throws -> [ServerLiveTVProgramme] {
+        let credential = client.credential
+        guard !credential.extraGuideURLs.isEmpty, !channelIDs.isEmpty else {
+            return try await retrieveProviderGuide(channelIDs: channelIDs, from: from, to: to, diagnostics: diagnostics)
+        }
+        var programmes: [ServerLiveTVProgramme] = []
+        var providerFailure: (any Error)?
+        do {
+            programmes = try await retrieveProviderGuide(channelIDs: channelIDs, from: from, to: to, diagnostics: diagnostics)
+        } catch let partial as ServerLiveTVPartialGuideError {
+            programmes = partial.programmes
+            providerFailure = partial.failure
+        } catch {
+            try Task.checkCancellation()
+            guard Self.canIsolateGuideFailure(error) else { throw error }
+            providerFailure = error
+        }
+        let covered = Set(programmes.map(\.channelID))
+        var seen = Set<String>()
+        let gapIDs = channelIDs.filter { !covered.contains($0) && seen.insert($0).inserted }
+        programmes += try await extraGuideProgrammes(
+            channelIDs: gapIDs, credential: credential, from: from, to: to, diagnostics: diagnostics
+        )
+        if let providerFailure {
+            guard !programmes.isEmpty else { throw providerFailure }
+            throw ServerLiveTVPartialGuideError(programmes: programmes, failure: providerFailure)
+        }
+        return programmes
+    }
+
+    /// Listings from the extra guides for rows without any, matched by the same name-and-country rules as the provider's own guide
+    /// (`trustsGuideIDs`). A guide that cannot be read is recorded and skipped.
+    private func extraGuideProgrammes(
+        channelIDs: [String], credential: IPTVCredential, from: Date, to: Date, diagnostics: IPTVGuideDiagnostics
+    ) async throws -> [ServerLiveTVProgramme] {
+        guard !channelIDs.isEmpty else { return [] }
+        let catalog = guideIndex == nil ? nil : try await client.guideChannels()
+        var channels: [IPTVGuideChannel] = []
+        if let catalog {
+            let byID = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            channels = channelIDs.compactMap { byID[$0] }
+        } else {
+            for id in channelIDs {
+                let record = try await client.record(id)
+                channels.append(IPTVGuideChannel(
+                    id: id, name: record.item.title, guideID: record.guideID,
+                    guideName: record.guideName, country: record.guideCountry, groups: record.item.tags
+                ))
+            }
+        }
+        var result: [ServerLiveTVProgramme] = []
+        var covered = Set<String>()
+        for url in credential.extraGuideURLs {
+            let remaining = channels.filter { !covered.contains($0.id) }
+            if remaining.isEmpty { break }
+            try Task.checkCancellation()
+            do {
+                let programmes = try await loadXMLTVGuide(
+                    url: url, channels: remaining, from: from, to: to, loader: guideLoader,
+                    catalog: catalog, diagnostics: diagnostics, isExtra: true
+                )
+                let filled = Set(programmes.map(\.channelID))
+                result += programmes
+                covered.formUnion(filled)
+                IPTVExtraGuideStatusStore.shared.recordLoaded(url, source: credential.identity, channels: filled.count)
+            } catch {
+                try Task.checkCancellation()
+                IPTVExtraGuideStatusStore.shared.recordFailure(url, source: credential.identity)
+                PlozzLog.networking.info("IPTV_GUIDE event=extraGuideFailed")
+            }
+        }
+        diagnostics.extraGuide(channels: covered.count)
+        return result
+    }
+
+    private func retrieveProviderGuide(
         channelIDs: [String], from: Date, to: Date, diagnostics: IPTVGuideDiagnostics
     ) async throws -> [ServerLiveTVProgramme] {
         let credential = await client.credential
@@ -351,7 +539,8 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
         guard let lineup = try await client.savedGuideLineup() else { return [] }
         var seen = Set<String>()
         let requestedIDs = channelIDs.filter { seen.insert($0).inserted }
-        let guided = requestedIDs.compactMap { lineup.guided[$0] }
+        // A row with no guide id of its own may still be read by name and country, so every requested row is asked for.
+        let guided = requestedIDs.compactMap { lineup.all[$0] }
         if let saved = try await indexedGuide(channels: guided, lineup: lineup, from: from, to: to, diagnostics: diagnostics) {
             return saved
         }
@@ -401,7 +590,7 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
         do {
             guard let rows = try await guideIndex.cachedProgrammes(
                 url: url, channels: channels, from: from, to: to, trustsGuideIDs: true,
-                catalogRevision: lineup.revision, catalog: { Array(lineup.guided.values) }
+                catalogRevision: lineup.revision, catalog: { Array(lineup.all.values) }
             ) else { return nil }
             try Task.checkCancellation()
             guard lineup.revision == (try await client.guideCatalogRevision()) else { return nil }
@@ -437,7 +626,7 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
                 let record = try await client.record(id)
                 channels.append(IPTVGuideChannel(
                     id: id, name: record.item.title, guideID: record.guideID,
-                    guideName: record.guideName, country: record.guideCountry
+                    guideName: record.guideName, country: record.guideCountry, groups: record.item.tags
                 ))
             }
         }
@@ -523,7 +712,8 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
 
     private func loadXMLTVGuide(
         url: URL, channels: [IPTVGuideChannel], from: Date, to: Date,
-        loader: IPTVGuideLoader?, catalog: [IPTVGuideChannel]?, diagnostics: IPTVGuideDiagnostics
+        loader: IPTVGuideLoader?, catalog: [IPTVGuideChannel]?, diagnostics: IPTVGuideDiagnostics,
+        isExtra: Bool = false
     ) async throws -> [ServerLiveTVProgramme] {
         try Task.checkCancellation()
         let request = IPTVGuideDiagnostics.Request()
@@ -532,15 +722,15 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
                 if let guideIndex, let catalog {
                     return try await guideIndex.programmes(
                         url: url, channels: channels, from: from, to: to,
-                        trustsGuideIDs: usesPerChannelLiveTVGuide, catalog: { catalog },
+                        trustsGuideIDs: isExtra || usesPerChannelLiveTVGuide, catalog: { catalog },
                         download: { [client] previous in
-                            let response = try await client.guideResponse(from: url, previous: previous)
+                            let response = try await client.guideResponse(from: url, previous: previous, isExtra: isExtra)
                             request.parsing()
                             return response
                         }
                     )
                 }
-                let data = try await client.guideData(from: url)
+                let data = try await client.guideData(from: url, isExtra: isExtra)
                 guard let loader else { throw ServerLiveTVError.unsupportedAPI }
                 request.parsing()
                 return try await loader(data, url, channels, from, to)
@@ -549,7 +739,7 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
             diagnostics.record(request, endpoint: .xmltv, rows: programmes.count)
             return programmes
         } catch {
-            if let failure = error as? LiveTVSourceImportError,
+            if !isExtra, let failure = error as? LiveTVSourceImportError,
                failure == .invalidGuide || failure == .guideTooLarge {
                 await client.discardInvalidGuideData(from: url, failure: failure)
             }
@@ -564,8 +754,13 @@ public final class IPTVProvider: MediaProvider, CapabilityReporting, MediaSortFi
         public let guideID: String?
         public let guideName: String?
         public let country: String?
+        /// The provider's group titles; with the name they tell which country a row belongs to.
+        public let groups: [String]
 
-        public init(id: String, name: String, guideID: String?, guideName: String? = nil, country: String? = nil) {
+        public init(
+            id: String, name: String, guideID: String?, guideName: String? = nil, country: String? = nil, groups: [String] = []
+        ) {
+            self.groups = groups
             self.id = id
             self.name = name
             self.guideID = guideID
@@ -675,6 +870,8 @@ private actor IPTVPlaybackSessions {
         self.client = client
         self.configuration = configuration
     }
+
+    var hasLiveSession: Bool { entries.values.contains { $0.isLive } }
 
     func register(_ locator: AuthenticatedHTTPPlaybackLocator, isLive: Bool) throws {
         guard let id = locator.playSessionID, entries.count < 32 else { throw AppError.invalidResponse }

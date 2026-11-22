@@ -1007,6 +1007,8 @@ struct LiveTVMultiviewFocusCaption: View {
     @Environment(\.playerUsesNativeGlass) private var nativeGlass
     @Environment(\.plozzReduceTransparency) private var reduceTransparency
 
+    @Environment(LiveTVPrototypeModel.self) private var logoModel: LiveTVPrototypeModel?
+
     private var focusedChannelID: String? { isFocused ? channel?.id : nil }
     private var isVisible: Bool {
         focusedChannelID != nil && (voiceOver || expiredChannelID != focusedChannelID)
@@ -1015,7 +1017,7 @@ struct LiveTVMultiviewFocusCaption: View {
     var body: some View {
         HStack(spacing: 12) {
             if let channel {
-                if channel.logoURL != nil || channel.source == .plozz {
+                if (logoModel.map { $0.effectiveLogoURL(for: channel) } ?? channel.displayedLogoURL) != nil || channel.source == .plozz {
                     PrototypeStationMark(channel: channel, size: 32, cornerRadius: 6)
                 }
                 Text(verbatim: channel.name)

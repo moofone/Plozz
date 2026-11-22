@@ -29,6 +29,8 @@ public struct LiveTVViewSettings: Equatable, Sendable {
     public var previewAfterWatching: Bool
     /// Show the Recently watched row at the top of the guide.
     public var showsRecentChannels: Bool
+    /// Show Plozz's channel numbers in the guide, search results and other lists. The channel panel always shows its number.
+    public var showsChannelNumbers: Bool
     public var guideUpdateInterval: LiveTVGuideUpdateInterval
 
     public init(
@@ -43,7 +45,8 @@ public struct LiveTVViewSettings: Equatable, Sendable {
         hasChosenAutoPreview: Bool = false,
         startsWithCategories: Bool = true,
         cleanChannelNames: Bool = true,
-        guideUpdateInterval: LiveTVGuideUpdateInterval = .twelveHours
+        guideUpdateInterval: LiveTVGuideUpdateInterval = .twelveHours,
+        showsChannelNumbers: Bool = false
     ) {
         self.startsWithCategories = startsWithCategories
         self.sortByName = sortByName
@@ -56,6 +59,7 @@ public struct LiveTVViewSettings: Equatable, Sendable {
         self.wifiOnly = wifiOnly
         self.previewAfterWatching = previewAfterWatching
         self.showsRecentChannels = showsRecentChannels
+        self.showsChannelNumbers = showsChannelNumbers
         self.guideUpdateInterval = guideUpdateInterval
     }
 
@@ -88,6 +92,7 @@ public final class LiveTVViewSettingsStore: LiveTVViewSettingsStoring, @unchecke
     static let wifiOnlyKey = "com.plozz.liveTV.view.wifiOnly"
     static let previewAfterWatchingKey = "com.plozz.liveTV.view.previewAfterWatching"
     static let showsRecentChannelsKey = "com.plozz.liveTV.view.showsRecentChannels"
+    static let showsChannelNumbersKey = "com.plozz.liveTV.view.showsChannelNumbers"
     static let startsWithCategoriesKey = "com.plozz.liveTV.view.startsWithCategories"
     static let guideUpdateIntervalKey = "com.plozz.liveTV.view.guideUpdateHours"
 
@@ -102,6 +107,7 @@ public final class LiveTVViewSettingsStore: LiveTVViewSettingsStoring, @unchecke
     private let wifiOnlyKey: String
     private let previewAfterWatchingKey: String
     private let showsRecentChannelsKey: String
+    private let showsChannelNumbersKey: String
     private let startsWithCategoriesKey: String
     private let guideUpdateIntervalKey: String
 
@@ -121,6 +127,7 @@ public final class LiveTVViewSettingsStore: LiveTVViewSettingsStoring, @unchecke
         self.wifiOnlyKey = SettingsKey.scoped(Self.wifiOnlyKey, namespace: namespace)
         self.previewAfterWatchingKey = SettingsKey.scoped(Self.previewAfterWatchingKey, namespace: namespace)
         self.showsRecentChannelsKey = SettingsKey.scoped(Self.showsRecentChannelsKey, namespace: namespace)
+        self.showsChannelNumbersKey = SettingsKey.scoped(Self.showsChannelNumbersKey, namespace: namespace)
         self.startsWithCategoriesKey = SettingsKey.scoped(Self.startsWithCategoriesKey, namespace: namespace)
         self.guideUpdateIntervalKey = SettingsKey.scoped(Self.guideUpdateIntervalKey, namespace: namespace)
     }
@@ -142,7 +149,8 @@ public final class LiveTVViewSettingsStore: LiveTVViewSettingsStoring, @unchecke
             startsWithCategories: value(forKey: startsWithCategoriesKey, default: fallback.startsWithCategories),
             cleanChannelNames: value(forKey: cleanChannelNamesKey, default: fallback.cleanChannelNames),
             guideUpdateInterval: (defaults.object(forKey: guideUpdateIntervalKey) as? Int)
-                .flatMap(LiveTVGuideUpdateInterval.init) ?? fallback.guideUpdateInterval
+                .flatMap(LiveTVGuideUpdateInterval.init) ?? fallback.guideUpdateInterval,
+            showsChannelNumbers: value(forKey: showsChannelNumbersKey, default: fallback.showsChannelNumbers)
         )
     }
 
@@ -157,6 +165,7 @@ public final class LiveTVViewSettingsStore: LiveTVViewSettingsStoring, @unchecke
         defaults.set(settings.wifiOnly, forKey: wifiOnlyKey)
         defaults.set(settings.previewAfterWatching, forKey: previewAfterWatchingKey)
         defaults.set(settings.showsRecentChannels, forKey: showsRecentChannelsKey)
+        defaults.set(settings.showsChannelNumbers, forKey: showsChannelNumbersKey)
         defaults.set(settings.startsWithCategories, forKey: startsWithCategoriesKey)
         defaults.set(settings.guideUpdateInterval.rawValue, forKey: guideUpdateIntervalKey)
         NotificationCenter.default.post(name: Self.didChange, object: nil)

@@ -20,7 +20,7 @@ final class LiveTVChannelNameTests: XCTestCase {
         model.tune("one")
         XCTAssertTrue(model.recordWatched("one"))
         model.cleanChannelNames = true
-        XCTAssertEqual(model.channels.map(\.name), ["UK | BBC One HD", "UK | BBC One HD"])
+        XCTAssertEqual(model.channels.map(\.name), ["BBC One", "BBC One"])
         XCTAssertEqual(model.channels.map(\.id), channels.map(\.id))
         for (original, displayed) in zip(channels, model.channels) {
             XCTAssertEqual(displayed.streamURL, original.streamURL)
@@ -36,7 +36,8 @@ final class LiveTVChannelNameTests: XCTestCase {
         XCTAssertEqual(model.favoriteIDs, ["one"])
         XCTAssertEqual(model.recentChannelIDs, ["one"])
         model.cleanChannelNames = false
-        XCTAssertEqual(model.channels, channels)
+        XCTAssertEqual(model.channels.map(\.name), channels.map(\.name))
+        XCTAssertEqual(model.channels.map(\.tags), [[.country("GB"), .hd], [.country("GB"), .hd]], "Tags do not depend on cleaning")
         XCTAssertEqual(model.currentProgram(for: "one"), program)
         XCTAssertEqual(model.playingChannelID, "one")
     }
@@ -55,11 +56,12 @@ final class LiveTVChannelNameTests: XCTestCase {
         XCTAssertEqual(model.channel(id: "iptv")?.name, custom)
         model.cleanChannelNames = true
         XCTAssertTrue(model.setMetadataOverride(.init(category: "Personal"), channelID: "iptv"))
-        XCTAssertEqual(model.channel(id: "iptv")?.name, "UK | BBC One HD")
+        XCTAssertEqual(model.channel(id: "iptv")?.name, "BBC One")
         XCTAssertEqual(model.channel(id: "iptv")?.category, "Personal")
         XCTAssertTrue(model.setMetadataOverride(nil, channelID: "iptv"))
         try model.replaceChannels([channel("iptv", name: "## UK|BBC One U H D ##")])
-        XCTAssertEqual(model.channel(id: "iptv")?.name, "UK | BBC One UHD")
+        XCTAssertEqual(model.channel(id: "iptv")?.name, "BBC One")
+        XCTAssertEqual(model.channel(id: "iptv")?.tags, [.country("GB"), .uhd])
         model.cleanChannelNames = false
         XCTAssertEqual(model.channel(id: "iptv")?.name, "## UK|BBC One U H D ##")
     }
@@ -84,8 +86,8 @@ final class LiveTVChannelNameTests: XCTestCase {
         ])
         model.cleanChannelNames = true
         model.sort = .name
-        XCTAssertEqual(model.visibleChannels.map(\.name), ["Alpha HD", "Alpha HD", "Zed HD"])
-        model.query = "Alpha HD"
+        XCTAssertEqual(model.visibleChannels.map(\.name), ["Alpha", "Alpha", "Zed"])
+        model.query = "Alpha"
         XCTAssertEqual(Set(model.visibleChannels.map(\.id)), ["a", "other-a"])
     }
 

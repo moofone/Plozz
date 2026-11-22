@@ -90,6 +90,42 @@ gaps, see [Live TV reliability](live-tv-reliability.md). It records finite
 provider cooldowns, safe connection-limit errors, controlled rolling-playback
 results, and remaining real-provider/long-session coverage gaps.
 
+## Channel logo sources
+
+A channel can have two logo sources. The provider playlist logo (`tvg-logo`, or the
+Xtream `stream_icon`) is `LiveTVPrototypeChannel.logoURL`. The matched XMLTV guide
+declares an optional icon on its `<channel>` element, kept as
+`LiveTVPrototypeChannel.guideLogoURL`.
+
+- The XMLTV parser reads `<channel><icon src>` in its metadata pass, with the same
+  validation as programme icons: http or https only, no user name or password, and
+  at most 4,096 characters. The first valid icon for a guide channel ID is kept, and
+  its bytes count toward the retained-text limit. Programme icons are unchanged and
+  stay programme artwork.
+- The icons are stored with the guide summary (`LiveTVGuideImport.guideIcons`) in the
+  indexed cache. Guide caches written before this field decode without icons, and the
+  parser cache version was raised so the next refresh fetches them. A refresh that
+  fails keeps the last good guide, as before.
+- Matching is unchanged. When the catalog is published, a channel matched to a guide
+  channel gains that guide channel's icon; unmatched channels do not.
+- The playlist provider's logo is never drawn, so Live TV does not read it: the M3U import
+  (`LiveTVPlaylistParser`, `readsLogos: false`) skips `tvg-logo`, and the server-source import
+  skips the channel image, so `logoURL` is `nil` for imported channels. Nothing is downloaded,
+  decoded, hashed or screened. What a channel draws, in order: the user's choice,
+  a TMDB match, a Wikidata/Commons match, the guide icon only when it is not a placeholder and
+  is measured crisp at the largest size Live TV draws (a vector, or at least 702 x 248 px along
+  its limiting axis; `LiveTVGuideIconMeasurer` downloads each icon once per session), else the
+  channel's name. A Plozz channel keeps its own artwork. `preferredLogoURL` (no model, nothing
+  measured) is therefore only a Plozz channel's artwork.
+
+Debug builds can check what a guide provides. Launch with `-PlozzDumpGuideIcons 1`
+(off by default); after a guide is published the app writes
+`<tmp>/guide-icons/summary.json` with the guide channel count, how many have icons,
+the icon hosts (never full URLs), how many matched channels gained an icon and how
+many of those use the playlist logo's URL. For up to 20 matched `CA|`/`US|` channels it
+also saves `<name>.guide.<ext>` and `<name>.playlist.<ext>` with pixel size, format,
+alpha and whether the two files are byte-identical.
+
 ## Diagnosing disappearing sources
 
 **Send to Developer** automatically includes a structured Live TV source journal
@@ -2595,7 +2631,39 @@ It exercises native sidebar/top-bar presentation, actual dismissal, focus
 ownership, in-flight startup, channel changes and reuse of the engine's output
 view. It does not substitute for a physical Siri Remote usability pass.
 
+## Channel logos
+
+A channel's logo is the first of: the user's choice, the matched TMDB network, the
+provider's `logoURL`. TMDB wins over the provider whenever it matches.
+
+- **Network list.** `TMDbNetworkDirectory` (MetadataKit) keeps TMDB's keyless daily
+  `tv_network_ids_MM_DD_YYYY.json.gz` export in Application Support. It is refreshed
+  when older than 30 days (stepping back up to seven days when today's file is not
+  published) and a failed refresh keeps the last copy. The sheet's search needs no key.
+- **Matching.** `LiveTVTMDbLogoMatcher` ports the exploration rules: exact name, a
+  small alias table, then the name with city and feed words removed. A channel is
+  matched only above a confidence threshold with a clear lead, and the country of the
+  channel (`CA|` group, `CA EN:` prefix or declared country) filters TMDB's origin
+  country. Only IPTV channels are matched. TMDB network details and logos are
+  requested through the existing TMDB access (proxy, bundled token or the key in
+  Settings › Metadata) at most once per network, and stored.
+- **Storage.** `LiveTVChannelLogoStore` writes versioned JSON in Application Support,
+  keyed by playlist source and channel ID, shared by all profiles. Removing a source
+  removes its entries. A "no match" is forgotten when the list refreshes or TMDB access
+  is turned on; a TMDB failure stores nothing so the channel is tried again.
+- **Images.** `LiveTVLogoImageStore` keeps downloaded logo bytes in Application Support
+  (200 MB, least recently used first) so each logo is downloaded once.
+- **Change Logo…** In a channel's context menu opens a sheet to search TMDB networks
+  with previews, enter an image URL, or reset to automatic. Where the app has no
+  TMDB access the sheet simply omits the TMDB search, like other metadata; there is no
+  Live TV key prompt. Logos are never stretched.
+
 The [native Live TV regression fixture](../Tests/FeatureLiveTVRemoteTests/README.md)
 provides that scene-backed host, actual remote Search traversal and isolated
 source-onboarding navigation. Its independent project and inputs are committed;
 it does not require a configured server or download a channel feed.
+
+### Logo sync and the keyless Wikidata layer
+
+- **iCloud.** Logo overrides and resolved matches (TMDB and Wikidata, including "no match" results) sync across a household through the `liveTVLogosV1` channel. It uses the deployed non-secret `PlozzMediaStateV1Record` type in its own zone (`PlozzLiveTVLogosV1Zone`) on the one existing sync engine, so no schema deploy is needed. It is not per profile, follows the device's iCloud Sync setting (off means local only), and carries data only — never image bytes. A record is `logo:<source>:<channel>` (base64url parts), the newer `modifiedAt` wins, and Reset to Automatic deletes the record. Removing a source removes its records.
+- **Wikidata.** Without a TMDB key, or where TMDB has no match, channels in Canada and the US are matched by name against Wikidata items that have a Commons logo (P154). One SPARQL query per country, stored permanently in Application Support and refreshed every 30 days, paced at one request per 5 s with the Wikimedia User-Agent; a 429 waits 60 s and retries once. Each matched file's licence is read once from Commons and kept with the list. TMDB still wins when both match.

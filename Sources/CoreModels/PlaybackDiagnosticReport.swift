@@ -84,6 +84,10 @@ public enum PlaybackDiagnosticReport: Equatable, Sendable {
             fields[0] = "format=plozz-live-tv-2"
             field("operation", "playback")
             field("failure", report.failure.diagnosticCode)
+            if let codec = report.failure.videoNotDecodedCodecField {
+                field("video", "none-decoded")
+                field("codec", codec)
+            }
             if let diagnostic = report.diagnostic {
                 field("layer", diagnostic.layer.rawValue)
                 field("stage", diagnostic.stage.rawValue)

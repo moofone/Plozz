@@ -52,8 +52,10 @@ settings:
   configs:
     Debug:
       PLOZZ_DEV_FEATURE: "$(PLOZZ_DEV_FEATURE_LABEL)"
+      PLOZZ_DEBUG_URL_SCHEME: plozz-debug
     Release:
       PLOZZ_DEV_FEATURE: ""
+      PLOZZ_DEBUG_URL_SCHEME: ${PLOZZ_URL_SCHEME}
 
 # Local Swift package providing all modular feature/code libraries.
 packages:
@@ -258,6 +260,8 @@ targets:
             CFBundleURLSchemes:
               - ${PLOZZ_URL_SCHEME}
               - "$(PRODUCT_BUNDLE_IDENTIFIER).external-player"
+              # DEBUG-only Live TV URL remote (plozz-debug://livetv/…): Release repeats the app scheme, so it adds nothing.
+              - "$(PLOZZ_DEBUG_URL_SCHEME)"
         LSApplicationQueriesSchemes:
           - nativeplayer
           - infuse
@@ -628,6 +632,7 @@ targets:
       - path: Tests/CoreModelsTests/ProfileLockPresentationTests.swift
       - path: Tests/FeaturePlaybackTests/SubtitleOverlayGeometryTests.swift
       - path: Tests/FocusIntegrationTests/LiveTVSourcesRuntimeHostedTests.swift
+      - path: Tests/FocusIntegrationTests/LiveTVGlassQuickMenuHostedTests.swift
       - path: Tests/FocusIntegrationTests/DiagnosticRecordingStatusHostedTests.swift
       - path: Tests/FocusIntegrationTests/PINRequirementPresentationTests.swift
       - path: Tests/HomePresentationSupport

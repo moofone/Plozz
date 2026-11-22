@@ -37,7 +37,7 @@ final class LiveTVPrototypeModelTests: XCTestCase {
         let direct = cleaning()
         try direct.replaceCatalog(channels: lineup, programs: [])
         XCTAssertEqual(direct.preparedInstallCount, 0)
-        XCTAssertEqual(direct.channel(id: "c1")?.name, "US | Channel 1 HD")
+        XCTAssertEqual(direct.channel(id: "c1")?.name, "Channel 1")
 
         let prepared = cleaning()
         await prepared.prepareCatalog(channels: lineup)

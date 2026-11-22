@@ -473,6 +473,9 @@ public actor IdentityIndex {
     private var warmAccounts: Set<String> = []
     /// When each account's catalogue was last (re)built, for staleness checks.
     private var builtAtByAccount: [String: Date] = [:]
+    /// The provider listing fingerprint each account was last conclusively indexed against. An
+    /// account whose provider still reports the same fingerprint needs no re-scan.
+    private var listingFingerprintByAccount: [String: String] = [:]
     /// Memoized fold of `byAccount` into one identity → sources snapshot. Cleared
     /// by content mutations that change the **live** index (`ingest` into a
     /// non-rebuilding account, a changed `finishRebuild` shadow swap, `removeAccount`,
@@ -577,7 +580,8 @@ public actor IdentityIndex {
     /// Marks `accountID`'s scan complete: atomically swaps the shadow bucket into
     /// the live index (if a rebuild was in flight) and records its freshness
     /// timestamp.
-    public func finishRebuild(for accountID: String) {
+    public func finishRebuild(for accountID: String, listingFingerprint: String? = nil) {
+        listingFingerprintByAccount[accountID] = listingFingerprint
         if rebuilding.contains(accountID) {
             let replacement = pendingRebuild[accountID] ?? [:]
             let changed = (byAccount[accountID] ?? [:]) != replacement
@@ -598,6 +602,7 @@ public actor IdentityIndex {
         rebuilding.remove(accountID)
         warmAccounts.remove(accountID)
         builtAtByAccount[accountID] = nil
+        listingFingerprintByAccount[accountID] = nil
         if let removed, !removed.isEmpty { invalidateSnapshot() }
     }
 
@@ -642,7 +647,11 @@ public actor IdentityIndex {
             entriesByAccount[accountID] = entries
         }
         let builtAt = builtAtByAccount.filter { warmAccounts.contains($0.key) }
-        return PersistedIdentityIndex(entriesByAccount: entriesByAccount, builtAtByAccount: builtAt)
+        let fingerprints = listingFingerprintByAccount.filter { warmAccounts.contains($0.key) }
+        return PersistedIdentityIndex(
+            entriesByAccount: entriesByAccount, builtAtByAccount: builtAt,
+            listingFingerprintByAccount: fingerprints.isEmpty ? nil : fingerprints
+        )
     }
 
     /// Seeds the index from a persisted snapshot at launch so cross-server unions
@@ -685,10 +694,20 @@ public actor IdentityIndex {
             // snapshot was written stayed permanently unknown. Dating it to the
             // distant past keeps the fast start and still asks the server.
             builtAtByAccount[accountID] = .distantPast
+            listingFingerprintByAccount[accountID] = persisted.listingFingerprintByAccount?[accountID]
             restoredAny = true
         }
         if restoredAny { invalidateSnapshot() }
         return restoredAny
+    }
+
+    /// The provider listing fingerprint `accountID` was last conclusively indexed against.
+    public func listingFingerprint(for accountID: String) -> String? { listingFingerprintByAccount[accountID] }
+
+    /// Forgets the fingerprint so the next warm re-scans `accountID` (manual rebuild). Membership
+    /// keeps serving until the new scan swaps in.
+    public func clearListingFingerprint(for accountID: String) {
+        listingFingerprintByAccount[accountID] = nil
     }
 
     /// Whether `accountID`'s catalogue has been scanned at least once.
@@ -937,12 +956,18 @@ public struct PersistedIdentityIndex: Codable, Sendable, Equatable {
     /// account → when its catalogue was last (re)built, so a reloaded account still
     /// re-warms on the normal staleness path.
     public var builtAtByAccount: [String: Date]
+    /// account → the provider listing fingerprint it was indexed against (absent in older files).
+    public var listingFingerprintByAccount: [String: String]?
 
     public static let empty = PersistedIdentityIndex(entriesByAccount: [:], builtAtByAccount: [:])
 
-    public init(entriesByAccount: [String: [Entry]], builtAtByAccount: [String: Date]) {
+    public init(
+        entriesByAccount: [String: [Entry]], builtAtByAccount: [String: Date],
+        listingFingerprintByAccount: [String: String]? = nil
+    ) {
         self.entriesByAccount = entriesByAccount
         self.builtAtByAccount = builtAtByAccount
+        self.listingFingerprintByAccount = listingFingerprintByAccount
     }
 
     public var isEmpty: Bool { entriesByAccount.isEmpty }

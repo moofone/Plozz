@@ -122,7 +122,7 @@ struct PlozziOSLiveTVDestination: View {
                 channelID: playback.channel.id,
                 title: playback.channel.name,
                 input: playback.input,
-                logoURL: playback.channel.logoURL,
+                logoURL: playback.channel.displayedLogoURL,
                 plozzChannelMood: playback.channel.plozzChannelMood,
                 makeEngine: {
                     runtime.makeEngine(
@@ -165,6 +165,10 @@ struct PlozziOSLiveTVDestination: View {
                 onPlaybackUpdate: playback.playbackUpdate,
                 onPlaybackFailed: playback.playbackFailed,
                 onVideoAspectRatioChange: playback.videoAspectRatioChanged,
+                onMeasuredResolution: { height in
+                    let key = playback.channel.qualityKey
+                    LiveChannelMeasuredQualityStore.shared.record(height: height, sourceID: key.sourceID, channelID: key.channelID)
+                },
                 onMultiview: playback.canOpenMultiview ? playback.openMultiview : nil,
                 outputGroup: liveOutputGroup,
                 outputID: playback.paneID,

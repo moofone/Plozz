@@ -66,10 +66,7 @@ public enum DiscoverRuntime {
 
     static func publicPage(
         _ feed: DiscoverFeed, page: Int, language: String,
-        configurationLoader: @escaping @Sendable () -> MetadataProviderConfig = {
-            let keys = TMDBUserKeyStore(secureStore: KeychainStore(service: "com.plozz.app.household"))
-            return MetadataProviderConfig.resolved().withUserToken(keys.load())
-        },
+        configurationLoader: @escaping @Sendable () -> MetadataProviderConfig = { MetadataAccessRuntime.currentConfig() },
         browse: @escaping @Sendable (DiscoverFeed, Int, String, MetadataProviderConfig) async throws -> DiscoverPage = {
             try await TMDbDiscoveryProvider(access: $3.tmdb).browse($0, page: $1, language: $2)
         }

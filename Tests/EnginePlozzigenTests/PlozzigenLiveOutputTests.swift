@@ -73,6 +73,18 @@ final class PlozzigenLiveOutputTests: XCTestCase {
         XCTAssertNil(try PlozzigenVideoEngine().liveLoadOptions(httpHeaders: [:]).liveEdgeCushionSeconds)
     }
 
+    func testLiveLoadOptionsSoftwareDecodeHintDisablesNativeRemoteHLS() throws {
+        let playlist = try XCTUnwrap(URL(string: "http://127.0.0.1/opaque.m3u8"))
+        let automatic = PlozzigenVideoEngine.liveLoadOptions(httpHeaders: [:], url: playlist)
+        XCTAssertTrue(automatic.nativeRemoteHLS)
+        XCTAssertEqual(automatic.preferredDecodePath, .automatic)
+
+        let software = PlozzigenVideoEngine.liveLoadOptions(httpHeaders: [:], url: playlist, decodeHint: .software)
+        XCTAssertFalse(software.nativeRemoteHLS, "the bypass demuxes nothing, so .software has nothing to act on")
+        XCTAssertEqual(software.preferredDecodePath, .software)
+        XCTAssertTrue(software.isLive)
+    }
+
     func testRawTransportStreamsDoNotUseTheHLSOnlyNativeBypass() throws {
         for suffix in ["ts", "m2ts", "mts", "TS"] {
             let url = try XCTUnwrap(URL(string: "http://127.0.0.1/opaque.\(suffix)"))

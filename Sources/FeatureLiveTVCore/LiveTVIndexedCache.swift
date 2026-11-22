@@ -81,6 +81,7 @@ public actor LiveTVIndexedCache: ApplicationStorageParticipant {
 
     private var openedGuide: (binding: String?, payload: Data, document: GuideDocument)?
     private var openedSpellings: [String: [String]]?
+    private var openedStations: LiveTVGuideStationIndex?
 
     private struct GuideDocument: Codable {
         let guide: LiveTVGuideImport?
@@ -680,7 +681,8 @@ public actor LiveTVIndexedCache: ApplicationStorageParticipant {
             let summary = LiveTVGuideImport(
                 programs: [], matchedChannelCount: parsed.matchedChannelCount, guideChannelCount: parsed.guideChannelCount,
                 programCount: insertedProgramCount, coverageStart: parsed.coverageStart, coverageEnd: parsed.coverageEnd,
-                matches: parsed.matches, guideChannels: parsed.guideChannels, sourceProgramCount: parsed.sourceProgramCount
+                matches: parsed.matches, guideChannels: parsed.guideChannels, sourceProgramCount: parsed.sourceProgramCount,
+                guideIcons: parsed.guideIcons
             )
             result = summary
             for (id, names) in summary.guideChannels where indexState == nil {
@@ -715,7 +717,9 @@ public actor LiveTVIndexedCache: ApplicationStorageParticipant {
         // digest-only revalidation would leave that distinction unknown.
         if let guide = document.guide, guide.sourceProgramCount == nil, guide.programCount == 0 { return nil }
         if document.guide?.sourceProgramCount == 0, let checkedAt = state.cacheMetadata?.checkedAt {
-            state.expiresAt = min(state.expiresAt, checkedAt.addingTimeInterval(XMLTVGuideCacheMetadata.emptyResultMaximumAge))
+            let retry = checkedAt.addingTimeInterval(XMLTVGuideCacheMetadata.emptyResultMaximumAge)
+            state.expiresAt = min(state.expiresAt, retry)
+            state.emptyFeedRetryAt = state.expiresAt
         }
         return state
     }
@@ -740,6 +744,7 @@ public actor LiveTVIndexedCache: ApplicationStorageParticipant {
         #endif
         openedGuide = (binding, payload, document)
         openedSpellings = nil
+        openedStations = nil
         return document
     }
 
@@ -756,6 +761,50 @@ public actor LiveTVIndexedCache: ApplicationStorageParticipant {
                 "UPDATE documents SET payload=?,refreshed=? WHERE kind='guide' AND source=?",
                 [.blob(try seal(document, binding: binding)), .real(Date().timeIntervalSince1970), .text(sourceID)]
             )
+        }
+    }
+
+    /// The committed guide's stations (names and icons) for change detection; nil when no guide is indexed for the source.
+    func savedGuideStations(sourceID: String, sourceURL: URL) throws -> LiveTVGuideImport? {
+        let db = try database()
+        return try db.readTransaction {
+            try guideIndexDocument(sourceID: sourceID, sourceURL: sourceURL, database: db)?.guide
+        }
+    }
+
+    /// The debug snapshot's guide half (`LiveTVGuideSnapshot`): the indexed guide's stations with their display names, then
+    /// every programme that starts within `range`, keyed by station id. Nil when no guide is indexed for the source.
+    func guideSnapshotRecords(
+        sourceID: String, sourceURL: URL, range: DateInterval
+    ) throws -> [LiveTVGuideSnapshot.GuideRecord]? {
+        let db = try database()
+        return try db.readTransaction {
+            guard let document = try guideIndexDocument(sourceID: sourceID, sourceURL: sourceURL, database: db),
+                  let guide = document.guide else { return nil }
+            let binding = try sourceBinding(kind: "guide", sourceID: sourceID, url: sourceURL)
+            let clean = LiveTVGuideSnapshot.clean
+            var records = guide.guideChannels.sorted { $0.key < $1.key }.map {
+                LiveTVGuideSnapshot.GuideRecord(type: "channel", id: clean($0.key), displayNames: $0.value.map(clean))
+            }
+            var offset = 0
+            while true {
+                try Task.checkCancellation()
+                let rows = try db.rows(
+                    "SELECT payload FROM programs WHERE source=? AND start>=? AND start<? ORDER BY start,id LIMIT 2048 OFFSET ?",
+                    [.text(sourceID), .real(range.start.timeIntervalSince1970), .real(range.end.timeIntervalSince1970),
+                     .integer(offset)]
+                )
+                for row in rows {
+                    let program = try open(row.blob(0), as: LiveTVPrototypeProgram.self, binding: binding)
+                    records.append(LiveTVGuideSnapshot.GuideRecord(
+                        type: "programme", channel: clean(program.channelID), start: program.start, end: program.end,
+                        title: clean(program.title), subTitle: program.subtitle.isEmpty ? nil : clean(program.subtitle),
+                        categories: program.details?.categories.map(clean), episode: program.details?.episode.map(clean)))
+                }
+                if rows.count < 2048 { break }
+                offset += rows.count
+            }
+            return records
         }
     }
 
@@ -777,9 +826,13 @@ public actor LiveTVIndexedCache: ApplicationStorageParticipant {
             if trustsGuideIDs, openedSpellings == nil {
                 openedSpellings = LiveTVGuideMatcher.spellings(of: guide.guideChannels)
             }
+            if trustsGuideIDs, openedStations == nil {
+                openedStations = LiveTVGuideStationIndex(guideChannels: guide.guideChannels)
+            }
             let matches = LiveTVGuideMatcher(provider: LiveTVGuideSource.provider(for: sourceURL)).match(
                 channels: channels, guideChannels: guide.guideChannels, trustsGuideIDs: trustsGuideIDs,
-                spellings: trustsGuideIDs ? openedSpellings : nil
+                spellings: trustsGuideIDs ? openedSpellings : nil,
+                stations: trustsGuideIDs ? openedStations : nil
             )
             let binding = try sourceBinding(kind: "guide", sourceID: sourceID, url: sourceURL)
             var result: [LiveTVPrototypeProgram] = []

@@ -435,6 +435,7 @@ public struct PlozziOSRootView: View {
         .environment(appModel.settings.navigation)
         .environment(appModel.settings.homeVisibility)
         .environment(appModel.guidePreparation)
+        .environment(appModel.extraGuides)
         .background { PlozziOSMusicLifecycle(appModel: appModel) }
         .environment(heroTrailerController)
         .themeMusicScope(
@@ -1638,7 +1639,10 @@ struct PlozziOSTabShell: View {
             authorizationID: appModel.accountsProviders.liveTVAuthorizationID,
             isAuthorized: tabDestinations.contains(.liveTV) && appModel.isLiveTVProfileAuthorized,
             namespace: appModel.profiles.activeNamespace,
-            resolver: appModel.accountsProviders.liveTVProviderResolver()
+            resolver: appModel.accountsProviders.liveTVProviderResolver(),
+            sources: LiveTVChannelLogoRuntime.serverSourcesLoader(
+                profileID: appModel.profiles.activeProfileID, namespace: appModel.profiles.activeNamespace
+            )
         )
     }
 

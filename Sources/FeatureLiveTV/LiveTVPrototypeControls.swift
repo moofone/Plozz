@@ -485,6 +485,8 @@ struct PrototypeSheetContent: View {
                     PlaybackDiagnosticDetailsView(report: report)
                 case .multiviewFavorites:
                     LiveTVMultiviewFavoritesView(model: model, open: openMultiview, isPortrait: isPortrait)
+                case .changeLogo(let channel):
+                    LiveTVChangeLogoView(model: model, channel: channel)
                 case .filters:
                     PrototypeFilterForm(model: model, imports: imports, canMutate: canMutate)
                         #if os(iOS)

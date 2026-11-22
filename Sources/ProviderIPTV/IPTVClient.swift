@@ -32,6 +32,9 @@ actor IPTVClient: ApplicationStorageParticipant {
     private var emptyGuideAnswers: [String: Date] = [:]
     /// Set while the provider is answering guide requests with an overload status.
     private var guideBackoff: (until: Date, failures: Int, error: any Error)?
+    /// A failed extra guide is not asked again for a while. Kept apart from `guideBackoff`, so it never delays the provider's guide.
+    private var extraGuideFailures: [URL: (until: Date, error: any Error)] = [:]
+    static let extraGuideRetryDelay: TimeInterval = 600
     private var didReadGuideBackoff = false
     static let guideBackoffStateKey = "guide-backoff-v1"
     private struct SavedGuideBackoff: Codable {
@@ -315,6 +318,7 @@ actor IPTVClient: ApplicationStorageParticipant {
         diagnostic?.advance(to: credential.mode == .playlist ? .playlist
             : library == "movies" ? .movies : library == "series" ? .series : .channels)
         let importID = try catalog.beginImport()
+        var listingFingerprint: String?
         defer {
             catalog.discardImport(importID)
             didReclaimJournal = false
@@ -334,6 +338,7 @@ actor IPTVClient: ApplicationStorageParticipant {
             let categories = try await categories(library: library)
             var count = 0
             var unnamedCount = 0
+            var fingerprint = IPTVListingFingerprint()
             defer {
                 diagnostic?.record(entries: count)
                 IPTVHTTP.performanceMetrics?.record(items: count)
@@ -343,7 +348,14 @@ actor IPTVClient: ApplicationStorageParticipant {
                 try catalog.checkImport(importID)
                 try parser.append(data) { bytes in
                     let value = try JSONDecoder().decode(IPTVObject.self, from: bytes)
-                    try store(IPTVMapping.listEntry(value, library: library, categories: categories), into: .incoming)
+                    let entry = try IPTVMapping.listEntry(value, library: library, categories: categories)
+                    try store(entry, into: .incoming)
+                    fingerprint.add(entry)
+                    // Final details are fetched once: an entry whose listing did not change keeps
+                    // its stored details (and episodes) through the refresh.
+                    if library != "live", try catalog.detailsStamp(entry.item.id) == (entry.listingStamp ?? "") {
+                        try catalog.keepForImport(entry.item.id)
+                    }
                     if value.text("name") == nil { unnamedCount += 1 }
                     count += 1
                     if count.isMultiple(of: 1_000) { progress(IPTVImportProgress(stage: stage, entries: count)) }
@@ -354,12 +366,14 @@ actor IPTVClient: ApplicationStorageParticipant {
                 PlozzLog.networking.info("IPTV catalogue contains \(unnamedCount) unnamed entries; using source IDs for display")
             }
             progress(IPTVImportProgress(stage: stage, entries: count))
+            listingFingerprint = fingerprint.text
         }
         try catalog.checkImport(importID)
         diagnostic?.advance(to: .catalogCommit)
         try catalog.commitImport(
             library: credential.mode == .playlist ? nil : library,
-            scope: credential.mode == .playlist ? Self.playlistCatalogScope : library
+            scope: credential.mode == .playlist ? Self.playlistCatalogScope : library,
+            listingFingerprint: listingFingerprint
         ) { progress(IPTVImportProgress(stage: .catalogCommit, entries: $0)) }
         if credential.mode == .playlist || library == "live" { prepareLiveLineup() }
     }
@@ -523,7 +537,15 @@ actor IPTVClient: ApplicationStorageParticipant {
         let order = field + (page.sort.direction == .descending ? " DESC" : " ASC") + ", id"
         let records = try catalog.records(where: predicate, values: values, order: order,
                                           start: page.startIndex, limit: page.limit)
-        return MediaPage(items: records.map(\.item), startIndex: page.startIndex,
+        // A listing id (or an already-fetched detail answer, even an empty one) is the item's final
+        // identity: nothing more is requested for it.
+        let items = try records.map { record -> MediaItem in
+            var item = record.item
+            let detailsFetched = try catalog.detailsFetched(item.id)
+            item.catalogIdentityIsComplete = Self.hasStrongListingID(item) || detailsFetched
+            return item
+        }
+        return MediaPage(items: items, startIndex: page.startIndex,
                          totalCount: try catalog.count(where: predicate, values: values))
     }
 
@@ -540,7 +562,8 @@ actor IPTVClient: ApplicationStorageParticipant {
             try await loadSeries(catalog.record("series:" + parts[1]))
             record = try catalog.record(id)
         }
-        if details, credential.mode == .xtream, let nativeID = record.streamID {
+        if details, credential.mode == .xtream, let nativeID = record.streamID,
+           try !catalog.detailsFetched(id) {
             if record.item.kind == .movie {
                 let data = try await object(url: endpoint(action: "get_vod_info", extra: [
                     URLQueryItem(name: "vod_id", value: nativeID)
@@ -550,6 +573,7 @@ actor IPTVClient: ApplicationStorageParticipant {
                 if let refresh { try await refresh.value }
                 record = sanitizedArtwork(record)
                 try store(record)
+                try catalog.markDetailsFetched(id, library: "movies", stamp: record.listingStamp ?? "")
             } else if record.item.kind == .series {
                 try await loadSeries(record)
                 record = try catalog.record(id)
@@ -574,6 +598,7 @@ actor IPTVClient: ApplicationStorageParticipant {
         do {
             let enriched = IPTVMapping.enrich(series, with: data.object("info"))
             try store(enriched)
+            try catalog.markDetailsFetched(enriched.item.id, library: "series", stamp: enriched.listingStamp ?? "")
             for (seasonKey, values) in episodes {
                 guard let seasonNumber = Int(seasonKey), seasonNumber >= 0,
                       seasonNumber <= 10_000, case .array(let entries) = values else { throw IPTVError.malformed }
@@ -592,11 +617,34 @@ actor IPTVClient: ApplicationStorageParticipant {
         }
     }
 
+    private static func hasStrongListingID(_ item: MediaItem) -> Bool {
+        [ProviderIDNamespace.tmdb, .imdb, .tvdb].contains { item.providerIDs.providerID($0) != nil }
+    }
+
+    /// Changes only when the provider's movie or series listing changed (ids and per-entry stamps).
+    /// Nil until a listing import has recorded one (or for playlist sources, which use the commit revision).
+    func listingFingerprint() async throws -> String? {
+        var parts: [String] = []
+        for library in ["movies", "series"] {
+            try await ensureCatalog(library)
+            let scope = credential.mode == .playlist ? Self.playlistCatalogScope : library
+            guard let part = try catalog.state("\(scope)-listing")
+                    ?? (credential.mode == .xtream ? nil : catalog.state("\(scope)-revision")) else { return nil }
+            parts.append(part)
+        }
+        return parts.joined(separator: ";")
+    }
+
+    /// User-initiated rebuild: details are fetched again the next time they are needed.
+    func forgetFetchedDetails() throws { try catalog.clearDetailsState() }
+
     func children(_ id: String) async throws -> [MediaItem] {
         var parent = try await record(id)
         if credential.mode == .xtream {
             if parent.item.kind == .season, let seriesID = parent.item.seriesID { parent = try await record(seriesID) }
-            if parent.item.kind == .series { try await loadSeries(parent) }
+            if parent.item.kind == .series, try !catalog.detailsFetched(parent.item.id) {
+                try await loadSeries(parent)
+            }
         }
         var result: [MediaItem] = []
         while true {
@@ -640,6 +688,22 @@ actor IPTVClient: ApplicationStorageParticipant {
         return try catalog.state("live").map { "legacy:\($0)" }
     }
 
+    /// The committed lineup's revision and a digest of every channel's identity, name, number, icon, groups and guide
+    /// identity. Nil until a lineup is committed. Never starts a refresh; the icon address is digested, not exposed.
+    func committedLineupFingerprints() throws -> (revision: String, channels: [String: String])? {
+        guard try savedGuideChannels() != nil else { return nil }
+        let revision = try guideCatalogRevision() ?? "legacy"
+        var channels: [String: String] = [:]
+        for entry in try liveLineup() where channels[entry.id] == nil {
+            channels[entry.id] = IPTVMapping.digest([
+                entry.title, entry.channelNumber.map(String.init) ?? "", entry.posterURL?.absoluteString ?? "",
+                entry.tags.joined(separator: "\u{1E}"), entry.guideID ?? "", entry.guideName ?? "",
+                entry.guideCountry ?? ""
+            ].joined(separator: "\u{1F}"))
+        }
+        return (revision, channels)
+    }
+
     func guideChannels() async throws -> [IPTVProvider.IPTVGuideChannel] {
         try await ensureCatalog("live")
         return try committedGuideChannels()
@@ -658,8 +722,10 @@ actor IPTVClient: ApplicationStorageParticipant {
     struct SavedGuideLineup: Sendable {
         /// Changes whenever the lineup does.
         let revision: String
-        /// Only channels with a guide ID; the others cannot have listings.
+        /// Only channels with a guide ID: what the saved guide's station selection is built from.
         let guided: [String: IPTVProvider.IPTVGuideChannel]
+        /// Every channel: one without a guide ID is read by name and country.
+        let all: [String: IPTVProvider.IPTVGuideChannel]
     }
 
     /// Nil until a lineup has been committed. Never starts a catalogue refresh.
@@ -670,12 +736,15 @@ actor IPTVClient: ApplicationStorageParticipant {
            cachedGuideLineup.dataVersion == dataVersion { return cachedGuideLineup.lineup }
         guard let channels = try savedGuideChannels() else { return nil }
         var guided: [String: IPTVProvider.IPTVGuideChannel] = [:]
-        for channel in channels
-        where channel.guideID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-            guided[channel.id] = guided[channel.id] ?? channel
+        var all: [String: IPTVProvider.IPTVGuideChannel] = [:]
+        for channel in channels {
+            all[channel.id] = all[channel.id] ?? channel
+            if channel.guideID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                guided[channel.id] = guided[channel.id] ?? channel
+            }
         }
         let lineup = SavedGuideLineup(
-            revision: revision ?? "legacy", guided: guided
+            revision: revision ?? "legacy", guided: guided, all: all
         )
         cachedGuideLineup = (revision, try catalog.dataVersion(), lineup)
         return lineup
@@ -686,7 +755,8 @@ actor IPTVClient: ApplicationStorageParticipant {
         guard entries.count <= 100_000 else { throw LiveTVSourceImportError.guideTooLarge }
         return entries.map {
             IPTVProvider.IPTVGuideChannel(
-                id: $0.id, name: $0.title, guideID: $0.guideID, guideName: $0.guideName, country: $0.guideCountry
+                id: $0.id, name: $0.title, guideID: $0.guideID, guideName: $0.guideName, country: $0.guideCountry,
+                groups: $0.tags
             )
         }
     }
@@ -809,6 +879,7 @@ actor IPTVClient: ApplicationStorageParticipant {
             startRefresh("live", scope: "live", background: true)
         }
         let supportsGuide = try credential.mode == .xtream || !credential.explicitGuideURLs.isEmpty
+            || !credential.extraGuideURLs.isEmpty
             || catalog.count(where: "kind = ?", values: [MediaItemKind.unknown.rawValue]) > 0
         return try ServerLiveTVCatalogSnapshot(channels: committedLiveChannels(), supportsGuide: supportsGuide)
     }
@@ -818,7 +889,8 @@ actor IPTVClient: ApplicationStorageParticipant {
             ServerLiveTVChannel(
                 id: entry.id, name: entry.title,
                 number: entry.channelNumber.map(String.init) ?? String(index + 1),
-                imageURL: entry.posterURL, groups: entry.tags
+                imageURL: entry.posterURL, groups: entry.tags,
+                guideID: entry.guideID, guideName: entry.guideName, guideCountry: entry.guideCountry
             )
         }
     }
@@ -925,7 +997,8 @@ actor IPTVClient: ApplicationStorageParticipant {
     }
 
     func hasGuideSource() async throws -> Bool {
-        if credential.mode == .xtream || !credential.explicitGuideURLs.isEmpty { return true }
+        if credential.mode == .xtream || !credential.explicitGuideURLs.isEmpty
+            || !credential.extraGuideURLs.isEmpty { return true }
         try await ensureCatalog("live")
         return try catalog.count(where: "kind = ?", values: [MediaItemKind.unknown.rawValue]) > 0
     }
@@ -978,6 +1051,33 @@ actor IPTVClient: ApplicationStorageParticipant {
         }
     }
 
+    /// DEBUG probe: the panel's per-stream short EPG (`get_short_epg`), reduced to a listing count, the returned `epg_id`, the
+    /// HTTP status class and the elapsed time. Never throws.
+    func shortEPGProbe(channelID: String, limit: Int) async -> LiveTVEPGProbeResult {
+        let start = ContinuousClock.now
+        let status = ProbeStatusBox()
+        func elapsed() -> Int {
+            let parts = (ContinuousClock.now - start).components
+            return Int(parts.seconds * 1_000 + parts.attoseconds / 1_000_000_000_000_000)
+        }
+        do {
+            guard credential.mode == .xtream, let nativeID = try await record(channelID).streamID else {
+                return LiveTVEPGProbeResult(channelID: channelID, outcome: .unsupported)
+            }
+            let data = try await object(url: endpoint(action: "get_short_epg", extra: [
+                URLQueryItem(name: "stream_id", value: nativeID), URLQueryItem(name: "limit", value: String(limit))
+            ]), receivedResponse: { status.set($0.statusCode / 100) })
+            let listings = data.array("epg_listings")
+            let epgID = listings.lazy.compactMap { $0.object.text("epg_id") ?? $0.object.text("channel_id") }.first
+            return LiveTVEPGProbeResult(
+                channelID: channelID, outcome: .answered, listingCount: listings.count, epgID: epgID,
+                statusClass: status.value, elapsedMilliseconds: elapsed())
+        } catch {
+            return LiveTVEPGProbeResult(
+                channelID: channelID, outcome: .failed, statusClass: status.value, elapsedMilliseconds: elapsed())
+        }
+    }
+
     private func currentGuideRefresh() -> GuideRefreshState? {
         guideRefreshes = guideRefreshes.filter { $0.value.scope != nil }
         guard let scope = ServerLiveTVGuideRefreshScope.current else { return nil }
@@ -987,18 +1087,21 @@ actor IPTVClient: ApplicationStorageParticipant {
         return state
     }
 
-    func guideData(from url: URL) async throws -> Data {
-        try await guideDocument(from: url, retainsRawResponse: true).data
+    func guideData(from url: URL, isExtra: Bool = false) async throws -> Data {
+        try await guideDocument(from: url, retainsRawResponse: true, isExtra: isExtra).data
     }
 
-    func guideDocument(from url: URL, retainsRawResponse: Bool = false) async throws -> XMLTVDownloadedDocument {
-        let response = try await guideResponse(from: url, retainsRawResponse: retainsRawResponse)
+    func guideDocument(
+        from url: URL, retainsRawResponse: Bool = false, isExtra: Bool = false
+    ) async throws -> XMLTVDownloadedDocument {
+        let response = try await guideResponse(from: url, retainsRawResponse: retainsRawResponse, isExtra: isExtra)
         guard case .document(let document) = response else { throw IPTVError.malformed }
         return document
     }
 
+    /// `isExtra`: a guide the user added. Its failures are remembered per address and never touch the provider guide's back-off.
     func guideResponse(
-        from url: URL, previous: XMLTVGuideCacheMetadata? = nil, retainsRawResponse: Bool = false
+        from url: URL, previous: XMLTVGuideCacheMetadata? = nil, retainsRawResponse: Bool = false, isExtra: Bool = false
     ) async throws -> XMLTVGuideResponse {
         try Task.checkCancellation()
         try storageLifecycle.checkAccess()
@@ -1012,16 +1115,29 @@ actor IPTVClient: ApplicationStorageParticipant {
             IPTVGuideDiagnostics.request?.reuseGuideFailure()
             throw failure
         }
-        try checkGuideBackoff()
+        if isExtra {
+            if let failure = extraGuideFailures[url] {
+                if failure.until > Date() { throw failure.error }
+                extraGuideFailures[url] = nil
+            }
+        } else {
+            try checkGuideBackoff()
+        }
         let responseMetadata = IPTVHTTP.ResponseMetadata()
         do {
             let response = try await retriedGuideResponse(
                 from: url, previous: previous, retainsRawResponse: retainsRawResponse, refresh: refresh,
                 responseMetadata: responseMetadata
             )
-            noteGuideOutcome(nil)
+            if isExtra { extraGuideFailures[url] = nil } else { noteGuideOutcome(nil) }
             return response
         } catch {
+            if isExtra {
+                if !Task.isCancelled {
+                    extraGuideFailures[url] = (Date().addingTimeInterval(Self.extraGuideRetryDelay), error)
+                }
+                throw error
+            }
             switch error {
             case AppError.notFound, IPTVError.unsupported:
                 if credential.mode == .xtream, credential.explicitGuideURLs.isEmpty,
@@ -1226,6 +1342,7 @@ actor IPTVClient: ApplicationStorageParticipant {
         clearGuideCache()
         guideRefreshes.removeAll()
         emptyGuideAnswers.removeAll()
+        extraGuideFailures.removeAll()
         batchGuideUnavailable = false
         restoreGuideBackoffOnce()
         if let backoff = guideBackoff {
@@ -1389,4 +1506,11 @@ actor IPTVClient: ApplicationStorageParticipant {
         try Task.checkCancellation()
         if !chunk.isEmpty { try consume(chunk) }
     }
+}
+
+private final class ProbeStatusBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Int?
+    func set(_ value: Int) { lock.lock(); stored = value; lock.unlock() }
+    var value: Int? { lock.lock(); defer { lock.unlock() }; return stored }
 }

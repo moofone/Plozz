@@ -31,6 +31,7 @@
 			<array>
 				<string>plozz</string>
 				<string>$(PRODUCT_BUNDLE_IDENTIFIER).external-player</string>
+				<string>$(PLOZZ_DEBUG_URL_SCHEME)</string>
 			</array>
 		</dict>
 	</array>

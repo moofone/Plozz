@@ -9,6 +9,8 @@ import Foundation
 /// channels: each is re-admitted under the current account authorization before it is shown.
 public struct LiveTVLastSeenSnapshot: Codable, Equatable, Sendable {
     public static let maximumChannels = 150
+    /// The airing listing and the one after it, per saved channel.
+    public static let maximumProgramsPerChannel = 2
 
     public struct Entry: Codable, Equatable, Sendable {
         /// The provider's own channel identifier, from which the published identifier is re-derived.
@@ -23,11 +25,15 @@ public struct LiveTVLastSeenSnapshot: Codable, Equatable, Sendable {
         /// Absent in legacy documents, which cannot prove whose lineup was saved.
         public let viewerScopeID: String?
         public let entries: [Entry]
+        /// The airing and next listings saved with the rows, absent in documents written before listings were kept.
+        /// They are shown only while still current, and the saved guide read replaces them.
+        public let programs: [LiveTVPrototypeProgram]?
 
         public init(
             sourceID: String, accountID: String, kind: LiveTVPrototypeSource,
-            entries: [Entry], viewerScopeID: String? = nil
+            entries: [Entry], viewerScopeID: String? = nil, programs: [LiveTVPrototypeProgram]? = nil
         ) {
+            self.programs = programs
             self.sourceID = sourceID
             self.accountID = accountID
             self.kind = kind
@@ -38,6 +44,39 @@ public struct LiveTVLastSeenSnapshot: Codable, Equatable, Sendable {
 
     public let sources: [Source]
     public let browse: LiveTVBrowseSummary
+    /// Where the guide was scrolled when it was left. Absent in documents written before positions were kept.
+    public let viewport: LiveTVGuideViewport?
+
+    public init(sources: [Source], browse: LiveTVBrowseSummary, viewport: LiveTVGuideViewport? = nil) {
+        self.sources = sources
+        self.browse = browse
+        self.viewport = viewport
+    }
+}
+
+/// The vertical place the guide was left: the first visible row, how far into it the top edge sat, and the focused row.
+/// It is shown again only under the filters it was saved with, and only for rows that are re-admitted.
+public struct LiveTVGuideViewport: Codable, Equatable, Sendable {
+    /// The published identifier of the first visible row.
+    public let anchorChannelID: String
+    /// Points between the top of the anchor row and the top edge of the viewport.
+    public let relativeOffset: Double
+    public let focusedChannelID: String?
+    public let category: String?
+    public let favoriteFilterID: String?
+    public let sort: String
+
+    public init(
+        anchorChannelID: String, relativeOffset: Double, focusedChannelID: String?,
+        category: String?, favoriteFilterID: String?, sort: String
+    ) {
+        self.anchorChannelID = anchorChannelID
+        self.relativeOffset = relativeOffset
+        self.focusedChannelID = focusedChannelID
+        self.category = category
+        self.favoriteFilterID = favoriteFilterID
+        self.sort = sort
+    }
 }
 
 /// Category names and channel counts for the browsing filters in effect.

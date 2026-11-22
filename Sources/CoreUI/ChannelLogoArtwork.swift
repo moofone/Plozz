@@ -3,6 +3,21 @@ import CoreModels
 import SwiftUI
 import UIKit
 
+/// How a channel logo is presented.
+public enum ChannelLogoStyle: Equatable, Sendable {
+    /// The logo on its themed backing plate: Home, playback and multiview.
+    case plate
+    /// The provider's logo in its own colours straight on the row, with no plate,
+    /// sized to fill the guide cell like the Live TV guide design. A dark logo is
+    /// drawn as a white silhouette. `qualityBadge` ("4K" or "8K") sits just outside the logo's top-right
+    /// corner, never over it.
+    case bare(qualityBadge: String? = nil)
+    /// The bare logo as the Live TV channel panel draws it: left-aligned at the top of its box, sized to the box at
+    /// `ChannelLogoExtraction.panelAreaFill` (not the guide cell's geometry), and exactly as tall as the logo drawn. The badge sits at the
+    /// logo's top-right corner, outside it, and takes no room.
+    case panelLeading(qualityBadge: String? = nil)
+}
+
 /// One cached logo and backing treatment for channel guides and live playback.
 public struct ChannelLogoArtwork: View {
     private let name: String
@@ -12,7 +27,18 @@ public struct ChannelLogoArtwork: View {
     private let artworkInset: CGFloat
     private let plozzChannelID: String?
     private let plozzChannelMood: LibraryChannelArtworkMood?
+    private let style: ChannelLogoStyle
+    private let logoNeedsDarkBackground: Bool
+    /// Set for a provider-supplied logo: the brand key it is screened under, so a flag or a logo shared by
+    /// unrelated brands draws the channel name instead. `nil` never screens (user and automatic logos).
+    private let placeholderScreeningKey: String?
+    /// The place printed under a bare guide logo shared by several regional channels; `nil` for none.
+    private let regionLabel: String?
+    /// Opt-in: when set, a bare logo is drawn only from this synchronously readable cache (`nil` or blank on a miss); nothing is
+    /// loaded, decoded, analysed or written by the row. `nil` keeps the loading behaviour.
+    private let preparedArtworkCache: ThemedChannelLogoArtworkCache?
     @State private var loaded: LoadedLogo?
+    @State private var screenedOut: URL?
     /// Steers the plate: light themes default to light backing, dark to dark.
     @Environment(\.themePalette) private var palette
 
@@ -23,8 +49,16 @@ public struct ChannelLogoArtwork: View {
         cornerRadius: CGFloat,
         artworkInset: CGFloat? = nil,
         plozzChannelID: String? = nil,
-        plozzChannelMood: LibraryChannelArtworkMood? = nil
+        plozzChannelMood: LibraryChannelArtworkMood? = nil,
+        style: ChannelLogoStyle = .plate,
+        logoNeedsDarkBackground: Bool = false,
+        placeholderScreeningKey: String? = nil,
+        regionLabel: String? = nil,
+        preparedArtworkCache: ThemedChannelLogoArtworkCache? = nil
     ) {
+        self.preparedArtworkCache = preparedArtworkCache
+        self.placeholderScreeningKey = placeholderScreeningKey
+        self.regionLabel = regionLabel
         self.name = name
         self.logoURL = logoURL
         self.size = size
@@ -32,9 +66,17 @@ public struct ChannelLogoArtwork: View {
         self.artworkInset = artworkInset ?? size.height * 20 / 128
         self.plozzChannelID = plozzChannelID
         self.plozzChannelMood = plozzChannelMood
+        self.style = style
+        self.logoNeedsDarkBackground = logoNeedsDarkBackground
+    }
+
+    private var isScreenedOut: Bool {
+        guard placeholderScreeningKey != nil, let logoURL else { return false }
+        return screenedOut == logoURL || ChannelLogoPlaceholderGate.isKnownPlaceholder(logoURL)
     }
 
     private var current: LoadedLogo? {
+        if isScreenedOut { return nil }
         if let loaded, loaded.url == logoURL { return loaded }
         guard let logoURL,
               let cached = HeroLogoMemo.value(for: HeroLogoMemo.key(for: [.remote(logoURL)])) else {
@@ -43,7 +85,31 @@ public struct ChannelLogoArtwork: View {
         return LoadedLogo(url: logoURL, processed: cached)
     }
 
+    private var bareStyle: (badge: String?, leading: Bool)? {
+        switch style {
+        case let .bare(badge): (badge, false)
+        case let .panelLeading(badge): (badge, true)
+        case .plate: nil
+        }
+    }
+
     public var body: some View {
+        if let logoURL, plozzChannelID == nil {
+            BareChannelLogo(
+                name: name, logoURL: logoURL, size: size, cornerRadius: cornerRadius,
+                artworkInset: artworkInset, qualityBadge: bareStyle?.badge,
+                providerRequestsDarkBackground: logoNeedsDarkBackground,
+                placeholderScreeningKey: placeholderScreeningKey,
+                isPanelLeading: bareStyle?.leading ?? false,
+                regionLabel: regionLabel,
+                preparedArtworkCache: preparedArtworkCache
+            )
+        } else {
+            plateBody
+        }
+    }
+
+    private var plateBody: some View {
         Group {
             if plozzChannelID != nil, logoURL == nil {
                 PlozzChannelWordmark(
@@ -62,6 +128,11 @@ public struct ChannelLogoArtwork: View {
         }
         .task(id: logoURL) {
             guard let logoURL else {
+                loaded = nil
+                return
+            }
+            if let key = placeholderScreeningKey, await ChannelLogoPlaceholderGate.shared.rejects(url: logoURL, brandKey: key) {
+                screenedOut = logoURL
                 loaded = nil
                 return
             }
@@ -86,6 +157,234 @@ public struct ChannelLogoArtwork: View {
             image = processed.image
             tone = processed.tone
         }
+    }
+}
+
+/// The provider logo, trimmed and fitted like the guide design, with no plate.
+/// Until the logo loads the cell stays empty; if it cannot load, the ordinary
+/// name fallback is shown.
+struct BareChannelLogo: View {
+    let name: String
+    let logoURL: URL
+    let size: CGSize
+    let cornerRadius: CGFloat
+    let artworkInset: CGFloat
+    let qualityBadge: String?
+    let providerRequestsDarkBackground: Bool
+    var placeholderScreeningKey: String? = nil
+    var isPanelLeading = false
+    var regionLabel: String? = nil
+    /// Non-nil makes this a cache-only row: no task, no loader, no disk; a miss draws the empty cell.
+    var preparedArtworkCache: ThemedChannelLogoArtworkCache? = nil
+    @State private var loaded: Loaded?
+    @State private var failedURL: URL?
+    @Environment(\.themePalette) private var palette
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private struct LoadID: Hashable {
+        let url: URL
+        let theme: ChannelLogoExtraction.Theme
+    }
+
+    private struct Loaded {
+        let url: URL
+        let theme: ChannelLogoExtraction.Theme
+        let prepared: ChannelLogoExtraction.Prepared
+    }
+
+    /// The treatment follows the theme's background; part of the cache key with the URL.
+    private var theme: ChannelLogoExtraction.Theme { palette.isLight ? .light : .dark }
+
+    private var isScreenedOut: Bool {
+        placeholderScreeningKey != nil && (failedURL == logoURL || ChannelLogoPlaceholderGate.isKnownPlaceholder(logoURL))
+    }
+
+    private var current: ChannelLogoExtraction.Prepared? {
+        if isScreenedOut { return nil }
+        if let preparedArtworkCache {
+            return preparedArtworkCache.prepared(
+                for: ThemedChannelLogoIdentity(url: logoURL, providerRequestsDarkBackground: providerRequestsDarkBackground),
+                theme: theme)
+        }
+        if let loaded, loaded.url == logoURL, loaded.theme == theme { return loaded.prepared }
+        return ChannelLogoExtractionLoader.cached(
+            url: logoURL, providerRequestsDarkBackground: providerRequestsDarkBackground, theme: theme
+        )
+    }
+
+    var body: some View {
+        if preparedArtworkCache != nil {
+            content.accessibilityHidden(true)
+        } else {
+            content
+                .task(id: LoadID(url: logoURL, theme: theme)) { await load() }
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var content: some View {
+        Group {
+            if let prepared = current, prepared.needsTextFallback, !name.isEmpty {
+                if isPanelLeading {
+                    nameText(in: size, alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    let box = ChannelLogoExtraction.GuideGeometry(cellSize: size).box
+                    nameText(in: box, alignment: .leading).frame(width: size.width, height: size.height)
+                }
+            } else if let prepared = current, isPanelLeading {
+                let aspect = Self.drawnAspect(of: prepared.image, fallback: prepared.aspect)
+                let fitted = ChannelLogoExtraction.fittedSize(aspect: aspect, in: size, areaFill: ChannelLogoExtraction.panelAreaFill)
+                ZStack(alignment: .topLeading) {
+                    logo(prepared, size: fitted)
+                    if let qualityBadge {
+                        let badgeFont: CGFloat = 27
+                        QualityBadge(text: qualityBadge, fontSize: badgeFont)
+                            .offset(x: fitted.width, y: -badgeFont * 1.34 * ChannelLogoExtraction.GuideGeometry.badgeRise)
+                    }
+                }
+                .frame(width: fitted.width, height: fitted.height, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let prepared = current, let regionLabel, qualityBadge == nil {
+                labelledLogo(prepared, label: regionLabel)
+            } else if let prepared = current {
+                let geometry = ChannelLogoExtraction.GuideGeometry(cellSize: size)
+                // The drawn image's own pixel aspect, not the reported trim aspect:
+                // they differ when the trim crop failed and the original was kept.
+                let layout = geometry.layout(
+                    aspect: Self.drawnAspect(of: prepared.image, fallback: prepared.aspect), badge: qualityBadge, inkFill: prepared.inkFill)
+                ZStack(alignment: .topLeading) {
+                    logo(prepared, size: layout.logo.size)
+                        .offset(x: layout.logo.minX, y: layout.logo.minY)
+                    if let qualityBadge, let badge = layout.badge {
+                        QualityBadge(text: qualityBadge, fontSize: geometry.badgeFontSize)
+                            .offset(x: badge.minX, y: badge.minY)
+                    }
+                }
+                .frame(width: geometry.box.width, height: geometry.box.height, alignment: .topLeading)
+                .frame(width: size.width, height: size.height)
+            } else if failedURL == logoURL || isScreenedOut {
+                ChannelLogoPlateContent(
+                    name: name, image: nil,
+                    plate: ChannelLogoPlate(tone: nil, prefersLight: palette.isLight),
+                    size: size, cornerRadius: cornerRadius, artworkInset: artworkInset
+                )
+            } else {
+                Color.clear.frame(width: size.width, height: size.height)
+            }
+        }
+    }
+
+    private func load() async {
+        if let key = placeholderScreeningKey,
+           await ChannelLogoPlaceholderGate.shared.rejects(url: logoURL, brandKey: key) {
+            loaded = nil
+            failedURL = logoURL
+            return
+        }
+        let prepared = await ChannelLogoExtractionLoader.shared.prepared(
+            url: logoURL, providerRequestsDarkBackground: providerRequestsDarkBackground, theme: theme
+        )
+        guard !Task.isCancelled else { return }
+        if let prepared {
+            loaded = Loaded(url: logoURL, theme: theme, prepared: prepared)
+            failedURL = nil
+        } else {
+            failedURL = logoURL
+        }
+    }
+
+    /// The logo with its place beneath it, centred together on ink in the visible cell (see `ChannelLogoExtraction.labelledLayout`).
+    private func labelledLogo(_ prepared: ChannelLogoExtraction.Prepared, label: String) -> some View {
+        let box = ChannelLogoExtraction.GuideGeometry(cellSize: size).box
+        let layout = ChannelLogoExtraction.labelledLayout(
+            aspect: Self.drawnAspect(of: prepared.image, fallback: prepared.aspect), inkFill: prepared.inkFill, box: box, cell: size
+        ) { ChannelLogoExtraction.labelInk(label, font: $0) }
+        let font = UIFont.systemFont(ofSize: layout.fontSize, weight: .medium)
+        let colour = ChannelLogoExtraction.RegionLabelStyle.colour(for: theme)
+        return ZStack(alignment: .topLeading) {
+            logo(prepared, size: layout.logo.size)
+                .offset(x: layout.logo.minX, y: layout.logo.minY)
+            Text(verbatim: label)
+                .font(Font(font))
+                .lineLimit(1)
+                .fixedSize()
+                .foregroundStyle(Color(red: colour.rgb.0 / 255, green: colour.rgb.1 / 255, blue: colour.rgb.2 / 255).opacity(colour.opacity))
+                .frame(width: size.width, height: font.lineHeight, alignment: .center)
+                .offset(x: layout.inkShiftX, y: layout.baseline - font.ascender)
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+
+    static func drawnAspect(of image: UIImage, fallback: Double) -> Double {
+        guard image.size.width > 0, image.size.height > 0 else { return fallback }
+        return Double(image.size.width / image.size.height)
+    }
+
+    @ViewBuilder
+    private func logo(_ prepared: ChannelLogoExtraction.Prepared, size: CGSize) -> some View {
+        if prepared.isDark {
+            Image(uiImage: prepared.image)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size.width, height: size.height)
+                .foregroundStyle(.white.opacity(0.9))
+        } else {
+            Image(uiImage: prepared.image)
+                .renderingMode(.original)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size.width, height: size.height)
+        }
+    }
+
+    /// The channel's cleaned name in the logo slot, for a logo that is not a quality icon or still misses the contrast rule.
+    private func nameText(in box: CGSize, alignment: Alignment) -> some View {
+        let fontSize = box.height * 0.36
+        let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let layout = ChannelLogoExtraction.nameLayout(name, maxWidth: box.width) {
+            ($0 as NSString).size(withAttributes: [.font: font]).width
+        }
+        return VStack(spacing: 0) {
+            ForEach(Array(layout.lines.enumerated()), id: \.offset) { index, line in
+                Text(line)
+                    .font(.system(size: fontSize * layout.scale, weight: .semibold, design: .default))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .allowsTightening(index == layout.lines.count - 1 ? false : true)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .foregroundStyle(palette.isLight ? Color(white: 0.1) : Color.white)
+        .frame(width: box.width, height: box.height, alignment: .center)
+    }
+}
+
+/// The 4K word: bold white with a soft dark halo.
+public struct QualityBadge: View {
+    let text: String
+    let fontSize: CGFloat
+
+    public init(text: String, fontSize: CGFloat) {
+        self.text = text
+        self.fontSize = fontSize
+    }
+
+    public var body: some View {
+        let height = fontSize * 1.34
+        Text(verbatim: text)
+            .font(.system(size: fontSize, weight: .bold))
+            .tracking(fontSize * 0.03)
+            .foregroundStyle(.white)
+            .padding(.horizontal, fontSize * 0.2)
+            .frame(height: height)
+            .fixedSize()
+            .shadow(color: .black.opacity(0.95), radius: 1)
+            .shadow(color: .black.opacity(0.85), radius: 2)
+            .shadow(color: .black.opacity(0.7), radius: 4)
+            .shadow(color: .black.opacity(0.45), radius: 9)
+            .allowsHitTesting(false)
     }
 }
 

@@ -820,6 +820,9 @@ public struct RootView: View {
                         onRemoveAccountEverywhere: { appState.removeAccountEverywhere(id: $0.id) },
                         offersRemoveEverywhere: appState.offersRemoveEverywhere,
                         onRescanShare: { appState.mediaShare.rescanShare(accountID: $0) },
+                        onRebuildLibraryIndex: { accountID in
+                            Task { await appState.identityIndex.rebuildLibraryIndex(accountID: accountID) }
+                        },
                         onPollShares: { appState.mediaShare.pollSharesForChanges() },
                         onSignOutAll: { appState.signOutAll() },
                         onSwitchProfile: { appState.profileFlow.requestProfileSelection() },
@@ -993,6 +996,7 @@ public struct RootView: View {
         .environment(appState.profileSettings.homeLibraryVisibilityModel)
         .environment(\.homeContentSnapshot, RuntimeHomeContentSnapshot(appState: appState, models: homeViewModelBox))
         .environment(appState.guidePreparation)
+        .environment(appState.extraGuides)
         .environment(glassPerformance)
         .environment(displayVeil)
         #if os(tvOS)

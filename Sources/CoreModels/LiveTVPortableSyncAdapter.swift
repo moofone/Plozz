@@ -595,7 +595,8 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
         let preferences = LiveTVPreferences(
             favoriteIDs: saved.favoriteIDs, hiddenChannels: saved.hiddenChannels,
             favoriteOrder: saved.favoriteOrder, favoriteChannels: saved.favoriteChannels,
-            channelOverrides: saved.channelOverrides, organization: saved.organization
+            channelOverrides: saved.channelOverrides, organization: saved.organization,
+            stableChannelNumbers: saved.stableChannelNumbers
         )
         let suppression = try suppression.records()
         let directory = directory
@@ -676,7 +677,21 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
         var records = journal.records
         let consentRevision = consent.consentRevision
         let localConfiguration = try sourceConfiguration(sourceStore)
-        let localPrefs = try preferences.load()
+        var localPrefs = try preferences.load()
+        // Numbers merge field by field (earliest assignment wins), not as a whole record, so a peer's numbers
+        // for channels this device has also numbered are merged even when this device owns the channel's other state.
+        var peerNumbers: [String: LiveTVChannelNumberAssignment] = [:]
+        for (name, value) in baseline where records[name] != value {
+            guard let recordKey = LiveTVPortableRecordKey.parse(name), recordKey.kind == .channel,
+                  let assignment = (try? LiveTVPortableRecord.decode(value, key: recordKey))?.channel?.numberAssignment
+            else { continue }
+            peerNumbers[recordKey.entityID] = assignment
+        }
+        let mergedNumbers = localPrefs.stableChannelNumbers.merging(assignments: peerNumbers)
+        if mergedNumbers != localPrefs.stableChannelNumbers {
+            localPrefs.stableChannelNumbers = mergedNumbers
+            try preferences.save(localPrefs)
+        }
         let localChannelIDs = localPrefs.favoriteIDs.union(localPrefs.hiddenChannelIDs)
             .union(localPrefs.organization.shownChannelIDs).union(localPrefs.organization.excludedFavoriteIDs)
             .union(localPrefs.channelOverrides.keys).union(shareableMappings?.keys.map { $0 } ?? [])
@@ -749,6 +764,7 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
             .union(localPreferences.favoriteIDs).union(hidden.keys).union(localPreferences.channelOverrides.keys)
             .union(localPreferences.organization.shownChannelIDs).union(localPreferences.organization.excludedFavoriteIDs)
             .union(shareableMappings?.keys.map { $0 } ?? [])
+            .union(localPreferences.stableChannelNumbers.assignments.keys)
         // Native-ID hints accompany user-authored state, not every downloaded
         // station. A large catalog with no preferences is not a cloud collection.
         for id in channelIDs.sorted() {
@@ -760,8 +776,9 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
             let hint = Self.capturedIdentityHint(
                 id: id, local: identityHints?[id], previous: previous?.identityHint, observed: observed
             )
+            let numberAssignment = localPreferences.stableChannelNumbers.assignments[id] ?? previous?.numberAssignment
             if previousRecord?.isDeleted == true, !localPreferences.favoriteIDs.contains(id),
-               hidden[id] == nil, localPreferences.channelOverrides[id] == nil,
+               hidden[id] == nil, localPreferences.channelOverrides[id] == nil, numberAssignment == nil,
                !localPreferences.organization.shownChannelIDs.contains(id),
                !localPreferences.organization.excludedFavoriteIDs.contains(id),
                mapping == nil, hint == nil { continue }
@@ -774,7 +791,8 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
                 metadata: localPreferences.channelOverrides[id],
                 guideMapping: mapping, identityHint: hint,
                 isAlwaysShown: localPreferences.organization.shownChannelIDs.contains(id) ? true : nil,
-                isExcludedFromCategoryFavorites: localPreferences.organization.excludedFavoriteIDs.contains(id) ? true : nil
+                isExcludedFromCategoryFavorites: localPreferences.organization.excludedFavoriteIDs.contains(id) ? true : nil,
+                number: numberAssignment?.number, numberAssignedAt: numberAssignment?.assignedAt
             ))
             try put(local, key: key, into: &records)
             if hint != nil { observed.clearedIdentityHintFingerprints?[id] = nil }
@@ -1088,6 +1106,7 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
         }
         var metadata = savedPreferences.channelOverrides
         var organization = savedPreferences.organization
+        var incomingNumbers: [String: LiveTVChannelNumberAssignment] = [:]
         for (recordKey, record) in accepted {
             switch recordKey.kind {
             case .category:
@@ -1105,6 +1124,8 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
                 favoriteNames[recordKey.entityID] = record.channel?.favoriteName
                 favoritePositions[recordKey.entityID] = record.channel?.favoritePosition
                 metadata[recordKey.entityID] = record.channel?.metadata
+                // A record without a number, or a tombstone, never removes one: numbers stay reserved.
+                if let assignment = record.channel?.numberAssignment { incomingNumbers[recordKey.entityID] = assignment }
                 if record.channel?.isAlwaysShown == true { organization.shownChannelIDs.insert(recordKey.entityID) }
                 else { organization.shownChannelIDs.remove(recordKey.entityID) }
                 if record.channel?.isExcludedFromCategoryFavorites == true {
@@ -1132,7 +1153,8 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
             },
             favoriteChannels: favoriteNames.keys.sorted().map { LiveTVHiddenChannel(id: $0, name: favoriteNames[$0]!) },
             channelOverrides: metadata, browse: savedPreferences.browse,
-            favoriteMultiviews: savedPreferences.favoriteMultiviews, organization: organization
+            favoriteMultiviews: savedPreferences.favoriteMultiviews, organization: organization,
+            stableChannelNumbers: savedPreferences.stableChannelNumbers.merging(assignments: incomingNumbers)
         )
         let acceptedServerSources = accepted.filter { recordKey, record in
             recordKey.kind == .source && (
@@ -1505,6 +1527,7 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
             let hint = Self.capturedIdentityHint(
                 id: id, local: hints?[id], previous: previous.channel?.identityHint, observed: observed
             )
+            let numberAssignment = preferences.stableChannelNumbers.assignments[id] ?? previous.channel?.numberAssignment
             if previous.isDeleted, !preferences.favoriteIDs.contains(id), hidden == nil,
                !preferences.organization.shownChannelIDs.contains(id),
                !preferences.organization.excludedFavoriteIDs.contains(id),
@@ -1517,7 +1540,8 @@ public final class LiveTVPortableSyncAdapter: @unchecked Sendable {
                 metadata: preferences.channelOverrides[id],
                 guideMapping: mapping, identityHint: hint,
                 isAlwaysShown: preferences.organization.shownChannelIDs.contains(id) ? true : nil,
-                isExcludedFromCategoryFavorites: preferences.organization.excludedFavoriteIDs.contains(id) ? true : nil
+                isExcludedFromCategoryFavorites: preferences.organization.excludedFavoriteIDs.contains(id) ? true : nil,
+                number: numberAssignment?.number, numberAssignedAt: numberAssignment?.assignedAt
             ))
         case .source:
             if !configuration.playlists.contains(where: { $0.id == id }),

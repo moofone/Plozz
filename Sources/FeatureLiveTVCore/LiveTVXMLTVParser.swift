@@ -17,6 +17,8 @@ public struct LiveTVGuideImport: Codable, Sendable {
     public let coverageEnd: Date?
     public let matches: [String: LiveTVGuideMatch]
     public let guideChannels: [String: [String]]
+    /// First valid `<channel><icon>` per guide channel ID.
+    public let guideIcons: [String: URL]
 
     public init(
         programs: [LiveTVPrototypeProgram],
@@ -27,7 +29,8 @@ public struct LiveTVGuideImport: Codable, Sendable {
         coverageEnd: Date?,
         matches: [String: LiveTVGuideMatch] = [:],
         guideChannels: [String: [String]] = [:],
-        sourceProgramCount: Int? = nil
+        sourceProgramCount: Int? = nil,
+        guideIcons: [String: URL] = [:]
     ) {
         self.programs = programs
         self.matchedChannelCount = matchedChannelCount
@@ -38,11 +41,27 @@ public struct LiveTVGuideImport: Codable, Sendable {
         self.matches = matches
         self.guideChannels = guideChannels
         self.sourceProgramCount = sourceProgramCount
+        self.guideIcons = guideIcons
+    }
+
+    /// Caches written before channel icons existed have no `guideIcons` key.
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        programs = try values.decode([LiveTVPrototypeProgram].self, forKey: .programs)
+        matchedChannelCount = try values.decode(Int.self, forKey: .matchedChannelCount)
+        guideChannelCount = try values.decode(Int.self, forKey: .guideChannelCount)
+        programCount = try values.decode(Int.self, forKey: .programCount)
+        sourceProgramCount = try values.decodeIfPresent(Int.self, forKey: .sourceProgramCount)
+        coverageStart = try values.decodeIfPresent(Date.self, forKey: .coverageStart)
+        coverageEnd = try values.decodeIfPresent(Date.self, forKey: .coverageEnd)
+        matches = try values.decode([String: LiveTVGuideMatch].self, forKey: .matches)
+        guideChannels = try values.decode([String: [String]].self, forKey: .guideChannels)
+        guideIcons = try values.decodeIfPresent([String: URL].self, forKey: .guideIcons) ?? [:]
     }
 }
 
 public struct LiveTVXMLTVParser: Sendable {
-    static let cacheVersion = 3
+    static let cacheVersion = 4
     public static let maximumCompressedBytes = XMLTVResourceLimits.compressedBytes
     public static let maximumExpandedBytes = XMLTVResourceLimits.expandedBytes
     public static let maximumGuideChannels = 100_000
@@ -208,8 +227,21 @@ public struct LiveTVXMLTVParser: Sendable {
             throw LiveTVSourceImportError.invalidGuide
         }
         let metadataDelegate = XMLTVDelegate(isCancelled: isCancelled)
+        let stationDump = LiveTVGuideSnapshotWriter.launchDirectory()
+        metadataDelegate.countsProgrammesPerChannel = stationDump != nil
         try parseXML(stream: makeStream(), delegate: metadataDelegate)
         try checkCancellation()
+        // The FULL station list of the XMLTV, before any lineup-based retention. Notice level, so `log show` keeps it.
+        HandoffDiagnostics.emit(
+            "XMLTV_PARSE pass=metadata declaredChannels=\(metadataDelegate.guideChannels.count)"
+                + " undeclaredWithProgrammes=\(metadataDelegate.undeclaredGuideIDs.count) guideChannels="
+                + "\(metadataDelegate.guideChannels.count + metadataDelegate.undeclaredGuideIDs.count)"
+                + " programmes=\(metadataDelegate.sourceProgramCount)")
+        if let stationDump {
+            LiveTVGuideSnapshotWriter.writeStations(
+                declared: metadataDelegate.guideChannels, undeclared: metadataDelegate.undeclaredGuideIDs,
+                programmeCounts: metadataDelegate.programmeCounts, directory: stationDump)
+        }
         if metadataDelegate.skippedChannelDeclarations > 0 {
             PlozzLog.networking.info(
                 "XMLTV_PARSE pass=metadata outcome=succeeded skippedChannels=\(metadataDelegate.skippedChannelDeclarations)"
@@ -233,8 +265,16 @@ public struct LiveTVXMLTVParser: Sendable {
             let ids = Set(channels.compactMap(\.guideID))
             let foldedIDs = Set(ids.map(LiveTVGuideMatcher.foldedGuideID))
             let names = Set(channels.map { matcher.normalizedDisplayName($0.guideName ?? $0.name) })
+            // A row without a station of its own id is read by name and country (`LiveTVGuideStationIndex`): keep that station too.
+            let stationIndex = LiveTVGuideStationIndex(guideChannels: guideChannels)
+            var classifier = LiveTVLineupClassifier()
+            let namedStations = Set(channels.flatMap { channel in
+                stationIndex.retainedStationIDs(
+                    name: channel.guideName ?? channel.name,
+                    country: LiveTVGuideStationIndex.country(of: channel, classifier: &classifier), groups: channel.categories)
+            })
             channelsByGuideID = [:]
-            for (id, stationNames) in guideChannels where ids.contains(id)
+            for (id, stationNames) in guideChannels where ids.contains(id) || namedStations.contains(id)
                 || foldedIDs.contains(LiveTVGuideMatcher.foldedGuideID(id))
                 || stationNames.contains(where: { names.contains(matcher.normalizedDisplayName($0)) }) {
                 channelsByGuideID[id] = [LiveTVPrototypeChannel(
@@ -256,7 +296,8 @@ public struct LiveTVXMLTVParser: Sendable {
         let result = try programmeDelegate.makeResult(
             guideChannelCount: guideChannels.count,
             assignments: matching.assignments,
-            guideChannels: guideChannels
+            guideChannels: guideChannels,
+            guideIcons: metadataDelegate.guideIcons
         )
         if !channels.isEmpty {
             programmeDelegate.logSummary(
@@ -323,8 +364,13 @@ private final class XMLTVDelegate: NSObject, XMLParserDelegate {
     private let upperBound: Date?
     private let preferredLanguage: String?
     private(set) var guideChannels: [String: [String]] = [:]
+    private(set) var guideIcons: [String: URL] = [:]
+    private var currentChannelIcon: URL?
     private var mergedChannelNames: [String: Set<String>] = [:]
     private(set) var undeclaredGuideIDs = Set<String>()
+    /// DEBUG station dump only: programmes per channel id, counted in the metadata pass.
+    var countsProgrammesPerChannel = false
+    private(set) var programmeCounts: [String: Int] = [:]
     private(set) var retainedTextBytes: Int
     private var programs: [LiveTVPrototypeProgram] = []
     private var retainedProgramCount = 0
@@ -445,7 +491,8 @@ private final class XMLTVDelegate: NSObject, XMLParserDelegate {
     func makeResult(
         guideChannelCount: Int,
         assignments: [String: LiveTVGuideMatch],
-        guideChannels: [String: [String]]
+        guideChannels: [String: [String]],
+        guideIcons: [String: URL]
     ) throws -> LiveTVGuideImport {
         if isCancelled() {
             throw LiveTVSourceImportError.cancelled
@@ -472,7 +519,8 @@ private final class XMLTVDelegate: NSObject, XMLParserDelegate {
             coverageEnd: coverageEnd,
             matches: assignments,
             guideChannels: guideChannels,
-            sourceProgramCount: sourceProgramCount
+            sourceProgramCount: sourceProgramCount,
+            guideIcons: guideIcons
         )
     }
 
@@ -534,6 +582,7 @@ private final class XMLTVDelegate: NSObject, XMLParserDelegate {
                 }
                 currentChannelID = rawIdentifier
                 currentChannelNames = []
+                currentChannelIcon = nil
                 currentChannelTextBytes = 0
             case "programme":
                 sourceProgramCount += 1
@@ -543,6 +592,9 @@ private final class XMLTVDelegate: NSObject, XMLParserDelegate {
                     return
                 }
                 if case .metadata = pass {
+                    if countsProgrammesPerChannel, let id = bounded(attributeDict["channel"], maximum: 4_096) {
+                        programmeCounts[id, default: 0] += 1
+                    }
                     if let id = bounded(attributeDict["channel"], maximum: 4_096),
                        guideChannels[id] == nil, !undeclaredGuideIDs.contains(id) {
                         guard guideChannels.count + undeclaredGuideIDs.count < LiveTVXMLTVParser.maximumGuideChannels,
@@ -633,10 +685,10 @@ private final class XMLTVDelegate: NSObject, XMLParserDelegate {
                    currentProgram?.details.languages.contains(language) == false {
                     currentProgram?.details.languages.append(language)
                 }
+            case .metadata where insideChannel && currentChannelID != nil && elementName == "icon":
+                if currentChannelIcon == nil { currentChannelIcon = iconURL(attributeDict["src"]) }
             case .programmes where insideProgramme && elementName == "icon":
-                if let address = bounded(attributeDict["src"], maximum: 4_096),
-                   let url = URL(string: address), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-                   url.user == nil, url.password == nil {
+                if let url = iconURL(attributeDict["src"]) {
                     currentProgram?.details.artworkURL = url
                 }
             default:
@@ -860,8 +912,12 @@ private final class XMLTVDelegate: NSObject, XMLParserDelegate {
             currentChannelID = nil
             currentChannelNames = []
             currentChannelTextBytes = 0
+            currentChannelIcon = nil
         }
         guard case .metadata = pass, let identifier = currentChannelID else { return }
+        // The first valid icon per guide channel wins; its bytes count toward the retained limit.
+        let newIcon = guideIcons[identifier] == nil ? currentChannelIcon : nil
+        let iconBytes = newIcon?.absoluteString.utf8.count ?? 0
         if guideChannels[identifier] != nil {
             if mergedChannelNames[identifier] == nil {
                 mergedChannelNames[identifier] = Set(guideChannels[identifier, default: []])
@@ -869,18 +925,19 @@ private final class XMLTVDelegate: NSObject, XMLParserDelegate {
             let additions = currentChannelNames.filter {
                 mergedChannelNames[identifier, default: []].insert($0).inserted
             }
-            let addedBytes = additions.reduce(0) { $0 + $1.utf8.count }
+            let addedBytes = additions.reduce(0) { $0 + $1.utf8.count } + iconBytes
             guard retainedTextBytes + addedBytes <= LiveTVXMLTVParser.maximumRetainedTextBytes else {
                 error = .guideTooLarge
                 parser.abortParsing()
                 return
             }
             guideChannels[identifier, default: []].append(contentsOf: additions)
+            guideIcons[identifier] = newIcon ?? guideIcons[identifier]
             retainedTextBytes += addedBytes
             mergedChannelDeclarations += 1
         } else {
             let wasReferenced = undeclaredGuideIDs.contains(identifier)
-            let addedBytes = currentChannelTextBytes + (wasReferenced ? 0 : identifier.utf8.count)
+            let addedBytes = currentChannelTextBytes + iconBytes + (wasReferenced ? 0 : identifier.utf8.count)
             guard guideChannels.count + undeclaredGuideIDs.count + (wasReferenced ? 0 : 1)
                     <= LiveTVXMLTVParser.maximumGuideChannels,
                   retainedTextBytes + addedBytes <= LiveTVXMLTVParser.maximumRetainedTextBytes else {
@@ -890,6 +947,7 @@ private final class XMLTVDelegate: NSObject, XMLParserDelegate {
             }
             undeclaredGuideIDs.remove(identifier)
             guideChannels[identifier] = currentChannelNames
+            guideIcons[identifier] = newIcon
             retainedTextBytes += addedBytes
         }
     }
@@ -1004,6 +1062,14 @@ extension XMLTVDelegate {
         let result = text.split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
         return result.isEmpty ? nil : result
+    }
+
+    /// Programme and channel icons share one rule: http(s), no credentials, at most 4,096 characters.
+    private func iconURL(_ source: String?) -> URL? {
+        guard let address = bounded(source, maximum: 4_096),
+              let url = URL(string: address), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.user == nil, url.password == nil else { return nil }
+        return url
     }
 
     private func bounded(_ text: String?, maximum: Int) -> String? {

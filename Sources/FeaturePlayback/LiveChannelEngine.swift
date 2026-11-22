@@ -78,6 +78,14 @@ public struct LiveChannelEngineSnapshot: Equatable, Sendable {
     }
 }
 
+/// Which decoder family the next live load should use.
+public enum LiveChannelDecodeHint: Equatable, Sendable {
+    /// The engine's own route choice.
+    case automatic
+    /// The engine's software decoder, for a stream the native decoder rejects frame by frame.
+    case software
+}
+
 /// Process-wide audio and display ownership for independently retained live players.
 public struct LiveChannelOutputPolicy: Equatable, Sendable {
     public var isAudible: Bool
@@ -111,6 +119,12 @@ public protocol LiveChannelEngine: VideoEngine {
     /// A scheduled media boundary resets tracks/cues, not the channel or decoder owner.
     var onProgrammeChanged: (@MainActor () -> Void)? { get set }
     var supportsConcurrentPlayback: Bool { get }
+    /// The four-character name of the video codec once the engine has a video track, else nil.
+    var liveVideoCodecName: String? { get }
+    /// Whether `.software` is a route this engine can take for a live stream.
+    var supportsLiveSoftwareDecode: Bool { get }
+    /// Applies to the next `loadChannel`/`loadLive`; the host resets it to `.automatic` for a new channel.
+    var liveDecodeHint: LiveChannelDecodeHint { get set }
     var recoverableProgrammeIssue: LibraryChannelError? { get }
     var currentLibraryItem: LibraryChannelItem? { get }
     func configureLiveOutput(_ policy: LiveChannelOutputPolicy)
@@ -133,6 +147,12 @@ public extension LiveChannelEngine {
     var livePlaybackFailureDiagnostic: PlaybackFailureDiagnostic? { nil }
     var isCapturingLiveFailureDiagnostic: Bool { false }
     var supportsConcurrentPlayback: Bool { false }
+    var liveVideoCodecName: String? { nil }
+    var supportsLiveSoftwareDecode: Bool { false }
+    var liveDecodeHint: LiveChannelDecodeHint {
+        get { .automatic }
+        set {}
+    }
     var recoverableProgrammeIssue: LibraryChannelError? { nil }
     var currentLibraryItem: LibraryChannelItem? { nil }
     var onProgrammeChanged: (@MainActor () -> Void)? {

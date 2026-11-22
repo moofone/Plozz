@@ -45,8 +45,10 @@ public enum HomeLiveTVCatalogProjection {
                     sourceAuthorizationID: authorization.identity,
                     serverAuthorizationID: serverAuthorizationID
                 ),
-                name: channel.name, sourceName: sourceName, number: channel.number,
-                logoURL: channel.logoURL, organizationMetadata: channel.organizationMetadata
+                name: channel.name, sourceName: sourceName,
+                // Home's card shows a number only when it is above zero; hidden numbers are zero.
+                number: model.showsChannelNumbers ? channel.number : 0,
+                logoURL: model.effectiveLogoURL(for: channel), organizationMetadata: channel.organizationMetadata
             )
         }
     }

@@ -330,12 +330,9 @@ public struct HeroDiscoveryRuntime: Sendable {
         _ request: HeroDiscoveryRequest, sources: [HeroDiscoverySource]
     ) async -> [MediaItem] {
         await productionCandidates(request, sources: sources, configurationLoader: {
-            let config = MetadataProviderConfig.resolved()
-            guard sources.contains(.tmdb) else { return config }
-            let store = TMDBUserKeyStore(
-                secureStore: KeychainStore(service: "com.plozz.app.household")
-            )
-            return config.withUserToken(store.load())
+            // The household key is read only when TMDB is a requested source.
+            guard sources.contains(.tmdb) else { return MetadataProviderConfig.resolved() }
+            return MetadataAccessRuntime.currentConfig()
         }, discover: { request, sources, config in
             await ProductionHeroDiscovery.discover(request, sources: sources, providerConfig: config)
         })

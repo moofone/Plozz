@@ -68,12 +68,26 @@ struct IPTVAccountGuideIndex: IPTVGuideIndexLoading {
         )
     }
 
+    func refreshSaved(
+        url: URL, catalog: @escaping @Sendable () async throws -> [IPTVProvider.IPTVGuideChannel],
+        download: @escaping @Sendable (XMLTVGuideCacheMetadata?) async throws -> XMLTVGuideResponse,
+        trigger: SavedGuideRefreshTrigger
+    ) async throws -> SavedGuideRefreshReport? {
+        try await index.refreshSaved(
+            from: url, catalog: { try await catalog().map(Self.channel) }, trigger: trigger, revalidate: download
+        )
+    }
+
     private static func programme(_ program: LiveTVPrototypeProgram) -> ServerLiveTVProgramme {
         ServerLiveTVProgramme(
             id: program.id, channelID: program.channelID, title: program.title, subtitle: program.subtitle,
             overview: program.details?.description, startDate: program.start, endDate: program.end,
             imageURL: program.details?.artworkURL, categories: program.details?.categories ?? []
         )
+    }
+
+    func snapshotRecords(url: URL, from: Date, to: Date) async throws -> [LiveTVGuideSnapshot.GuideRecord]? {
+        try await index.snapshotRecords(from: url, range: DateInterval(start: from, end: to))
     }
 
     func invalidate() async { await index.invalidate() }
@@ -83,7 +97,7 @@ struct IPTVAccountGuideIndex: IPTVGuideIndexLoading {
         LiveTVPrototypeChannel(
             id: channel.id, number: 0, name: channel.name, category: "Live TV", symbol: "tv",
             accent: 0, source: .iptv, tagline: "", guideID: channel.guideID,
-            guideName: channel.guideName, country: channel.country
+            guideName: channel.guideName, country: channel.country, groups: channel.groups.isEmpty ? nil : channel.groups
         )
     }
 }

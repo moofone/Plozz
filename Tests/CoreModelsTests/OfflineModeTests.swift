@@ -4,7 +4,9 @@ import XCTest
 final class OfflineModeTests: XCTestCase {
     func testRolloutIsEnabledInBothBuildConfigurations() {
         XCTAssertTrue(RuntimeFeatureFlags.productionDefault.isEnabled(.offlineMode))
-        XCTAssertEqual(RuntimeFeatureFlags.buildDefault, .productionDefault)
+        var build = RuntimeFeatureFlags.buildDefault
+        build.set(.schedulesDirect, enabled: false)  // DEBUG-only research flag
+        XCTAssertEqual(build, .productionDefault)
     }
 
     func testDisabledFlagCannotBlockNetworking() throws {

@@ -51,6 +51,10 @@ final class PlozziOSAppModel {
         return self.accountsProviders.liveTVProviderResolver()(id)
     }
 
+    @ObservationIgnored lazy var extraGuides = accountsProviders.makeExtraGuidesModel { [weak self] id in
+        self?.guidePreparation.start(accountID: id, refresh: true)
+    }
+
     static var isStandalonePlaybackAvailable: Bool {
         true
     }
@@ -789,6 +793,7 @@ final class PlozziOSAppModel {
             validator: { token in await tmdbKeyRuntime.validateTMDBUserKey(token) },
             onCredentialSuperseded: { token in await tmdbKeyRuntime.invalidateTMDBCredential(forToken: token) }
         )
+        LiveTVChannelLogoRuntime.configure()
         self.shareScanStatus = shareScanStatus
         self.durableLocalStateStore = durableLocalStateStore
         let aliasStorageDirectory = Self.isRunningUnitTests
@@ -986,6 +991,9 @@ final class PlozziOSAppModel {
         }
         accountError = launchErrors.isEmpty ? nil : launchErrors.joined(separator: "\n")
         accountsProviders.reloadAccounts()
+        accountsProviders.applyLaunchExtraGuide(model: extraGuides) { [weak self] in
+            self?.guidePreparation.start(accountID: $0, refresh: true)
+        }
         refreshOfflineProviders()
         if plexHomeUsers.restoreAutomaticSignInAtLaunch() {
             self.requiresLaunchProfileSelection = false
@@ -1208,6 +1216,10 @@ final class PlozziOSAppModel {
             }
         }
         return source
+    }
+
+    func rebuildLibraryIndex(accountID: String) {
+        Task { await identityIndex.rebuildLibraryIndex(accountID: accountID) }
     }
 
     func rescanShare(accountID: String) {
