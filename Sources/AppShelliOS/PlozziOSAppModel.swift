@@ -3,6 +3,7 @@ import AniListService
 import AppRuntime
 import CoreModels
 import CoreNetworking
+import CoreSecureStore
 import CoreUI
 import CrashReporting
 import EnginePlozzigen
@@ -48,6 +49,10 @@ final class PlozziOSAppModel {
               self.plexHomeUsers.pendingPlexPINRequest == nil,
               !self.accountsProviders.activeProfileAwaitsIdentity else { return nil }
         return self.accountsProviders.liveTVProviderResolver()(id)
+    }
+
+    @ObservationIgnored lazy var extraGuides = accountsProviders.makeExtraGuidesModel { [weak self] id in
+        self?.guidePreparation.start(accountID: id, refresh: true)
     }
 
     static var isStandalonePlaybackAvailable: Bool {
@@ -218,6 +223,13 @@ final class PlozziOSAppModel {
     @ObservationIgnored
     private(set) lazy var cloudSync: CloudConfigSyncService? = Self.makeCloudSync(for: self)
 
+    #if DEBUG
+    /// Replaces only the remote request in hosted tests; local erasure and the
+    /// profile/parental authorization checks still execute in the real entry point.
+    @ObservationIgnored
+    var cloudServerErasureForTesting: (@MainActor @Sendable () async -> CloudSyncRecoveryResult)?
+    #endif
+
     @ObservationIgnored
     private(set) lazy var liveTVPortableSync: LiveTVPortableSyncBridge? =
         Self.makeLiveTVPortableSync(profiles: profiles)
@@ -308,9 +320,24 @@ final class PlozziOSAppModel {
         // the bundle the user already approved.
         if let seerr = received.secrets?.seerr {
             Self.installSeerrSecretIfAbsent(seerr)
+            if restrictToAccountID == nil, let url = URL(string: seerr.baseURL) {
+                do {
+                    try Self.seerrAccountConnectionStore().importLegacyIfAbsent(
+                        SeerConnection(baseURL: url, apiKey: seerr.apiKey), profiles: incomingProfiles
+                    )
+                } catch { PlozzLog.auth.error("Seerr legacy pairing could not restore profile connections") }
+            }
             // The service cached its config at init; reload so a connection that
             // arrived with this pairing is live now, not after the next launch.
             Task { [seerService] in await seerService.reloadConnection() }
+        }
+        if restrictToAccountID == nil, let seerrProfiles = received.secrets?.seerrProfiles {
+            do {
+                try Self.seerrAccountConnectionStore().importAPIKeysIfAbsent(
+                    seerrProfiles, allowedProfiles: Set(incomingProfiles.map(\.id))
+                )
+                Task { [seerService] in await seerService.reloadConnection() }
+            } catch { PlozzLog.auth.error("Seerr pairing could not restore profile connections") }
         }
         // Track credentialed accounts we ATTEMPT (expected to sign in without a tap)
         // vs those that actually persisted, so the caller can gate success and
@@ -674,6 +701,7 @@ final class PlozziOSAppModel {
         appAdmissionStore: any AppAdmissionStoring = AppAdmissionStore(),
         accountStore suppliedAccountStore: AccountStore? = nil,
         profileStore: (any ProfilePersisting)? = nil,
+        seerService suppliedSeerService: SeerService? = nil,
         appLanguage: AppLanguageSettingsModel? = nil,
         runtimeFeatureFlags: RuntimeFeatureFlags = .buildDefault
     ) {
@@ -742,7 +770,7 @@ final class PlozziOSAppModel {
         )
         if offline { accountsProviders.localProviders = [:] }
         let shareScanStatus = ShareScanStatusModel()
-        let seerService = SeerServiceFactory.make(
+        let seerService = suppliedSeerService ?? SeerServiceFactory.make(
             connectionStore: HouseholdSeerConnectionStore(
                 secureStore: KeychainStore(service: "com.plozz.app.household")
             )
@@ -765,6 +793,7 @@ final class PlozziOSAppModel {
             validator: { token in await tmdbKeyRuntime.validateTMDBUserKey(token) },
             onCredentialSuperseded: { token in await tmdbKeyRuntime.invalidateTMDBCredential(forToken: token) }
         )
+        LiveTVChannelLogoRuntime.configure()
         self.shareScanStatus = shareScanStatus
         self.durableLocalStateStore = durableLocalStateStore
         let aliasStorageDirectory = Self.isRunningUnitTests
@@ -962,6 +991,9 @@ final class PlozziOSAppModel {
         }
         accountError = launchErrors.isEmpty ? nil : launchErrors.joined(separator: "\n")
         accountsProviders.reloadAccounts()
+        accountsProviders.applyLaunchExtraGuide(model: extraGuides) { [weak self] in
+            self?.guidePreparation.start(accountID: $0, refresh: true)
+        }
         refreshOfflineProviders()
         if plexHomeUsers.restoreAutomaticSignInAtLaunch() {
             self.requiresLaunchProfileSelection = false
@@ -987,10 +1019,18 @@ final class PlozziOSAppModel {
             await prepareUniversalWatchlist()
         }
         applyCrashReportingPreference()
+        seerService.configureProfiles(
+            store: suppliedSeerService != nil || Self.isRunningUnitTests
+                ? InMemorySeerAccountConnectionStore()
+                : SeerAccountConnectionStore(secureStore: KeychainStore(service: "com.plozz.app.household")),
+            profiles: profiles.profilesForSync,
+            current: { [profiles] in profiles.activeProfile }
+        )
+        SeerProfileAuthentication.configure(
+            service: seerService, profiles: profiles, accounts: accountsProviders, plex: plexHomeUsers
+        )
         Task {
             guard !isOfflineMode else { return }
-            let namespaces = [nil] + profiles.profiles.map { Optional($0.id) }
-            await seerService.migrateLegacyConnectionIfNeeded(namespaces: namespaces)
             await seerService.refreshStatus()
         }
 
@@ -1178,6 +1218,10 @@ final class PlozziOSAppModel {
         return source
     }
 
+    func rebuildLibraryIndex(accountID: String) {
+        Task { await identityIndex.rebuildLibraryIndex(accountID: accountID) }
+    }
+
     func rescanShare(accountID: String) {
         mediaShareRescanService.rescan(accountID: accountID)
     }
@@ -1330,6 +1374,15 @@ final class PlozziOSAppModel {
         pendingSyncedServerPrompt = nil
         accountsProviders.reloadAccounts()
         guard accountsProviders.accounts.isEmpty else { return false }
+        do {
+            try LiveTVLastSeenStore.erase(
+                profileIDs: profiles.profiles.map(\.id), secureStore: LiveTVSourceStorage.catalogSecrets()
+            )
+        } catch {
+            PlozzLog.app.error("First-run reset could not erase Live TV last-seen rows")
+            accountError = error.localizedDescription
+            return false
+        }
         plexHomeUsers.resetAllForDebug()
         do {
             if afterSyncErasure { try profiles.resetToPristineDefaultAfterSyncErasure() }
@@ -1931,6 +1984,7 @@ final class PlozziOSAppModel {
             await prepareUniversalWatchlist()
         }
 
+        seerService.synchronizeProfile()
         Task { await seerService.setActiveProfile(namespace: profiles.activeNamespace) }
     }
 
@@ -2863,11 +2917,12 @@ final class PlozziOSAppModel {
             await updateTrackersForActiveProfile()
             await prepareUniversalWatchlist()
         }
+        seerService.synchronizeProfile()
         Task { await seerService.setActiveProfile(namespace: profiles.activeNamespace) }
     }
 
     var activeSeerrRequestIdentity: SeerRequestIdentity {
-        profiles.activeProfile.seerrRequestIdentity
+        seerService.requestIdentity
     }
 
     var activeSeerrRequestActingName: String? {
@@ -2876,7 +2931,7 @@ final class PlozziOSAppModel {
               !identity.requiresRelink(to: seerService.serverIdentity) else {
             return nil
         }
-        return profiles.activeProfile.seerrUserName
+        return seerService.requestAccountName
     }
 
     func setSeerrUser(_ user: SeerUser?, for profileID: String) {

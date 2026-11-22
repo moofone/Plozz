@@ -30,6 +30,8 @@ enum IPTVMapping {
             guideID: value.text("epg_channel_id"), isLive: library == "live"
         )
         record = enrich(record, with: value)
+        record.listingStamp = ["name", "added", "last_modified", "tmdb", "tmdb_id", "container_extension"]
+            .map { value.text($0) ?? "" }.joined(separator: "|")
         return record
     }
 

@@ -24,6 +24,18 @@ public protocol MediaProvider: Sendable {
     /// `MediaItem.catalogIdentityIsComplete`; inferred IDs alone cannot.
     var catalogIdentityRequiresEnrichment: Bool { get }
 
+    /// Changes only when the provider's catalogue listing changed. Providers whose listing is a
+    /// large locally cached document return it so an unchanged account is never re-indexed;
+    /// `nil` means the provider cannot tell cheaply.
+    func catalogListingFingerprint() async -> String?
+
+    /// Forgets final per-item details fetched for identity (manual "rebuild library index").
+    func resetCatalogIdentityDetails() async
+
+    /// Whether this provider is currently serving a live stream. Single-stream providers must not
+    /// receive background identity requests meanwhile.
+    var hasActiveLiveStream: Bool { get async }
+
     /// Browsing metadata may omit lazily resolved files. Offer explicit source
     /// discovery when opening the version picker; never preload it while browsing.
     var playbackInventoryRequiresEnrichment: Bool { get }
@@ -41,6 +53,10 @@ public protocol MediaProvider: Sendable {
     /// `Int.max` requests the complete feed; network providers must page with
     /// bounded request sizes rather than send that value as a server limit.
     func continueWatching(limit: Int) async throws -> [MediaItem]
+
+    /// The same Resume/Next Up feeds, optionally omitting extra parent-series
+    /// recency reads. Use `Int.max` when membership, rather than ordering, is needed.
+    func continueWatching(limit: Int, includeSeriesRecency: Bool) async throws -> [MediaItem]
 
     /// Recently added items across the user's libraries.
     func latest(limit: Int) async throws -> [MediaItem]
@@ -510,6 +526,9 @@ public extension MediaProvider {
         throw AppError.unknown("This source does not support external title links.")
     }
     var catalogIdentityRequiresEnrichment: Bool { false }
+    func catalogListingFingerprint() async -> String? { nil }
+    func resetCatalogIdentityDetails() async {}
+    var hasActiveLiveStream: Bool { get async { false } }
     var playbackInventoryRequiresEnrichment: Bool { false }
     var sharesLibraryInventoryAcrossProfiles: Bool { true }
 
@@ -587,6 +606,10 @@ public extension MediaProvider {
         limit: Int, inLibraries libraryIDs: [String]?, separateNextUp: Bool
     ) async throws -> [MediaItem] {
         try await continueWatching(limit: limit, inLibraries: libraryIDs)
+    }
+
+    func continueWatching(limit: Int, includeSeriesRecency: Bool) async throws -> [MediaItem] {
+        try await continueWatching(limit: limit)
     }
 
     func homeNextUp(libraryID: String, limit: Int) async throws -> [MediaItem] { [] }

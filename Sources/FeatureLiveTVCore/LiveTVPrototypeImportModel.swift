@@ -71,6 +71,18 @@ private final class LiveTVImportGuideCoverage {
 public typealias LiveTVGeneratedProgramLoader =
     @MainActor (Set<String>, DateInterval) throws -> [LiveTVPrototypeProgram]
 
+public struct LiveTVRestoredGuideViewport: Equatable, Sendable {
+    public let anchor: LiveTVGuideRowID
+    public let relativeOffset: Double
+    public let focus: LiveTVGuideRowID?
+
+    public init(anchor: LiveTVGuideRowID, relativeOffset: Double, focus: LiveTVGuideRowID?) {
+        self.anchor = anchor
+        self.relativeOffset = relativeOffset
+        self.focus = focus
+    }
+}
+
 @MainActor
 @Observable
 public final class LiveTVPrototypeImportModel {
@@ -131,6 +143,15 @@ public final class LiveTVPrototypeImportModel {
     public private(set) var guideDiscoveryFailures: [String: LiveTVSourceImportError] = [:]
     public private(set) var cacheFailure: LiveTVSourceImportError?
     public private(set) var catalogRevision = 0
+    public var channelNamePreviewSamples: [String] {
+        _ = catalogRevision
+        guard catalogIsAuthorized(), let model = publishedModel else { return [] }
+        let hidden = model.effectiveHiddenChannelIDs
+        let overrides = model.channelOverrides
+        return IPTVChannelName.previewSamples(from: sourceChannels.lazy.filter {
+            $0.source == .iptv && !hidden.contains($0.id) && overrides[$0.id]?.name == nil
+        }.map(\.name))
+    }
     public private(set) var mappingOverrides: [String: LiveTVGuideMappingOverride] = [:]
     public var supportsDurableCatalog: Bool { cache != nil }
     public var portableGuideMappings: [String: LiveTVPortableGuideMapping] {
@@ -206,9 +227,19 @@ public final class LiveTVPrototypeImportModel {
     @ObservationIgnored private var revision = 0
     @ObservationIgnored private var cachedGuides: [String: LiveTVGuideImport] = [:]
     @ObservationIgnored private var cachedPlaylists: [String: LiveTVPlaylistImport] = [:]
+    /// Your Lineup. Without it every row of a playlist is loaded.
+    @ObservationIgnored public var lineupState: LiveTVLineupState?
+    @ObservationIgnored private var lineupResults: [String: (inventory: LiveTVLineupInventory, leftOut: [LiveTVLeftOutChannel])] = [:]
     @ObservationIgnored private var disabledGuideIDs: Set<String> = []
     @ObservationIgnored private var legacySourceID: String?
     @ObservationIgnored private var sourceChannels: [LiveTVPrototypeChannel] = []
+    @ObservationIgnored private var sourceChannelIDs: Set<String> = []
+    @ObservationIgnored private var publishedChannelInputs: [PublishedChannelInput] = []
+    @ObservationIgnored private var lastSeenStore: (any LiveTVLastSeenStoring)?
+    @ObservationIgnored private var lastSeenSaveTask: Task<Void, Never>?
+    @ObservationIgnored private var preparedPublication: (
+        inputs: [PublishedChannelInput], channels: [LiveTVPrototypeChannel], channelIDs: Set<String>
+    )?
     @ObservationIgnored private var generatedChannels: [LiveTVPrototypeChannel] = []
     @ObservationIgnored private var generatedPrograms: [LiveTVPrototypeProgram] = []
     @ObservationIgnored private var reloadGeneration = 0
@@ -217,6 +248,12 @@ public final class LiveTVPrototypeImportModel {
     @ObservationIgnored var cachedServerCatalogs: [String: LiveTVServerCatalog] = [:]
     @ObservationIgnored var serverProviderResolver: LiveTVServerProviderResolver = { _ in nil }
     @ObservationIgnored var activeServerGuideRequests: Set<UUID> = []
+
+    /// Where the guide was left, once its saved rows are shown and the position is still valid for them.
+    /// Dropped when the provider's own lineup replaces those rows.
+    public private(set) var restoredGuideViewport: LiveTVRestoredGuideViewport?
+    @ObservationIgnored private var observedGuideViewport: (anchorChannelID: String, relativeOffset: Double)?
+    @ObservationIgnored private var observedGuideFocusChannelID: String?
 
     public var isLoading: Bool {
         playlistPhase == .loading || guidePhase == .loading
@@ -254,6 +291,7 @@ public final class LiveTVPrototypeImportModel {
         loader: any LiveTVSourceLoading = LiveTVSourceLoader(),
         serverProviderResolver: @escaping LiveTVServerProviderResolver = { _ in nil },
         cache: LiveTVIndexedCache? = nil,
+        lastSeen: (any LiveTVLastSeenStoring)? = nil,
         catalogIsAuthorized: @escaping @MainActor () -> Bool = { true },
         generatedProgramLoader: LiveTVGeneratedProgramLoader? = nil,
         guideClock: @escaping @MainActor () -> Date = Date.init
@@ -272,10 +310,13 @@ public final class LiveTVPrototypeImportModel {
         self.loader = loader
         self.serverProviderResolver = serverProviderResolver
         self.cache = cache
+        lastSeenStore = lastSeen
         self.catalogIsAuthorized = catalogIsAuthorized
         self.generatedProgramLoader = generatedProgramLoader
         self.guideClock = guideClock
     }
+
+    deinit { lastSeenSaveTask?.cancel() }
 
     #if DEBUG
     /// Legacy fixture/prototype initializer. Production must pass explicit profile configuration.
@@ -320,6 +361,7 @@ public final class LiveTVPrototypeImportModel {
         let newServers = Dictionary(uniqueKeysWithValues: configuration.servers.map { ($0.id, $0) })
         let changedServerIDs = Set(oldServers.keys).union(newServers.keys).filter { oldServers[$0] != newServers[$0] }
         beforeSourceRefresh?(Set(changedSourceIDs).union(changedServerIDs))
+        lastSeenSaveTask?.cancel()
         reloadGeneration &+= 1
         applyServerConfiguration(configuration.servers)
         let enabledConfiguredIDs = Set(
@@ -492,6 +534,7 @@ public final class LiveTVPrototypeImportModel {
     private func reload(
         into model: LiveTVPrototypeModel, forceServerRefresh: Bool, sourceID: String?
     ) async -> ReloadResult {
+        openTrace("import.reloadEntry")
         publishedModel = model
         guard ensureCatalogAuthorization(into: model) else { return .cancelled }
         let performance = PerformanceDiagnostics.shared.begin(.liveTVRefresh)
@@ -506,6 +549,8 @@ public final class LiveTVPrototypeImportModel {
         beforeSourceRefresh?(Set(refreshedSources))
         reloadGeneration &+= 1
         let request = reloadGeneration
+        if sourceID == nil { await restoreLastSeen(into: model) }
+        guard request == reloadGeneration, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return .cancelled }
         if sourceID == nil { await restoreCachedCatalog(into: model, now: model.now) }
         guard request == reloadGeneration, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return .cancelled }
         let playlistResult = sourceID == nil || configuration.playlists.contains(where: { $0.id == sourceID })
@@ -515,6 +560,7 @@ public final class LiveTVPrototypeImportModel {
             ? await reloadServersResult(into: model, forceRefresh: forceServerRefresh, sourceID: sourceID)
             : .completed
         guard request == reloadGeneration, !Task.isCancelled else { return .cancelled }
+        discardLastSeenRows(into: model)
         let result = playlistResult.merging(serverResult)
         guard result != .cancelled else { return .cancelled }
         outcome = result == .failed || playlistFailure != nil || guideFailure != nil
@@ -566,13 +612,15 @@ public final class LiveTVPrototypeImportModel {
             playlistSources[index].phase = .loading
             do {
                 try Task.checkCancellation()
-                let imported: LiveTVPlaylistImport
+                let read: LiveTVPlaylistImport
                 if let importedID = source.importedPlaylistID {
                     guard let cache else { throw LiveTVSourceImportError.cacheFailed }
-                    imported = try await cache.importedPlaylist(id: importedID)
+                    read = try await cache.importedPlaylist(id: importedID)
                 } else {
-                    imported = try await loader.loadPlaylist(from: source.playlistURL)
+                    read = try await loader.loadPlaylist(from: source.playlistURL)
                 }
+                // Your Lineup: the list is cut here, before identity, storage, guides, logos or tags see a row.
+                let imported = applyingLineup(to: read, source: source, model: model)
                 try Task.checkCancellation()
                 guard revision == request, ensureCatalogAuthorization(into: model) else { return .cancelled }
                 let playlist: LiveTVPlaylistImport
@@ -684,6 +732,21 @@ public final class LiveTVPrototypeImportModel {
                     cachedGuideWindows[source.id] = previousWindow
                     throw error
                 }
+                if let directory = LiveTVGuideSnapshotWriter.launchDirectory() {
+                    var programmes = guide.programs
+                    if programmes.isEmpty, let cache {
+                        // The guide lives in the indexed cache: read the 48 hour window for this source's channels.
+                        let ids = playlistSourceIDByChannel.filter { $0.value == owner }.map(\.key).sorted()
+                        let range = DateInterval(start: now, duration: LiveTVGuideSnapshot.guideWindow)
+                        for offset in stride(from: 0, to: ids.count, by: LiveTVIndexedCache.maximumWindowChannels) {
+                            let batch = Array(ids[offset..<min(ids.count, offset + LiveTVIndexedCache.maximumWindowChannels)])
+                            programmes += (try? await cache.programs(
+                                sourceID: source.id, channelIDs: batch, range: range, limit: 1_000_000, sourceURL: source.url)) ?? []
+                        }
+                    }
+                    LiveTVGuideSnapshotWriter.writeGuide(
+                        guideChannels: guide.guideChannels, programmes: programmes, now: now, directory: directory)
+                }
                 guideSources[index].matchedChannelCount = guide.matchedChannelCount
                 guideSources[index].programCount = guide.programCount
                 guideSources[index].lastRefresh = Date()
@@ -716,6 +779,56 @@ public final class LiveTVPrototypeImportModel {
         return .completed
     }
 
+    /// The playlist as Your Lineup loads it. Records what the whole list held (for the lineup sheet's counts) and the names
+    /// of what was left out (for Search). Without a lineup state every row is loaded.
+    private func applyingLineup(
+        to playlist: LiveTVPlaylistImport, source: LiveTVPlaylistSource, model: LiveTVPrototypeModel
+    ) -> LiveTVPlaylistImport {
+        guard let lineupState else { return playlist }
+        let keeps = lineupKeepIDs(model)
+        let preserves = preservesChannelIDs(for: source.id)
+        let result = LiveTVLineupFilter.apply(
+            lineupState.applied, to: playlist.channels, keepIDs: keeps,
+            scopedID: { preserves ? $0.id : LiveTVConfiguredSources.scopedChannelID(sourceID: source.id, channelID: $0.id) },
+            audit: LiveTVLineupAudit(source: "playlist"))
+        recordLineup(
+            sourceID: source.id, inventory: result.inventory, leftOut: result.leftOut,
+            summary: result.summary, kind: "playlist")
+        result.audit?.finishInBackground()
+        return LiveTVPlaylistImport(
+            channels: result.kept, entryCount: playlist.entryCount, skippedEntryCount: playlist.skippedEntryCount,
+            declaredGuideURLs: playlist.declaredGuideURLs, permitsPersistence: playlist.permitsPersistence,
+            originURL: playlist.originURL)
+    }
+
+    /// Rows saved under an earlier lineup are cut to the current one before they are shown.
+    private func narrowingToLineup(
+        _ rows: LiveTVLastSeenSnapshot.Source, _ input: (lineup: LiveTVLineup, keepIDs: Set<String>)?
+    ) -> LiveTVLastSeenSnapshot.Source {
+        guard let input else { return rows }
+        return LiveTVLastSeenSnapshot.Source(
+            sourceID: rows.sourceID, accountID: rows.accountID, kind: rows.kind,
+            entries: LiveTVLineupFilter.narrow(input.lineup, rows.entries, keepIDs: input.keepIDs),
+            viewerScopeID: rows.viewerScopeID)
+    }
+
+    /// Remembers what one source's whole list held and left out (the sheet's counts, Search) and logs how the cut went.
+    func recordLineup(
+        sourceID: String, inventory: LiveTVLineupInventory, leftOut: [LiveTVLeftOutChannel],
+        summary: LiveTVLineupSummary, kind: String
+    ) {
+        guard let lineupState else { return }
+        lineupResults[sourceID] = (inventory, leftOut)
+        lineupState.record(
+            inventory: lineupResults.values.reduce(.empty) { $0.merging($1.inventory) },
+            leftOut: lineupResults.values.flatMap(\.leftOut))
+        HandoffDiagnostics.emit("LIVE_TV event=lineupApplied " + summary.logFields(source: kind))
+    }
+
+    private func lineupKeepIDs(_ model: LiveTVPrototypeModel) -> Set<String> {
+        model.favoriteIDs.union(model.recentChannelIDs)
+    }
+
     private func preservesChannelIDs(for sourceID: String) -> Bool {
         sourceID == legacySourceID || sourceID == "free-us"
     }
@@ -745,8 +858,32 @@ public final class LiveTVPrototypeImportModel {
             cachedPlaylists[status.id].map { (status.id, $0) }
         }
         let servers = serverSources.filter(\.source.isEnabled).compactMap { cachedServerCatalogs[$0.id] }
-        let channels = playlists.flatMap { $0.1.channels } + servers.flatMap(\.channels) + generatedChannels
-        guard Set(channels.map(\.id)).count == channels.count else { throw LiveTVPrototypeDataError.duplicateChannelID }
+        // Guide batches republish after every request without changing the lineup. Array
+        // equality is immediate for storage that was not replaced, so an unchanged lineup
+        // skips rebuilding the channel list and its lookups.
+        let inputs = publicationInputs()
+        let prepared = preparedPublication
+        preparedPublication = nil
+        if inputs == publishedChannelInputs {
+            // Adopt equal storage from a re-import so the next comparison is immediate.
+            publishedChannelInputs = inputs
+            try publishGuides(into: model)
+            return
+        }
+        // A prepared lineup is the same list, already joined and counted off the main actor.
+        let channels: [LiveTVPrototypeChannel]
+        let channelIDs: Set<String>
+        if let prepared, prepared.inputs == inputs {
+            (channels, channelIDs) = (prepared.channels, prepared.channelIDs)
+        } else {
+            channels = playlists.flatMap { $0.1.channels } + servers.flatMap(\.channels) + generatedChannels
+            channelIDs = Set(channels.map(\.id))
+        }
+        guard channelIDs.count == channels.count else { throw LiveTVPrototypeDataError.duplicateChannelID }
+        let previousInputs = publishedChannelInputs
+        let previousChannelIDs = sourceChannelIDs
+        publishedChannelInputs = inputs
+        sourceChannelIDs = channelIDs
         let previousChannels = sourceChannels
         let previousPlaylistReferences = playlistSourceIDByChannel
         let previousServerReferences = serverChannelReferences
@@ -766,6 +903,8 @@ public final class LiveTVPrototypeImportModel {
             try publishGuides(into: model)
         } catch {
             if catalogIsAuthorized() {
+                publishedChannelInputs = previousInputs
+                sourceChannelIDs = previousChannelIDs
                 sourceChannels = previousChannels
                 playlistSourceIDByChannel = previousPlaylistReferences
                 serverChannelReferences = previousServerReferences
@@ -775,9 +914,210 @@ public final class LiveTVPrototypeImportModel {
         }
     }
 
+    // MARK: Last-seen rows
+
+    private var showsLastSeenRows: Bool {
+        serverSources.contains { $0.source.isEnabled && cachedServerCatalogs[$0.id]?.isProvisional == true }
+    }
+
+    /// Shows the rows that were on screen last time, so opening Live TV does not wait for the
+    /// lineup. Only an empty guide is seeded; each source's lineup replaces its rows when read.
+    private func restoreLastSeen(into model: LiveTVPrototypeModel) async {
+        guard let lastSeenStore, model.channels.isEmpty, cachedServerCatalogs.isEmpty,
+              cachedPlaylists.isEmpty else { return }
+        let started = Date()
+        let request = serverRevision
+        let authorizations = Dictionary(uniqueKeysWithValues: configuration.servers.filter(\.isEnabled).compactMap { source in
+            authorizedContext(for: source).map { (source.id, $0.authorizationID) }
+        })
+        openTrace("lastSeen.readBegin")
+        let saved = await lastSeenStore.load()
+        openTrace("lastSeen.readDone")
+        guard let saved, request == serverRevision, !Task.isCancelled, model.channels.isEmpty,
+              cachedServerCatalogs.isEmpty, ensureCatalogAuthorization(into: model) else { return }
+        var restored: [String: LiveTVServerCatalog] = [:]
+        let lineup = serverLineupInput(model)
+        for source in configuration.servers where source.isEnabled {
+            guard let savedRows = saved.sources.first(where: { $0.sourceID == source.id }),
+                  let context = authorizedContext(for: source),
+                  context.authorizationID == authorizations[source.id],
+                  let catalog = LiveTVServerCatalog(
+                    lastSeen: narrowingToLineup(savedRows, lineup), source: source, context: context, now: model.now)
+            else { continue }
+            restored[source.id] = catalog
+        }
+        guard !restored.isEmpty else { return }
+        openTrace("lastSeen.catalogBuilt")
+        cachedServerCatalogs = restored
+        // Aggregate counts lack source/filter/viewer provenance. Derive browsing from
+        // the admitted rows under today's filters rather than exposing saved categories.
+        do {
+            try publishPlaylists(into: model)
+        } catch {
+            cachedServerCatalogs = [:]
+            return
+        }
+        openTrace("lastSeen.published")
+        restoredGuideViewport = Self.restorableViewport(saved.viewport, in: model)
+        HandoffDiagnostics.emit(
+            "LIVE_TV event=lastSeenRows channels=\(model.channels.count) elapsed=\(HandoffDiagnostics.ms(started))")
+    }
+
+    /// The saved position, if the filters in effect are the ones it was saved under and its first visible row is on screen.
+    /// The focused row is kept only when it is also shown; otherwise focus starts on the first visible row.
+    private static func restorableViewport(
+        _ saved: LiveTVGuideViewport?, in model: LiveTVPrototypeModel
+    ) -> LiveTVRestoredGuideViewport? {
+        guard let saved, saved.category == model.category,
+              saved.favoriteFilterID == model.selectedFavoriteFilterID, saved.sort == model.sort.rawValue,
+              model.query.isEmpty, saved.relativeOffset.isFinite,
+              let anchor = model.guideRow(for: saved.anchorChannelID) else { return nil }
+        return LiveTVRestoredGuideViewport(
+            anchor: anchor, relativeOffset: saved.relativeOffset,
+            focus: saved.focusedChannelID.flatMap { model.guideRow(for: $0) })
+    }
+
+    /// The first visible guide row and how far into it the viewport's top edge sits, kept for the next save.
+    public func noteGuideViewport(anchor: LiveTVGuideRowID?, relativeOffset: Double) {
+        observedGuideViewport = anchor.map { ($0.channelID, relativeOffset) }
+    }
+
+    public func noteGuideFocus(_ channelID: String?) {
+        observedGuideFocusChannelID = channelID
+    }
+
+    /// Rows whose lineup could not be read are not a lineup; drop them once loading has ended.
+    private func discardLastSeenRows(into model: LiveTVPrototypeModel) {
+        guard showsLastSeenRows else { return }
+        for (id, catalog) in cachedServerCatalogs where catalog.isProvisional {
+            cachedServerCatalogs[id] = nil
+        }
+        try? publishPlaylists(into: model)
+    }
+
+    private static let savedRowsAboveViewport = 20
+
+    /// Remembers the rows now at the top of the guide, or around where it is scrolled to, for the next time Live TV opens.
+    @discardableResult
+    public func saveLastSeen(from model: LiveTVPrototypeModel) -> Task<Void, Never>? {
+        lastSeenSaveTask?.cancel()
+        guard let lastSeenStore, catalogIsAuthorized(), !showsLastSeenRows else { return nil }
+        let write = lastSeenStore.prepareSave()
+        let request = serverRevision
+        let configuration = configuration
+        var wanted: [String: Set<String>] = [:]
+        var order: [String] = []
+        // The saved rows start a little above the first visible row, so the position can be shown from them alone.
+        let observed = model.query.isEmpty ? observedGuideViewport : nil
+        let anchorIndex = observed.flatMap { observed in
+            model.guideChannels.firstIndex { $0.channel.id == observed.anchorChannelID }
+        }
+        let viewport = observed.flatMap { observed in
+            anchorIndex.map { _ in
+                LiveTVGuideViewport(
+                    anchorChannelID: observed.anchorChannelID, relativeOffset: observed.relativeOffset,
+                    focusedChannelID: observedGuideFocusChannelID, category: model.category,
+                    favoriteFilterID: model.selectedFavoriteFilterID, sort: model.sort.rawValue)
+            }
+        }
+        let firstSavedIndex = max(0, (anchorIndex ?? 0) - Self.savedRowsAboveViewport)
+        for row in model.guideChannels[firstSavedIndex...] {
+            guard order.count < LiveTVLastSeenSnapshot.maximumChannels else { break }
+            let id = row.channel.id
+            guard let reference = serverChannelReferences[id],
+                  wanted[reference.sourceID, default: []].insert(id).inserted else { continue }
+            order.append(id)
+        }
+        let references = serverChannelReferences
+        let catalogs = cachedServerCatalogs.filter { wanted[$0.key] != nil }
+        let browse = model.browseSummary
+        let savedAt = model.now
+        let position = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element, $0.offset) })
+        let task = Task { [weak self] in
+            let snapshot = await Task.detached(priority: .utility) {
+                // The lineup's own rows are saved: the guide's copies carry display-only edits.
+                let sources = catalogs.keys.sorted().compactMap { sourceID -> LiveTVLastSeenSnapshot.Source? in
+                    guard let catalog = catalogs[sourceID], let ids = wanted[sourceID],
+                          let viewerScopeID = catalog.viewerScopeID, !viewerScopeID.isEmpty else { return nil }
+                    let entries = catalog.channels.filter { ids.contains($0.id) }
+                        .sorted { position[$0.id, default: 0] < position[$1.id, default: 0] }
+                        .compactMap { channel in
+                            references[channel.id].map {
+                                LiveTVLastSeenSnapshot.Entry(nativeID: $0.channelID, channel: channel)
+                            }
+                        }
+                    guard let accountID = entries.first.flatMap({ references[$0.channel.id]?.accountID }) else {
+                        return nil
+                    }
+                    var perChannel: [String: Int] = [:]
+                    let programs = catalog.programs.filter { ids.contains($0.channelID) && $0.end > savedAt }
+                        .sorted { $0.start == $1.start ? $0.id < $1.id : $0.start < $1.start }
+                        .compactMap { program -> LiveTVPrototypeProgram? in
+                            guard perChannel[program.channelID, default: 0] < LiveTVLastSeenSnapshot.maximumProgramsPerChannel
+                            else { return nil }
+                            perChannel[program.channelID, default: 0] += 1
+                            return LiveTVPrototypeProgram(
+                                id: program.id, channelID: program.channelID, title: program.title,
+                                subtitle: program.subtitle, start: program.start, end: program.end)
+                        }
+                    return .init(
+                        sourceID: sourceID, accountID: accountID, kind: catalog.kind,
+                        entries: entries, viewerScopeID: viewerScopeID, programs: programs
+                    )
+                }
+                return sources.isEmpty ? nil : LiveTVLastSeenSnapshot(sources: sources, browse: browse, viewport: viewport)
+            }.value
+            guard let self, !Task.isCancelled, self.catalogIsAuthorized(),
+                  request == self.serverRevision, configuration == self.configuration,
+                  catalogs.allSatisfy({ sourceID, catalog in
+                      guard let source = configuration.servers.first(where: { $0.id == sourceID }),
+                            let current = self.authorizedContext(for: source) else { return false }
+                      return current.authorizationID == catalog.authorizationID
+                          && current.viewerScopeID == catalog.viewerScopeID
+                  }) else { return }
+            await write(snapshot)
+        }
+        lastSeenSaveTask = task
+        return task
+    }
+
+    /// The lineups a publication joins, in publication order. `replacement` stands in for a
+    /// server lineup that has been mapped but not yet accepted.
+    private func publicationInputs(
+        replacing replacement: (sourceID: String, catalog: LiveTVServerCatalog)? = nil
+    ) -> [PublishedChannelInput] {
+        playlistSources.filter(\.source.isEnabled).compactMap { status in
+            cachedPlaylists[status.id].map {
+                PublishedChannelInput(sourceID: status.id, authorizationID: nil, channels: $0.channels)
+            }
+        } + serverSources.filter(\.source.isEnabled).compactMap { status in
+            (replacement?.sourceID == status.id ? replacement?.catalog : cachedServerCatalogs[status.id]).map {
+                PublishedChannelInput(sourceID: status.id, authorizationID: $0.authorizationID, channels: $0.channels)
+            }
+        } + [PublishedChannelInput(sourceID: "", authorizationID: nil, channels: generatedChannels)]
+    }
+
+    /// Joins the lineup that accepting `catalog` will publish and derives the guide's lists from
+    /// it, both off the main actor. A large lineup otherwise stalls the interface while it is
+    /// published. The publication uses the result only if its lineups are still these ones.
+    func preparePublication(
+        replacing sourceID: String, with catalog: LiveTVServerCatalog, into model: LiveTVPrototypeModel
+    ) async {
+        let inputs = publicationInputs(replacing: (sourceID, catalog))
+        guard inputs != publishedChannelInputs else { return }
+        let joined = await Task.detached(priority: .userInitiated) {
+            let channels = inputs.flatMap(\.channels)
+            return (channels, Set(channels.map(\.id)))
+        }.value
+        guard !Task.isCancelled, joined.1.count == joined.0.count else { return }
+        await model.prepareCatalog(channels: joined.0)
+        preparedPublication = (inputs, joined.0, joined.1)
+    }
+
     private func publishGuides(into model: LiveTVPrototypeModel) throws {
+        openTrace("publish.entry")
         guard ensureCatalogAuthorization(into: model) else { throw CancellationError() }
-        let channelIDs = Set(sourceChannels.map(\.id))
+        let channelIDs = sourceChannelIDs
         var chosen: [String: (
             sourceID: String, method: LiveTVGuideMatchMethod,
             programs: [LiveTVPrototypeProgram], hasUpcomingListings: Bool
@@ -821,7 +1161,23 @@ public final class LiveTVPrototypeImportModel {
         }) else { throw LiveTVPrototypeDataError.invalidProgram }
         beforeCatalogPublication?(configuration, sourceChannels)
         guard ensureCatalogAuthorization(into: model) else { throw CancellationError() }
-        try model.replaceCatalog(channels: sourceChannels, programs: programs)
+        openTrace("publish.validated")
+        let publishedChannels = LiveTVGuideMatcher.channels(sourceChannels) { channel in
+            chosen[channel.id].flatMap { cachedGuides[$0.sourceID] }
+        }
+        // Rows restored from last session stand in for a server's lineup until it is read; only a lineup read from the
+        // provider may start logo matching or let the logo store forget anything.
+        openTrace("publish.matched")
+        try model.replaceCatalog(channels: publishedChannels, programs: programs, isCompleteLineup: !showsLastSeenRows)
+        #if DEBUG
+        LiveTVGuideIconDump.record(
+            guides: guideSources.filter { enabledSourceIDs.contains($0.id) }.compactMap { cachedGuides[$0.id] },
+            playlistChannels: sourceChannels, publishedChannels: publishedChannels
+        )
+        #endif
+        openTrace("publish.replaced")
+        if !showsLastSeenRows { restoredGuideViewport = nil }
+        model.setProvisionalBrowse(nil)
         let pendingNativeChannels = serverSources.filter {
             $0.source.isEnabled && $0.availability?.supportsGuide == true && $0.guideFailure != .permissionDenied
         }.compactMap { cachedServerCatalogs[$0.id] }.flatMap(\.pendingGuideChannelIDs)
@@ -833,6 +1189,7 @@ public final class LiveTVPrototypeImportModel {
         guideChannelCount = channelCount
         matchedChannelCount = chosen.count + Set(nativePrograms.map(\.channelID)).count
         programCount = programs.count
+        openTrace("publish.bookkept")
         let activeGuides = guideSources.filter { enabledSourceIDs.contains($0.id) }.compactMap { cachedGuides[$0.id] }
         coverageStart = (activeGuides.compactMap(\.coverageStart) + nativePrograms.map(\.start)).min()
         coverageEnd = (activeGuides.compactMap(\.coverageEnd) + nativePrograms.map(\.end)).max()
@@ -864,10 +1221,18 @@ public final class LiveTVPrototypeImportModel {
             replaceMappingOverrides(overrides)
             for source in configuration.playlists where source.isEnabled && cachedPlaylists[source.id] == nil {
                 guard request == revision, ensureCatalogAuthorization(into: model) else { return }
-                let playlist = try await cache.playlist(source: source)
+                let storedPlaylist = try await cache.playlist(source: source)
                 let freshness = try await cache.freshness(kind: "playlist", sourceID: source.id)
                 guard request == revision, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return }
-                guard let playlist else { continue }
+                guard let stored = storedPlaylist else { continue }
+                // A playlist stored under an earlier lineup is cut to the current one before anything reads it.
+                let playlist = lineupState.map { state in
+                    LiveTVPlaylistImport(
+                        channels: LiveTVLineupFilter.narrow(state.applied, stored.channels, keepIDs: lineupKeepIDs(model)),
+                        entryCount: stored.entryCount, skippedEntryCount: stored.skippedEntryCount,
+                        declaredGuideURLs: stored.declaredGuideURLs, permitsPersistence: stored.permitsPersistence,
+                        originURL: stored.originURL)
+                } ?? stored
                 let reviews = try await cache.identityReviews(for: playlist, sourceID: source.id)
                 guard request == revision, !Task.isCancelled, ensureCatalogAuthorization(into: model) else { return }
                 cachedPlaylists[source.id] = playlist
@@ -1251,6 +1616,7 @@ public final class LiveTVPrototypeImportModel {
     @discardableResult
     func ensureCatalogAuthorization(into model: LiveTVPrototypeModel) -> Bool {
         guard !catalogIsAuthorized() else { return true }
+        lastSeenSaveTask?.cancel()
         revision &+= 1
         reloadGeneration &+= 1
         windowRevision &+= 1
@@ -1271,9 +1637,13 @@ public final class LiveTVPrototypeImportModel {
         cachedGuideWindows = [:]
         requestedGuideWindow = nil
         cachedServerCatalogs = [:]
+        preparedPublication = nil
+        model.setProvisionalBrowse(nil)
         generatedChannels = []
         generatedPrograms = []
         sourceChannels = []
+        sourceChannelIDs = []
+        publishedChannelInputs = []
         playlistSourceIDByChannel = [:]
         configuredSourceIDByChannel = [:]
         serverChannelReferences = [:]
@@ -1365,4 +1735,11 @@ public final class LiveTVPrototypeImportModel {
             }
         }
     }
+}
+
+/// One source's contribution to the published lineup, compared to detect an unchanged lineup.
+private struct PublishedChannelInput: Equatable, Sendable {
+    let sourceID: String
+    let authorizationID: String?
+    let channels: [LiveTVPrototypeChannel]
 }

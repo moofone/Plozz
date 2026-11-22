@@ -130,13 +130,17 @@ public struct LiveTVPortableChannel: Codable, Equatable, Sendable {
     public var identityHint: LiveTVPortableChannelIdentityHint?
     public var isAlwaysShown: Bool?
     public var isExcludedFromCategoryFavorites: Bool?
+    /// Plozz's stable number for the channel and when it was assigned (whole seconds since 1970); both or neither.
+    public var number: Int?
+    public var numberAssignedAt: Int?
 
     public init(
         isFavorite: Bool = false, hiddenName: String? = nil, favoriteName: String? = nil,
         favoritePosition: Int? = nil, metadata: LiveTVChannelMetadataOverride? = nil,
         guideMapping: LiveTVPortableGuideMapping? = nil,
         identityHint: LiveTVPortableChannelIdentityHint? = nil,
-        isAlwaysShown: Bool? = nil, isExcludedFromCategoryFavorites: Bool? = nil
+        isAlwaysShown: Bool? = nil, isExcludedFromCategoryFavorites: Bool? = nil,
+        number: Int? = nil, numberAssignedAt: Int? = nil
     ) {
         self.isFavorite = isFavorite
         self.hiddenName = hiddenName
@@ -147,6 +151,13 @@ public struct LiveTVPortableChannel: Codable, Equatable, Sendable {
         self.identityHint = identityHint
         self.isAlwaysShown = isAlwaysShown
         self.isExcludedFromCategoryFavorites = isExcludedFromCategoryFavorites
+        self.number = number
+        self.numberAssignedAt = numberAssignedAt
+    }
+
+    public var numberAssignment: LiveTVChannelNumberAssignment? {
+        guard let number, let numberAssignedAt else { return nil }
+        return .init(number: number, assignedAt: numberAssignedAt)
     }
 }
 
@@ -347,7 +358,9 @@ public struct LiveTVPortableRecord: Codable, Equatable, Sendable {
                   channel.favoritePosition.map({ (0..<10_000).contains($0) }) ?? true,
                   channel.isFavorite || (channel.favoritePosition == nil && channel.favoriteName == nil),
                   channel.guideMapping?.isSafe ?? true,
-                  channel.identityHint?.isSafe ?? true else {
+                  channel.identityHint?.isSafe ?? true,
+                  (channel.number == nil) == (channel.numberAssignedAt == nil),
+                  channel.number.map({ (1...LiveTVStableChannelNumbers.maximumNumber).contains($0) }) ?? true else {
                 throw LiveTVPortableStateError.invalidRecord
             }
         case .source:

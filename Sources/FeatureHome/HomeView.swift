@@ -75,7 +75,8 @@ public final class HomeHeroRuntimeState {
     }
 
     func resetForLibraryVisibility(
-        disabledKeys: Set<String>, cached: [MediaItem], settings: HeroSettings?, requestContext: String
+        disabledKeys: Set<String>, cached: [MediaItem], settings: HeroSettings?, requestContext: String,
+        language: String = "en"
     ) {
         let previous = items
         let sameRequestContext = requestStatusContext == requestContext
@@ -85,7 +86,7 @@ public final class HomeHeroRuntimeState {
         cachedItems = HeroDiscoveryStatus.retainingRequestStatus(
             in: cached, from: previous, sameRequestContext: sameRequestContext
         )
-        cachedKey = HeroConfigurationKey(settings: settings)
+        cachedKey = HeroConfigurationKey(settings: settings, language: language)
         requestStatusContext = requestContext
     }
 
@@ -158,6 +159,7 @@ final class HomeNavigationActivity {
 public enum HomeBrowseDestination: Hashable {
     case row(HomeRowBrowseModel)
     case watchlist
+    case upcoming
 
     @MainActor
     public func push(onto path: Binding<NavigationPath>, chrome: NavigationChromeModel? = nil) {
@@ -321,6 +323,7 @@ public struct HomeView: View {
     public init(
         viewModel: HomeViewModel,
         visibility: HomeLibraryVisibilityModel,
+        metadataLanguage: String = "en",
         spoilerSettings: SpoilerSettings = .default,
         heroSettings: HeroSettingsModel? = nil,
         heroBackground: HeroBackgroundSettingsModel,
@@ -406,8 +409,8 @@ public struct HomeView: View {
         if !heroRuntime.hasHydratedCache {
             heroRuntime.hasHydratedCache = true
             if let settings = Self.curationSettings(for: heroSettings?.effectiveSettings),
-               let cached = viewModel.cachedHeroItems(for: settings) {
-                heroRuntime.cachedKey = HeroConfigurationKey(settings: settings)
+               let cached = viewModel.cachedHeroItems(for: settings, language: metadataLanguage) {
+                heroRuntime.cachedKey = HeroConfigurationKey(settings: settings, language: metadataLanguage)
                 heroRuntime.cachedDisabledLibraryKeys = visibility.visibility.disabledKeys
                 heroRuntime.cachedItems = cached
             }
@@ -426,7 +429,8 @@ public struct HomeView: View {
         let _ = PlozzBodyRate.tick("HomeView")
         return ContentStateView(
             state: HomePresentationRow.displayState(
-                viewModel.state, liveTV: liveTV, visibility: visibility.visibility
+                viewModel.state, liveTV: liveTV, visibility: visibility.visibility,
+                upcoming: viewModel.upcoming.homeReleases
             ),
             emptyMessage: "Your libraries are empty. Add media on your media server to see it here.",
             onRetry: { Task { await viewModel.load() } },
@@ -490,7 +494,8 @@ public struct HomeView: View {
                 watchlistMembershipRevision: watchlistIntentRevision,
                 disabledLibraryKeys: visibility.visibility.disabledKeys,
                 discoveryUsesWatchlist: heroDiscoveryProvider != nil,
-                awaitingLiveHome: !viewModel.loadingRows.isEmpty
+                awaitingLiveHome: !viewModel.loadingRows.isEmpty,
+                language: locale.identifier
             )
             // Seed the hero synchronously from the already-loaded sources
             // (Continue Watching + Watchlist) so it renders in the *same frame* as
@@ -685,11 +690,17 @@ public struct HomeView: View {
                                                 onBrowse: browseAction(for: presentation)
                                             )
                                         case let .library(row):
-                                            libraryRowView(row, onBrowse: browseAction(for: presentation))
+                                            if presentation.id == .global(.comingSoon) {
+                                                UpcomingHomeRow(title: row.section.displayName, releases: viewModel.upcoming.homeReleases) {
+                                                    onBrowse(.upcoming)
+                                                }
+                                            } else {
+                                                libraryRowView(row, onBrowse: browseAction(for: presentation))
                                                 .environment(
                                                     \.plozzLandscapeTitleLogo,
                                                     presentation.choice.collectionSection?.titleLogo ?? .off
                                                 )
+                                            }
                                         case let .liveTV(channels):
                                             MediaRowView(
                                                 title: liveTVTitle, items: [], style: .landscape,
@@ -807,10 +818,10 @@ public struct HomeView: View {
             await heroRuntime.freshnessRefresh.runWhileVisible()
         }
         .onChange(of: visibility.visibility.disabledKeys) { _, disabled in
-            let cached = curationSettings.flatMap { viewModel.cachedHeroItems(for: $0) } ?? []
+            let cached = curationSettings.flatMap { viewModel.cachedHeroItems(for: $0, language: locale.identifier) } ?? []
             heroRuntime.resetForLibraryVisibility(
                 disabledKeys: disabled, cached: cached, settings: curationSettings,
-                requestContext: seasonRequestContextID
+                requestContext: seasonRequestContextID, language: locale.identifier
             )
         }
         .onChange(of: seasonRequestContextID) { _, context in
@@ -1145,7 +1156,7 @@ public struct HomeView: View {
         // the ones it actually supplied: a watchlist title handed to the Featured
         // source would arrive with no availability and render the wrong CTA.
         let seedMatchesConfiguration =
-            heroRuntime.cachedKey == HeroConfigurationKey(settings: settings)
+            heroRuntime.cachedKey == HeroConfigurationKey(settings: settings, language: locale.identifier)
             && heroRuntime.cachedDisabledLibraryKeys == key.disabledLibraryKeys
         let cachedFeatured = seedMatchesConfiguration
             ? HeroDiscoveryStatus.attributedFeaturedCandidates(
@@ -1189,7 +1200,7 @@ public struct HomeView: View {
                         fresh = await heroDiscoveryProvider(
                             HeroDiscoveryRequest(
                                 limit: limit,
-                                language: locale.language.languageCode?.identifier ?? "en",
+                                language: Locale.canonicalLanguageIdentifier(from: locale.identifier),
                                 region: locale.region?.identifier ?? "US",
                                 seeds: content.watchlist
                             ),
@@ -1347,7 +1358,8 @@ public struct HomeView: View {
             viewModel.clearCachedHeroItems()
         } else {
             viewModel.cacheHeroCandidatePool(
-                durablePool, for: settings, preservingUnseen: settings.style == .followsFocus
+                durablePool, for: settings, preservingUnseen: settings.style == .followsFocus,
+                language: locale.identifier
             )
         }
         let elapsedMS = Int(Date().timeIntervalSince(started) * 1_000)
@@ -1422,6 +1434,7 @@ public struct HomeView: View {
     }
 
     private func browseAction(for row: HomePresentationRow) -> (() -> Void)? {
+        if row.id == .global(.comingSoon) { return { onBrowse(.upcoming) } }
         guard row.canBrowse else { return nil }
         if row.id == .global(.watchlist) { return { onBrowse(.watchlist) } }
         return { onBrowse(.row(viewModel.browseRow(row))) }
@@ -1856,7 +1869,13 @@ public struct HomeView: View {
             let section = row.section
             let playsOnSelect = row.browseItem == nil && section.style == .landscape
                 && !CollectionCoverLayout.isCollectionGroup(section.items)
-            if let issue = row.issue {
+            if presentation.id == .global(.comingSoon) {
+                UpcomingHomeRow(
+                    title: section.displayName, releases: viewModel.upcoming.homeReleases,
+                    onFocusEntered: reporter.entered, onFocusChange: onFocusChange,
+                    onCardFocused: reporter.cardFocused
+                ) { onBrowse?() }
+            } else if let issue = row.issue {
                 sectionStatusView(issue, browseItem: row.browseItem)
                     .background { NativeFocusRegionObserver(onFocusEntered: reporter.entered) }
             } else if let failure = row.failure {
@@ -2057,13 +2076,14 @@ struct HeroRecomputeKey: Equatable {
         watchlistMembershipRevision: Int = 0,
         disabledLibraryKeys: Set<String> = [],
         discoveryUsesWatchlist: Bool = false,
-        awaitingLiveHome: Bool = false
+        awaitingLiveHome: Bool = false,
+        language: String = "en"
     ) {
         let activeSources = settings?.isActive == true ? settings?.sources ?? [] : []
         self.sources = activeSources
         self.maxItems = activeSources.isEmpty ? 0 : settings?.maxItems ?? 0
         self.hideWatched = activeSources.isEmpty ? false : settings?.hideWatched ?? false
-        self.configuration = HeroConfigurationKey(settings: settings)
+        self.configuration = HeroConfigurationKey(settings: settings, language: language)
         let includeSourceIDs = settings?.hideWatched == true
         self.continueWatching = activeSources.contains(.continueWatching)
             ? content.continueWatching.map {
@@ -2220,7 +2240,7 @@ enum HomeHeroDisplayResolver {
             if !reconciled.isEmpty { return reconciled }
         }
         guard let settings,
-              runtime.cachedKey == HeroConfigurationKey(settings: settings),
+              runtime.cachedKey == key.configuration,
               runtime.cachedDisabledLibraryKeys == key.disabledLibraryKeys,
               !runtime.cachedItems.isEmpty else {
             return []

@@ -143,7 +143,7 @@ public struct TMDbMetadataProvider: ArtworkProvider {
         guard access.isEnabled,
               query.contentType != .music,
               let id = await resolveID(for: query) else {
-            return ExternalTitleAvailability(regionCode: region)
+            return ExternalTitleAvailability(regionCode: region, releaseDatesAvailable: false)
         }
 
         async let offers = watchOffers(
@@ -164,9 +164,10 @@ public struct TMDbMetadataProvider: ArtworkProvider {
         let (events, resolvedOffers) = await (releaseDates, offers)
         return ExternalTitleAvailability(
             regionCode: region,
-            releaseEvents: events,
+            releaseEvents: events ?? [],
             watchOffers: resolvedOffers.offers,
-            watchProvidersURL: resolvedOffers.link
+            watchProvidersURL: resolvedOffers.link,
+            releaseDatesAvailable: events != nil
         )
     }
 
@@ -392,7 +393,7 @@ public struct TMDbMetadataProvider: ArtworkProvider {
         }
         try Task.checkCancellation()
         if !missing.isDisjoint(with: [
-            .genres, .studios, .taglines, .overview,
+            .title, .genres, .studios, .taglines, .overview,
             .originalLanguage, .seriesStatus, .catalogSeasonCount, .catalogEpisodeCount
         ]) {
             let base = "/3/\(query.isTV ? "tv" : "movie")/\(id)"
@@ -405,6 +406,9 @@ public struct TMDbMetadataProvider: ArtworkProvider {
                     result.studios = SourcedValue(value: values, source: .tmdb, sourceURL: url)
                 }
                 if query.kind == .movie || query.kind == .series || query.kind == .video {
+                    if missing.contains(.title), let title = (facts.title ?? facts.name)?.tmdbNonEmpty {
+                        result.title = SourcedValue(value: title, source: .tmdb, sourceURL: url)
+                    }
                     if missing.contains(.originalLanguage),
                        let language = facts.original_language?.tmdbNonEmpty,
                        !["xx", "und", "zxx", "mul"].contains(language.lowercased()),
@@ -658,14 +662,14 @@ public struct TMDbMetadataProvider: ArtworkProvider {
     private func movieReleaseDates(
         id: String,
         regionCode: String
-    ) async -> [TitleReleaseEvent] {
+    ) async -> [TitleReleaseEvent]? {
         guard let url = url("/3/movie/\(id)/release_dates"),
               let response = await MetadataHTTP.get(
                   ReleaseDatesResponse.self,
                   url: url,
                   headers: authHeaders
-              ),
-              let region = response.results.first(where: {
+              ) else { return nil }
+        guard let region = response.results.first(where: {
                   $0.iso_3166_1?.uppercased() == regionCode
               }) else { return [] }
 
@@ -810,7 +814,7 @@ public struct TMDbMetadataProvider: ArtworkProvider {
             if normalized == preferred { return 0 }
             return normalized == "en" ? 2 : 3
         }
-        guard let path = logos.lazy.filter({ $0.file_path?.isEmpty == false }).min(by: {
+        guard let path = logos.lazy.filter({ $0.file_path?.isEmpty == false && rank($0) < 3 }).min(by: {
             let (lr, rr) = (rank($0), rank($1))
             if lr != rr { return lr < rr }
             return ($0.vote_average ?? 0) > ($1.vote_average ?? 0)
@@ -896,6 +900,8 @@ public struct TMDbMetadataProvider: ArtworkProvider {
         let job: String?
     }
     struct DetailFacts: Decodable, Sendable {
+        let title: String?
+        let name: String?
         let overview: String?
         let tagline: String?
         let genres: [NamedFact]?

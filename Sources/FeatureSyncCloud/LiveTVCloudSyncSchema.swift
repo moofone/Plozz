@@ -15,4 +15,12 @@ public extension CloudSyncSchemaDescriptor {
         zoneName: "PlozzLiveTVStateV1Zone",
         kindDerivation: .prefixBeforeFirstColon
     )
+
+    /// Channel logo choices shared by every profile: data only, no image bytes. Same deployed
+    /// non-secret record type, in its own zone, as a channel on the one existing engine.
+    static let liveTVLogosV1 = CloudSyncSchemaDescriptor(
+        recordType: "PlozzMediaStateV1Record",
+        zoneName: "PlozzLiveTVLogosV1Zone",
+        kindDerivation: .prefixBeforeFirstColon
+    )
 }

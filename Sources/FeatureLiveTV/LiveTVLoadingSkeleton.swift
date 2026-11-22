@@ -9,15 +9,26 @@ public struct LiveTVLoadingSkeleton: View {
     @Environment(\.plozzNavigationContentInset) private var navigationInset
     @Environment(\.plozzTopNavigationContentInsets) private var topNavigationInsets
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.liveTVGlassLayout) private var glassLayout
 
     public init() {}
+
+    /// The glass screen has no category sidebar on tvOS.
+    private static var hidesSidebar: Bool {
+        #if os(tvOS)
+        true
+        #else
+        false
+        #endif
+    }
 
     public var body: some View {
         GeometryReader { geometry in
             let layout = PrototypePreviewLayout(
                 size: geometry.size, safeAreaInsets: geometry.safeAreaInsets,
                 navigationInset: navigationInset, topNavigationInsets: topNavigationInsets,
-                largeText: typeSize.isAccessibilitySize
+                largeText: typeSize.isAccessibilitySize,
+                hidesSidebar: Self.hidesSidebar, glass: glassLayout
             )
             ZStack {
                 AppBackground(palette: palette)
@@ -55,9 +66,23 @@ public struct LiveTVLoadingSkeleton: View {
 
 struct PrototypePreviewHeroSkeleton: View {
     let layout: PrototypePreviewLayout
+    @Environment(\.liveTVGlassLayout) private var glass
 
     var body: some View {
         Group {
+            #if os(tvOS)
+            // The glass hero has no artwork: a title, a meta line, a synopsis and the buttons.
+            VStack(alignment: .leading, spacing: glass.ui(12)) {
+                PrototypeSkeletonText(font: .system(size: glass.ui(52), weight: .bold), fraction: 0.6)
+                PrototypeSkeletonText(font: .system(size: glass.ui(25)), fraction: 0.45)
+                PrototypeSkeletonText(font: .system(size: glass.ui(25)), fraction: 0.9)
+                Color.clear.frame(height: glass.ui(60 + 14))
+            }
+            .frame(width: glass.ui(PrototypeGlassHero.columnWidth))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            .padding(.trailing, layout.glassHeroTrailingInset)
+            .padding(.bottom, PrototypeGlassHero.bottomInset(glass))
+            #else
             if layout.compact {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: PrototypeLayout.gap) {
@@ -97,6 +122,7 @@ struct PrototypePreviewHeroSkeleton: View {
                     #endif
                 }
             }
+            #endif
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipped()

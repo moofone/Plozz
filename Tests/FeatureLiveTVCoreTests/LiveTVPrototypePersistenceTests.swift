@@ -19,7 +19,7 @@ final class LiveTVPrototypePersistenceTests: XCTestCase {
         XCTAssertEqual(model.programmeSearchChannelIDs, ["3"])
         XCTAssertEqual(model.hiddenChannelIDs, ["1"])
         XCTAssertEqual(model.favoriteIDs, ["0"])
-        XCTAssertEqual(model.channels, channels)
+        XCTAssertEqual(model.channels.map(\.id), channels.map(\.id))
         XCTAssertEqual(store.value, saved)
         XCTAssertEqual(store.saves, saves)
         let revision = model.catalogRevision
@@ -165,7 +165,7 @@ final class LiveTVPrototypePersistenceTests: XCTestCase {
         try model.replaceChannels([])
         XCTAssertEqual(model.recentChannelIDs, ["2", "1"])
         XCTAssertEqual(model.favoriteIDs, ["1"])
-        XCTAssertEqual(store.saves, 0)
+        XCTAssertEqual(store.saves, 1, "Only the numbers of the lineup's new channels are saved")
     }
 
     func testMutationsAreRestoredByANewModel() {
@@ -187,10 +187,11 @@ final class LiveTVPrototypePersistenceTests: XCTestCase {
     func testPreviewAndFailedOrStaleConfirmationDoNotPersistHistory() throws {
         let store = PreferencesFixtureStore()
         let model = LiveTVPrototypeModel(channels: channels, preferencesStore: store)
+        let savesAfterNumbering = store.saves
         let preview = LiveTVPreviewController(model: model)
         preview.focus("0")
         XCTAssertTrue(preview.commitPreview(try XCTUnwrap(preview.pendingRequest)))
-        XCTAssertEqual(store.saves, 0)
+        XCTAssertEqual(store.saves, savesAfterNumbering)
         #if DEBUG
         model.simulateTunerBusy = true
         preview.watch("1")
@@ -198,7 +199,7 @@ final class LiveTVPrototypePersistenceTests: XCTestCase {
         XCTAssertFalse(model.recordWatched("1"))
         model.stop()
         XCTAssertFalse(model.recordWatched("0"))
-        XCTAssertEqual(store.saves, 0)
+        XCTAssertEqual(store.saves, savesAfterNumbering)
         XCTAssertTrue(store.value.recentChannelIDs.isEmpty)
     }
 

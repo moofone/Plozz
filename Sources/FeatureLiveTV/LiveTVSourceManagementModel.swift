@@ -36,10 +36,16 @@ final class LiveTVSourceManagementModel {
     var mutationIssue: Issue?
     @ObservationIgnored private let store: any LiveTVSourcesStoring
     @ObservationIgnored private var canMutate: () -> Bool
+    /// Logo choices are dropped with the source they belong to.
+    @ObservationIgnored private let logoStore: LiveTVChannelLogoStore
 
-    init(store: any LiveTVSourcesStoring, canMutate: @escaping () -> Bool) {
+    init(
+        store: any LiveTVSourcesStoring, canMutate: @escaping () -> Bool,
+        logoStore: LiveTVChannelLogoStore = LiveTVChannelLogoService.shared.store
+    ) {
         self.store = store
         self.canMutate = canMutate
+        self.logoStore = logoStore
     }
 
     func authorizeMutations(_ authorization: @escaping () -> Bool) { canMutate = authorization }
@@ -147,6 +153,7 @@ final class LiveTVSourceManagementModel {
             try mutate { configuration in
                 configuration.playlists.removeAll { $0.id == id }
             }
+            logoStore.removeSource(id)
         }
     }
 
@@ -176,6 +183,7 @@ final class LiveTVSourceManagementModel {
             try mutate { configuration in
                 configuration.servers.removeAll { $0.id == id }
             }
+            logoStore.removeSource(id)
         }
     }
 

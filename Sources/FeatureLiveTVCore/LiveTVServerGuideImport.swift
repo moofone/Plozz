@@ -95,6 +95,7 @@ extension LiveTVPrototypeImportModel {
                         sourceID: source.id, channelIDs: batch, from: chunkStart, to: end
                     )
                     do {
+                        openTrace("guide.providerReadBegin")
                         let nativePrograms: [ServerLiveTVProgramme]
                         var partialFailure: LiveTVServerImportError?
                         do {
@@ -108,6 +109,7 @@ extension LiveTVPrototypeImportModel {
                             nativePrograms = partial.programmes
                             partialFailure = failure
                         }
+                        openTrace("guide.providerReadDone")
                         try Task.checkCancellation()
                         guard activeServerGuideRequests.contains(window.id) else { return .cancelled }
                         guard acceptServerResult(
@@ -138,6 +140,7 @@ extension LiveTVPrototypeImportModel {
                             cachedServerCatalogs[source.id] = previous
                             throw LiveTVServerImportError.invalidGuide
                         }
+                        openTrace("guide.published")
                         if let partialFailure {
                             result = .failed
                             finishServerGuideWindow(window.id, phase: .failed, failure: partialFailure)
@@ -180,7 +183,38 @@ extension LiveTVPrototypeImportModel {
                 }
             }
         }
+        captureServerGuideSnapshot(now: from)
         return result
+    }
+
+    /// DEBUG, only with `-PlozzLiveTVMetadataAudit`: writes `guide.jsonl` from the provider's saved guide (its stations and the
+    /// 48 hours from `now`), off the main actor and after the list is published, whatever was requested for the screen. A provider
+    /// with no saved guide falls back to the listings held in memory. Called after a server reload and after saved lists load.
+    func captureServerGuideSnapshot(now: Date) {
+        guard let directory = LiveTVGuideSnapshotWriter.launchDirectory(),
+              LiveTVGuideSnapshotWriter.beginCapture() else { return }
+        let providers = configuration.servers.filter(\.isEnabled).compactMap { authorizedContext(for: $0)?.provider }
+        let held = cachedServerCatalogs.values.flatMap(\.programs)
+        let channels = cachedServerCatalogs.values.flatMap(\.channels)
+        let references = serverChannelReferences
+        let lineupIsComplete = !cachedServerCatalogs.values.contains(where: \.isProvisional)
+        Task.detached(priority: .utility) {
+            defer { LiveTVGuideSnapshotWriter.endCapture() }
+            for provider in providers {
+                guard let records = await LiveTVGuideSnapshotWriter.captureGuide(from: provider, now: now, directory: directory)
+                else { continue }
+                let extraRecords = try? await provider.liveTVExtraGuideSnapshotRecords(
+                    from: now, to: now.addingTimeInterval(LiveTVGuideSnapshot.guideWindow)
+                )
+                if let line = LiveTVGuideCoverage.logLine(channels: channels, records: records, extraRecords: extraRecords) {
+                    LiveTVDiagnosticLog.notice(line)
+                }
+                await LiveTVEPGProbe.run(
+                    provider: provider, channels: channels, lineupIsComplete: lineupIsComplete, records: records, references: references)
+                return
+            }
+            LiveTVGuideSnapshotWriter.writeGuide(guideChannels: [:], programmes: held, now: now, directory: directory)
+        }
     }
 
     /// Loaded empty coverage is distinct from a channel/window which has never been requested.

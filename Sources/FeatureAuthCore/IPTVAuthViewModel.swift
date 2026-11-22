@@ -54,6 +54,8 @@ public final class IPTVAuthViewModel {
     private let onAuthenticated: (UserSession) throws -> Void
     private let signIn: SignIn
     private let reconnecting: UserSession?
+    /// Extra guides are managed in Settings; reconnecting keeps them as they were.
+    private var extraGuideURLs: [URL] = []
     private let setupDiagnostics: IPTVSetupDiagnostics
     @ObservationIgnored private var diagnosticAttempt: IPTVSetupAttempt?
     private var flow: Task<Void, Never>?
@@ -87,6 +89,7 @@ public final class IPTVAuthViewModel {
                 username = credential.username
                 password = credential.password
                 headers = credential.headers.sorted { $0.key < $1.key }.map { Header(name: $0.key, value: $0.value) }
+                extraGuideURLs = credential.extraGuideURLs
                 self.guideAddress = credential.explicitGuideURLs.first?.absoluteString ?? ""
                 additionalGuides = credential.explicitGuideURLs.dropFirst().map { Guide(address: $0.absoluteString) }
                 guideHeaders = credential.explicitGuideHeaders.sorted { $0.key < $1.key }
@@ -244,7 +247,7 @@ public final class IPTVAuthViewModel {
         return try IPTVCredential(
             mode: mode, address: url, username: username, password: password,
             headers: values, guideURL: guide, additionalGuideURLs: extraGuides,
-            guideHeaders: try headerValues(guideHeaders)
+            guideHeaders: try headerValues(guideHeaders), extraGuideURLs: extraGuideURLs
         )
     }
 

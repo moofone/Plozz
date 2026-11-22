@@ -207,6 +207,11 @@ public final class NativeVideoEngine: VideoEngine {
         #endif
     }
 
+    public var decodedVideoHeight: Int? {
+        guard let size = player?.currentItem?.presentationSize, size.height.isFinite, size.height > 0 else { return nil }
+        return Int(size.height.rounded())
+    }
+
     public var videoAspectRatio: Double? {
         if let size = player?.currentItem?.presentationSize,
            size.width > 0,
@@ -227,6 +232,7 @@ public final class NativeVideoEngine: VideoEngine {
 
     public func load(request: PlaybackRequest, startPosition: TimeInterval) async {
         guard !Task.isCancelled else { return }
+        activePictureSourceID = UUID()
         loadGeneration &+= 1
         let generation = loadGeneration
         defer {
@@ -779,6 +785,7 @@ public final class NativeVideoEngine: VideoEngine {
     public var capabilities: PlayerEngineCapabilities { [.playbackSpeed, .videoZoom] }
 
     public var supportsActivePictureAnalysis: Bool { activePictureAnalyzer != nil }
+    @ObservationIgnored public private(set) var activePictureSourceID: UUID? = UUID()
 
     public func sampleActivePicture() async -> VideoActivePictureState {
         guard let activePictureAnalyzer else { return .unsupported }
@@ -820,6 +827,7 @@ public final class NativeVideoEngine: VideoEngine {
     }
 
     public func stop() {
+        activePictureSourceID = UUID()
         loadGeneration &+= 1
         fallbackMonitorTask?.cancel()
         fallbackMonitorTask = nil

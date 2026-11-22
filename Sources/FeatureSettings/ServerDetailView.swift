@@ -300,6 +300,12 @@ struct ServerDetailView: View {
                     providerSetupRouter.connectIPTV(account: account)
                 }
             }
+            if account.server.provider == .iptv {
+                // Pending copy: label needs owner sign-off.
+                Button("Rebuild library index", systemImage: "arrow.triangle.2.circlepath") {
+                    context.onRebuildLibraryIndex(account.id)
+                }
+            }
             if account.id == context.activeAccountID {
                 Label("Primary", systemImage: "star.fill")
                     .labelStyle(.iconOnly)

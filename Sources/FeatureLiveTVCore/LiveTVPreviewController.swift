@@ -23,6 +23,7 @@ public final class LiveTVPreviewController {
     public private(set) var isRestoringGuideFocus = false
     public private(set) var watchOrigin: LiveTVGuideRowID?
     public private(set) var restoresPlaybackFocus = true
+    public private(set) var guideFocusMayScroll = true
     public private(set) var hasRequestedInitialGuideFocus = false
     private let model: LiveTVPrototypeModel
     private var focusedChannelID: String?
@@ -48,10 +49,14 @@ public final class LiveTVPreviewController {
         isActive && (isSearching || isExpanded || isRestoringGuideFocus)
     }
 
-    public func requestInitialGuideFocus(isActive: Bool, hasOverlay: Bool) -> LiveTVGuideRowID? {
+    /// `preferred` is where the guide was left; it is used only while that row is still in the guide.
+    public func requestInitialGuideFocus(
+        isActive: Bool, hasOverlay: Bool, preferring preferred: LiveTVGuideRowID? = nil
+    ) -> LiveTVGuideRowID? {
         guard isActive, !hasOverlay, !isExpanded, !hasRequestedInitialGuideFocus,
               let first = model.guideChannels.first?.id else { return nil }
-        requestBrowsingFocus()
+        requestBrowsingFocus(mayScroll: false)
+        if let preferred, model.guideEntry(for: preferred) != nil { return preferred }
         return first
     }
 
@@ -125,17 +130,19 @@ public final class LiveTVPreviewController {
         cancelPendingPreview()
         focusedChannelID = model.playingChannelID
         restoresPlaybackFocus = true
+        guideFocusMayScroll = true
         isRestoringGuideFocus = restoresFocus
         isExpanded = false
         focusRestoreRequest &+= 1
         if !restoresFocus { schedulePreview() }
     }
 
-    public func requestBrowsingFocus() {
+    public func requestBrowsingFocus(mayScroll: Bool = true) {
         guard !isExpanded else { return }
         hasRequestedInitialGuideFocus = true
         cancelPendingPreview()
         restoresPlaybackFocus = false
+        guideFocusMayScroll = mayScroll
         isRestoringGuideFocus = true
         focusRestoreRequest &+= 1
     }

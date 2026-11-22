@@ -91,6 +91,8 @@ public struct LiveChannelPlayerView: View {
     private let onPlaybackUpdate: @MainActor (LiveTVPlaybackUpdate) -> Void
     private let onPlaybackFailed: @MainActor (LiveChannelFailureReport) -> Void
     private let onVideoAspectRatioChange: @MainActor (Double?) -> Void
+    /// Receives the resolution one play held longest (steady state), when the play ends. Playback only; nothing is requested to measure it.
+    private let onMeasuredResolution: @MainActor (Int) -> Void
     private let onMultiview: (() -> Bool)?
     private let outputGroup: LiveChannelOutputGroup?
     private let outputID: UUID?
@@ -124,6 +126,8 @@ public struct LiveChannelPlayerView: View {
     @Environment(GlassPerformanceModel.self) private var glassPerformance: GlassPerformanceModel?
     @State private var model: LiveChannelPlayerModel?
     @State private var sourceTask: Task<Void, Never>?
+    /// Ends a start that never reaches the model (nothing loads, so the model's own timeout never runs).
+    @State private var startWatchdog: Task<Void, Never>?
     @State private var fullscreenPresented = false
     @State private var fullscreenOwnsSurface = false
     @State private var returnsToGuideAfterFullscreen = false
@@ -226,6 +230,7 @@ public struct LiveChannelPlayerView: View {
         onPlaybackUpdate: @escaping @MainActor (LiveTVPlaybackUpdate) -> Void = { _ in },
         onPlaybackFailed: @escaping @MainActor (LiveChannelFailureReport) -> Void = { _ in },
         onVideoAspectRatioChange: @escaping @MainActor (Double?) -> Void = { _ in },
+        onMeasuredResolution: @escaping @MainActor (Int) -> Void = { _ in },
         onMultiview: (() -> Bool)? = nil,
         outputGroup: LiveChannelOutputGroup? = nil,
         outputID: UUID? = nil,
@@ -278,6 +283,7 @@ public struct LiveChannelPlayerView: View {
         self.onPlaybackUpdate = onPlaybackUpdate
         self.onPlaybackFailed = onPlaybackFailed
         self.onVideoAspectRatioChange = onVideoAspectRatioChange
+        self.onMeasuredResolution = onMeasuredResolution
         self.onMultiview = onMultiview
         self.outputGroup = outputGroup
         self.outputID = outputID
@@ -324,6 +330,7 @@ public struct LiveChannelPlayerView: View {
         onPlaybackUpdate: @escaping @MainActor (LiveTVPlaybackUpdate) -> Void = { _ in },
         onPlaybackFailed: @escaping @MainActor (LiveChannelFailureReport) -> Void = { _ in },
         onVideoAspectRatioChange: @escaping @MainActor (Double?) -> Void = { _ in },
+        onMeasuredResolution: @escaping @MainActor (Int) -> Void = { _ in },
         onMultiview: (() -> Bool)? = nil,
         outputGroup: LiveChannelOutputGroup? = nil,
         outputID: UUID? = nil,
@@ -357,7 +364,7 @@ public struct LiveChannelPlayerView: View {
             onReturnToGuide: onReturnToGuide, playPauseRequest: playPauseRequest,
             onPlaybackStarted: onPlaybackStarted, reportingID: reportingID,
             onPlaybackUpdate: onPlaybackUpdate, onPlaybackFailed: onPlaybackFailed,
-            onVideoAspectRatioChange: onVideoAspectRatioChange,
+            onVideoAspectRatioChange: onVideoAspectRatioChange, onMeasuredResolution: onMeasuredResolution,
             onMultiview: onMultiview,
             outputGroup: outputGroup, outputID: outputID, isAudible: isAudible,
             countsAsWatching: countsAsWatching, isMultiview: isMultiview, trackPreferences: trackPreferences,
@@ -680,6 +687,7 @@ public struct LiveChannelPlayerView: View {
         ))
         .onExitCommand {
             guard isExpanded else { return }
+            BackLatencyProbe.shared.pressed(.playerToGuide)
             dismissPlayer()
         }
         .onPlayPauseCommand {
@@ -799,6 +807,9 @@ public struct LiveChannelPlayerView: View {
         })
         .onChange(of: model?.videoAspectRatio, initial: true) { _, ratio in
             onVideoAspectRatioChange(ratio)
+        }
+        .task(id: ResolutionSamplingKey(channelID: channelID, isPresenting: sourceMatchesCurrentModel && (model?.hasPresentedFrame ?? false))) {
+            await sampleDecodedResolution()
         }
         .onChange(of: tracksArePresented) { _, _ in autoHideRevision &+= 1 }
         .onChange(of: diagnosticsEnabled) { _, enabled in updateDiagnosticsSampling(enabled) }
@@ -967,6 +978,7 @@ public struct LiveChannelPlayerView: View {
                 || (!sourceLoadNeeded && model?.allowsDisplayMatching == allowsDisplayMatching) { return }
         }
         let changesSource = !sourceMatchesCurrentModel || model?.sessionReportingID != reportingID
+        armStartWatchdog()
         if changesSource {
             playbackStartPolicy.resetViewing()
             sourceTask?.cancel()
@@ -1039,7 +1051,25 @@ public struct LiveChannelPlayerView: View {
         }
     }
 
+    /// A source that has not been loaded into the model within the startup limit fails with the
+    /// typed startup timeout, so the error UI replaces "Loading channel…" instead of an endless spinner.
+    private func armStartWatchdog() {
+        startWatchdog?.cancel()
+        guard !sourceMatchesCurrentModel || model?.hasPresentedFrame == false else { return }
+        let expected = source
+        startWatchdog = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(LiveChannelPlayerModel.startWatchdogSeconds))
+            guard !Task.isCancelled, expected == source, !sourceMatchesCurrentModel else { return }
+            sourceTask?.cancel()
+            displayTask?.cancel()
+            displayTransition.reset()
+            onPlaybackFailed(.init(failure: .startupTimedOut))
+        }
+    }
+
     private func stopPlayback() {
+        startWatchdog?.cancel()
+        startWatchdog = nil
         opensMultiviewAfterFullscreen = false
         videoHandoff?.cancel()
         videoHandoff = nil
@@ -1257,6 +1287,18 @@ public struct LiveChannelPlayerView: View {
 
     /// Samples the playing channel for Playback Info, as the VOD player does,
     /// only while it's showing: the sampler polls every second.
+    /// Samples the height of the video actually being decoded every 2 s while the picture is presented, and reports the height this
+    /// play held longest (the first 10 s and brief adaptive dips do not count) when the play ends. Playback only: no extra requests.
+    private func sampleDecodedResolution() async {
+        guard let model, sourceMatchesCurrentModel, model.hasPresentedFrame else { return }
+        var recorder = LiveChannelResolutionRecorder()
+        while !Task.isCancelled {
+            if let height = model.engine.decodedVideoHeight { recorder.record(height: height, at: Date()) }
+            do { try await Task.sleep(for: .seconds(2)) } catch { break }
+        }
+        if let height = recorder.steadyHeight(endingAt: Date()) { onMeasuredResolution(height) }
+    }
+
     private func updateDiagnosticsSampling(_ enabled: Bool) {
         guard enabled, let model else {
             diagnosticsSampler.stop()
@@ -1382,7 +1424,9 @@ public struct LiveChannelPlayerView: View {
     }
 
     private func dismissPlayer() {
-        guard liveDisplayFadesEnabled, !isMultiview, let model else {
+        // The retained guide is already on screen behind this surface. Let the
+        // normal collapse/stop lifecycle restore output without blacking out the guide.
+        guard onReturnToGuide == nil, liveDisplayFadesEnabled, !isMultiview, let model else {
             dismissImmediately()
             return
         }
@@ -1464,7 +1508,13 @@ struct LiveChannelPlaybackStartPolicy<Source: Equatable> {
 }
 
 /// What the glass-suspension decision depends on, as one value to observe.
-private struct GlassDemandKey: Equatable {
+private /// Restarts the resolution sampling for each channel play: a new channel, or the picture appearing or going away.
+struct ResolutionSamplingKey: Hashable {
+    let channelID: String
+    let isPresenting: Bool
+}
+
+struct GlassDemandKey: Equatable {
     let expanded: Bool
     let presentedFrame: Bool
     let reportingID: UUID?
@@ -1926,6 +1976,9 @@ final class LiveChannelPlayerModel {
     private var bufferingStartedAt: TimeInterval?
     @ObservationIgnored private var diagnostics = LiveChannelDiagnostics()
     @ObservationIgnored private var retuneBudget = LiveChannelRetuneBudget()
+    /// Audio-plays-but-no-frame evidence for this attempt, and whether the one software retry was spent.
+    @ObservationIgnored private var videoStall = LiveVideoStallEvidence()
+    @ObservationIgnored private var softwareDecodeRetried = false
     @ObservationIgnored private var recoveryTask: Task<Void, Never>?
     @ObservationIgnored private var foregroundTask: Task<Void, Never>?
     private var recoveryGeneration = 0
@@ -1946,6 +1999,8 @@ final class LiveChannelPlayerModel {
     @ObservationIgnored private var lastSessionState: LiveTVPlaybackUpdate.State?
 
     private static let startupTimeout: TimeInterval = 30
+    /// Slightly beyond the model's own limit: it only covers a source that never reached the model.
+    static let startWatchdogSeconds: TimeInterval = startupTimeout + 5
     private static let bufferingTimeout: TimeInterval = 60
     private static let maximumManualRetries = 2
 
@@ -2346,6 +2401,7 @@ final class LiveChannelPlayerModel {
         foregroundTask?.cancel()
         foregroundTask = nil
         retuneBudget = LiveChannelRetuneBudget()
+        softwareDecodeRetried = false
         pendingSourceReset = false
         manualRetryCount = 0
         attemptCount = 0
@@ -2529,6 +2585,8 @@ final class LiveChannelPlayerModel {
         attemptCount += 1
         installEngineCallbacks(for: generation)
         diagnostics.event(.load, attempt: attemptCount)
+        engine.liveDecodeHint = softwareDecodeRetried && !isScheduledSource ? .software : .automatic
+        videoStall.reset()
         failureReport = nil
         isLoading = true
         phase = .loading
@@ -2716,6 +2774,7 @@ final class LiveChannelPlayerModel {
                 firstFrameAt: uptime()
             )
         }
+        if !hasPresentedFrame, !userPaused, !isScheduledSource, respondToUndecodedVideo(snapshot) { return }
         if userPaused {
             phase = .paused
         } else if pendingSourceReset || recoveryTask != nil {
@@ -2751,6 +2810,23 @@ final class LiveChannelPlayerModel {
            activeSeekID == nil, pendingSeekRequest == nil {
             healthyPosition = snapshot.position
         }
+    }
+
+    /// Audio has played for `LiveVideoStallEvidence.requiredPlayedSeconds` with a video track and no
+    /// frame: the decoder is rejecting the stream. First reload once on the engine's software decoder
+    /// (within the retune budget), then report `videoNotDecoded` instead of waiting out the startup limit.
+    private func respondToUndecodedVideo(_ snapshot: LiveChannelEngineSnapshot) -> Bool {
+        let codec = engine.liveVideoCodecName
+        guard videoStall.observe(snapshot, hasVideoTrack: codec != nil) else { return false }
+        videoStall.reset()
+        if !softwareDecodeRetried, engine.supportsLiveSoftwareDecode, snapshot.route != .software {
+            softwareDecodeRetried = true
+            diagnostics.event(.videoNoneDecodedRetry, attempt: attemptCount)
+            sourceNeedsRetune()
+        } else {
+            fail(.videoNotDecoded(codec: codec))
+        }
+        return true
     }
 
     private var isScheduledSource: Bool {
@@ -2924,6 +3000,8 @@ final class LiveChannelPlayerModel {
             diagnostics.event(.failure, attempt: attemptCount, error: error)
         case .startupTimedOut:
             diagnostics.event(.startupTimeout, attempt: attemptCount)
+        case .videoNotDecoded:
+            diagnostics.event(.videoNoneDecoded, attempt: attemptCount)
         case .bufferingTimedOut:
             diagnostics.event(.stallTimeout, attempt: attemptCount)
         case .recoveryExhausted:
@@ -3075,6 +3153,12 @@ private struct LiveChannelInterruption {
             base = LiveChannelInterruption(
                 icon: "exclamationmark.triangle.fill",
                 title: "Playback timed out",
+                message: failure.message
+            )
+        case .videoNotDecoded:
+            base = LiveChannelInterruption(
+                icon: "exclamationmark.triangle.fill",
+                title: "Can’t play this channel",
                 message: failure.message
             )
         case .bufferingTimedOut:

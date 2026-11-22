@@ -16,6 +16,27 @@ struct IPTVRecord: Codable, Sendable {
     var guideCountry: String?
     var channelNumber: Int?
     var isLive = false
+    /// Fingerprint of the provider's listing entry this record was derived from. A refreshed
+    /// listing re-derives only entries whose stamp changed; unchanged ones keep their details.
+    var listingStamp: String?
+}
+
+/// Order-independent fingerprint of a whole listing (ids + stamps). Equal fingerprints mean the
+/// provider's catalogue listing did not change, so nothing derived from it needs rebuilding.
+struct IPTVListingFingerprint {
+    private(set) var count = 0
+    private var sum: UInt64 = 0
+
+    mutating func add(_ record: IPTVRecord) {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in record.item.id.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100_0000_01b3 }
+        hash = (hash ^ 0x1f) &* 0x100_0000_01b3
+        for byte in (record.listingStamp ?? "").utf8 { hash = (hash ^ UInt64(byte)) &* 0x100_0000_01b3 }
+        sum = sum &+ hash
+        count += 1
+    }
+
+    var text: String { "\(count):\(String(sum, radix: 16))" }
 }
 
 /// Confined to IPTVClient. Pages are decoded on demand; credential-bearing
@@ -25,6 +46,7 @@ final class IPTVCatalog {
     private(set) var db: OpaquePointer?
     private let key: SymmetricKey
     static let maximumRetainedJournalBytes = 4 * 1_024 * 1_024
+    static let maximumLineupBytes = 64 * 1_024 * 1_024
     private let url: URL
     private let storageLifecycle: ApplicationStorageLifecycle?
     private var importID: UUID?
@@ -80,6 +102,12 @@ final class IPTVCatalog {
                     ordinal INTEGER NOT NULL, live INTEGER NOT NULL, payload BLOB NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS details_state (
+                    id TEXT PRIMARY KEY, library TEXT NOT NULL, stamp TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS lineup (
+                    key TEXT PRIMARY KEY, token TEXT NOT NULL, payload BLOB NOT NULL
+                );
                 """)
             try createIndexes()
         } catch {
@@ -154,6 +182,8 @@ final class IPTVCatalog {
     func insert(_ record: IPTVRecord, overwrite: Bool = true, into table: Table = .entries) throws {
         try storageLifecycle?.checkAccess()
         if !overwrite, try contains(record.item.id, in: table) { return }
+        let changesLive = try table == .entries && (record.isLive
+            || count(where: "id = ? AND live = 1", values: [record.item.id]) > 0)
         let data = try JSONEncoder().encode(record)
         guard let sealed = try AES.GCM.seal(data, using: key).combined else { throw IPTVError.storage }
         let item = record.item
@@ -173,6 +203,51 @@ final class IPTVCatalog {
         guard status == SQLITE_OK, sqlite3_step(statement) == SQLITE_DONE else {
             throw Self.databaseError(sqlite3_extended_errcode(db))
         }
+        if changesLive { try invalidateLineup() }
+    }
+
+    /// Changes when another connection commits to the catalogue.
+    func dataVersion() throws -> Int64 {
+        let statement = try prepare("PRAGMA data_version")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw Self.databaseError(sqlite3_extended_errcode(db)) }
+        return sqlite3_column_int64(statement, 0)
+    }
+
+    /// The saved lineup, if one was written for exactly this catalogue state.
+    func lineup(token: String) throws -> [IPTVLineupEntry]? {
+        let statement = try prepare("SELECT payload FROM lineup WHERE key = 'live' AND token = ?")
+        defer { sqlite3_finalize(statement) }
+        try bind([token], to: statement)
+        let status = sqlite3_step(statement)
+        if status == SQLITE_DONE { return nil }
+        guard status == SQLITE_ROW else { throw Self.databaseError(sqlite3_extended_errcode(db)) }
+        guard let bytes = sqlite3_column_blob(statement, 0) else { return nil }
+        let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+        // An unreadable copy is a miss: the sealed records remain the source of truth.
+        guard let box = try? AES.GCM.SealedBox(combined: data),
+              let opened = try? AES.GCM.open(box, using: key) else { return nil }
+        return IPTVLineupEntry.decode(opened)
+    }
+
+    func saveLineup(_ entries: [IPTVLineupEntry], token: String) throws {
+        try storageLifecycle?.checkAccess()
+        guard let encoded = IPTVLineupEntry.encode(entries), encoded.count <= Self.maximumLineupBytes,
+              let sealed = try AES.GCM.seal(encoded, using: key).combined else { return }
+        let statement = try prepare("INSERT OR REPLACE INTO lineup(key,token,payload) VALUES('live',?,?)")
+        defer { sqlite3_finalize(statement) }
+        try bind([token], to: statement)
+        let status = sealed.withUnsafeBytes {
+            sqlite3_bind_blob(statement, 2, $0.baseAddress, Int32($0.count), Self.transient)
+        }
+        guard status == SQLITE_OK, sqlite3_step(statement) == SQLITE_DONE else {
+            throw Self.databaseError(sqlite3_extended_errcode(db))
+        }
+    }
+
+    private func invalidateLineup() throws {
+        try setState("live-revision", UUID().uuidString)
+        try execute("DELETE FROM lineup")
     }
 
     func record(_ id: String) throws -> IPTVRecord {
@@ -233,6 +308,51 @@ final class IPTVCatalog {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw Self.databaseError(sqlite3_extended_errcode(db)) }
     }
 
+    func removeState(_ name: String) throws {
+        let statement = try prepare("DELETE FROM state WHERE key = ?")
+        defer { sqlite3_finalize(statement) }
+        try bind([name], to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw Self.databaseError(sqlite3_extended_errcode(db)) }
+    }
+
+    /// The listing stamp an item's final details were fetched under; nil if never fetched.
+    func detailsStamp(_ id: String) throws -> String? {
+        let statement = try writeStatement("SELECT stamp FROM details_state WHERE id = ?")
+        defer { resetWriteStatement(statement) }
+        try bind([id], to: statement)
+        switch sqlite3_step(statement) {
+        case SQLITE_DONE: return nil
+        case SQLITE_ROW: return sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
+        default: throw Self.databaseError(sqlite3_extended_errcode(db))
+        }
+    }
+
+    func detailsFetched(_ id: String) throws -> Bool { try detailsStamp(id) != nil }
+
+    /// Final details are stored once; this marker is what stops every later request for them.
+    func markDetailsFetched(_ id: String, library: String, stamp: String) throws {
+        let statement = try writeStatement("INSERT OR REPLACE INTO details_state(id,library,stamp) VALUES(?,?,?)")
+        defer { resetWriteStatement(statement) }
+        try bind([id, library, stamp], to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw Self.databaseError(sqlite3_extended_errcode(db)) }
+    }
+
+    /// Manual rebuild: forget every details marker (and the saved listing fingerprints) so the next
+    /// read fetches details again.
+    func clearDetailsState() throws {
+        try execute("DELETE FROM details_state")
+        try execute("DELETE FROM state WHERE key LIKE '%-listing'")
+    }
+
+    /// Marks an incoming listing entry as unchanged since its details were fetched, so the
+    /// committed catalogue keeps its stored row (and any seasons/episodes beneath it).
+    func keepForImport(_ id: String) throws {
+        let statement = try writeStatement("INSERT OR IGNORE INTO incoming_keep(id) VALUES(?)")
+        defer { resetWriteStatement(statement) }
+        try bind([id], to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw Self.databaseError(sqlite3_extended_errcode(db)) }
+    }
+
     func remove(library: String) throws {
         let statement = try prepare("DELETE FROM entries WHERE library = ?")
         defer { sqlite3_finalize(statement) }
@@ -250,6 +370,7 @@ final class IPTVCatalog {
                 ordinal INTEGER NOT NULL, live INTEGER NOT NULL, payload BLOB NOT NULL
             )
             """)
+        try execute("CREATE TEMP TABLE incoming_keep (id TEXT PRIMARY KEY)")
         let id = UUID()
         importID = id
         importNeedsCleanup = true
@@ -279,6 +400,7 @@ final class IPTVCatalog {
         for statement in writeStatements.values { sqlite3_finalize(statement) }
         writeStatements.removeAll()
         try execute("DROP TABLE IF EXISTS incoming")
+        try execute("DROP TABLE IF EXISTS incoming_keep")
         importNeedsCleanup = false
     }
 
@@ -300,7 +422,8 @@ final class IPTVCatalog {
     }
 
     func commitImport(
-        library: String?, scope: String, progress: (Int) throws -> Void = { _ in }
+        library: String?, scope: String, listingFingerprint: String? = nil,
+        progress: (Int) throws -> Void = { _ in }
     ) throws {
         let performance = PerformanceDiagnostics.shared.begin(.playlistCommit, provider: .iptv)
         var outcome = PerformanceDiagnostics.Outcome.failed
@@ -312,7 +435,12 @@ final class IPTVCatalog {
         try progress(0)
         try execute("BEGIN IMMEDIATE")
         do {
-            if let library { try remove(library: library) }
+            // A movie or series import leaves the saved live lineup valid.
+            let replacesLive = try library.map {
+                try count(where: "library = ? AND live = 1", values: [$0]) > 0
+            } ?? true
+            if try replacesLive || count(where: "live = 1", in: .incoming) > 0 { try invalidateLineup() }
+            if let library { try removeReplacedEntries(library: library) }
             else {
                 // Rebuild secondary indexes once, inside the same atomic replacement.
                 for (name, _) in Self.indexes { try execute("DROP INDEX \(name)") }
@@ -326,6 +454,7 @@ final class IPTVCatalog {
                 try execute("""
                     INSERT INTO entries SELECT * FROM incoming
                     WHERE rowid > \(lastRowID) AND rowid <= \(nextRowID)
+                    AND id NOT IN (SELECT id FROM incoming_keep)
                     """)
                 copied += Int(sqlite3_changes(db))
                 lastRowID = nextRowID
@@ -334,7 +463,10 @@ final class IPTVCatalog {
             if library == nil { try createIndexes() }
             try Task.checkCancellation()
             try storageLifecycle?.checkAccess()
+            if let library { try forgetDetailsOfReplacedEntries(library: library) }
+            if let listingFingerprint { try setState("\(scope)-listing", listingFingerprint) }
             try setState(scope, String(Date().timeIntervalSince1970))
+            try setState("\(scope)-revision", UUID().uuidString)
             try execute("COMMIT")
             outcome = .succeeded
             reclaimJournal()
@@ -346,6 +478,33 @@ final class IPTVCatalog {
             }
             throw error
         }
+    }
+
+    /// Replaces a library's rows except entries whose listing is unchanged since their details were
+    /// fetched, together with the seasons and episodes stored beneath those entries.
+    private func removeReplacedEntries(library: String) throws {
+        for kind in ["season", "episode"] {
+            let statement = try prepare("""
+                INSERT OR IGNORE INTO incoming_keep(id)
+                SELECT id FROM entries WHERE library = ? AND kind = '\(kind)'
+                AND parent IN (SELECT id FROM incoming_keep)
+                """)
+            defer { sqlite3_finalize(statement) }
+            try bind([library], to: statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw Self.databaseError(sqlite3_extended_errcode(db)) }
+        }
+        let statement = try prepare("DELETE FROM entries WHERE library = ? AND id NOT IN (SELECT id FROM incoming_keep)")
+        defer { sqlite3_finalize(statement) }
+        try bind([library], to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw Self.databaseError(sqlite3_extended_errcode(db)) }
+    }
+
+    /// Details whose listing entry changed or disappeared are no longer final.
+    private func forgetDetailsOfReplacedEntries(library: String) throws {
+        let statement = try prepare("DELETE FROM details_state WHERE library = ? AND id NOT IN (SELECT id FROM incoming_keep)")
+        defer { sqlite3_finalize(statement) }
+        try bind([library], to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw Self.databaseError(sqlite3_extended_errcode(db)) }
     }
 
     private func createIndexes() throws {

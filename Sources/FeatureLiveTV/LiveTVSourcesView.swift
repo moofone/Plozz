@@ -364,6 +364,7 @@ private struct LiveTVSourcesContent: View {
                     )
                 }
                 settingsPreferences
+                    .environment(\.liveTVChannelNamePreviewSamples, imports?.channelNamePreviewSamples ?? [])
             }
             if model.hasLoaded, !isAddingSource {
                 if browseSource != nil || (settingsPreferences == nil && createChannel != nil)
@@ -1000,6 +1001,7 @@ struct LiveTVServerSourceDetails: View {
     @State private var confirmsRemoval = false
     @SettingsPageDismiss private var dismiss
     @Environment(LiveTVGuidePreparationModel.self) private var guidePreparation: LiveTVGuidePreparationModel?
+    @Environment(LiveTVExtraGuidesModel.self) private var extraGuides: LiveTVExtraGuidesModel?
 
     var body: some View {
         if let source = model.configuration.servers.first(where: { $0.id == sourceID }) {
@@ -1027,6 +1029,20 @@ struct LiveTVServerSourceDetails: View {
                         })
                     }
                     .buttonStyle(SettingsFocusButtonStyle(size: .contained))
+                }
+                if let extraGuides, let guides = extraGuides.entries(accountID: source.accountID) {
+                    SettingsSectionGroup {
+                        SettingsPageLink {
+                            LiveTVExtraGuidesPage(model: extraGuides, accountID: source.accountID, sourceName: source.name)
+                        } label: {
+                            SettingsRowLabel(icon: "calendar.badge.plus", title: "Extra Guides", trailing: {
+                                Text("\(guides.count)").settingsRowSecondary()
+                                LiveTVSourceChevron()
+                            })
+                        }
+                        .buttonStyle(SettingsFocusButtonStyle(size: .contained))
+                        .accessibilityIdentifier("live-tv-extra-guides-\(source.id)")
+                    }
                 }
                 if let status = imports?.serverSources.first(where: { $0.id == sourceID }) {
                     SettingsSectionGroup("Live TV status") {

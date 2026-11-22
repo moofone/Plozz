@@ -18,7 +18,10 @@ public extension MetadataQuery {
             let value = Self.normalizedIdentity(raw, namespace: namespace) ?? raw
             ids.append("\(namespace.rawValue):\(value.utf8.count):\(value)")
         }
-        var parts = [contentType.rawValue, kind.rawValue, "text-language-v1:\(metadataLanguage)"]
+        var parts = [contentType.rawValue, kind.rawValue, "text-language-v2:\(metadataLanguage)"]
+        if let scheduleStartDate {
+            parts.append("schedule-from:\(scheduleStartDate.timeIntervalSince1970)")
+        }
         if ids.isEmpty {
             parts.append("t:\(title.lowercased())|y:\(year.map(String.init) ?? "")")
         } else {
@@ -63,7 +66,8 @@ public extension MetadataQuery {
             episodeHints: episodeHints,
             titleAlternates: titleAlternates,
             artworkLanguage: artworkLanguage,
-            metadataLanguage: metadataLanguage
+            metadataLanguage: metadataLanguage,
+            scheduleStartDate: scheduleStartDate
         )
     }
 
@@ -174,7 +178,14 @@ public actor MetadataEnrichmentPipeline {
             // Thread already-resolved ids downstream so an exact-id lookup replaces a
             // fuzzy title search (no duplicate work).
             let threaded = query.mergingProviderIDs(result.externalIDs.mapValues(\.value))
-            var enrichment = await provider.enrich(threaded, missing: round.fields)
+            var enrichment: MetadataEnrichment
+            if query.scheduleStartDate != nil, round.fields.contains(.nextAiringEpisode) {
+                let response = await provider.enrichReporting(threaded, missing: round.fields)
+                enrichment = response.enrichment
+                if case .failure = response.health { enrichment.calendarScheduleAvailable = false }
+            } else {
+                enrichment = await provider.enrich(threaded, missing: round.fields)
+            }
             if !Self.supportsTextLanguage(query, source: round.source) {
                 enrichment.title = nil
                 enrichment.overview = nil
@@ -190,6 +201,16 @@ public actor MetadataEnrichmentPipeline {
             }
             result.fillMissing(from: enrichment, skipping: present)
             remaining = requested.subtracting(present).subtracting(result.filledFields)
+        }
+        let untranslated = remaining.intersection(Self.localizedTextFields)
+        if !untranslated.isEmpty, !Task.isCancelled, !LanguageMatch.matches(query.metadataLanguage, "en") {
+            let fallback = await enrich(
+                query.mergingProviderIDs(result.externalIDs.mapValues(\.value)).forMetadataLanguage("en"),
+                present: present.union(result.filledFields),
+                requesting: untranslated,
+                tier: tier
+            )
+            result.fillMissing(from: fallback, skipping: present.union(result.filledFields))
         }
         return result
     }
@@ -237,10 +258,9 @@ public actor MetadataEnrichmentPipeline {
     private static let localizedTextFields: Set<MetadataField> = [.title, .overview, .genres, .taglines]
 
     private static func supportsTextLanguage(_ query: MetadataQuery, source: MetadataSource) -> Bool {
-        // Other external adapters currently return English or original-language text,
-        // not a translation selected by the viewer. Native curation stays authoritative.
+        // English-only adapters participate after all applicable translated sources.
         Locale.Language(identifier: query.metadataLanguage).languageCode?.identifier == "en"
-            || [.tmdb, .server, .localNFO].contains(source)
+            || [.tmdb, .tvdb, .wikipedia, .server, .localNFO].contains(source)
     }
 
     private static func supportsOverviewScope(_ query: MetadataQuery, source: MetadataSource) -> Bool {

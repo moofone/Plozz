@@ -14,6 +14,8 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
     public let headers: [String: String]
     public let guideURL: URL?
     private let additionalGuideURLs: [URL]?
+    /// Guides the user added next to the provider's own guide; absent in credentials saved before they existed.
+    private var mergedGuideURLs: [URL]?
     private let configuredGuideHeaders: [String: String]?
     private let discoversPlaylistGuides: Bool?
     public let identity: UUID
@@ -24,6 +26,7 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
         headers: [String: String] = [:], guideURL: URL? = nil,
         additionalGuideURLs: [URL] = [], guideHeaders: [String: String] = [:],
         discoversPlaylistGuides: Bool = true,
+        extraGuideURLs: [URL] = [],
         identity: UUID = UUID()
     ) throws {
         guard let parts = URLComponents(url: address, resolvingAgainstBaseURL: false),
@@ -32,6 +35,7 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
               guideURL.map({ LiveTVPlaylistSource.isSupportedURL($0) }) != false,
               additionalGuideURLs.allSatisfy(LiveTVPlaylistSource.isSupportedURL),
               additionalGuideURLs.count < 32,
+              Self.areValidExtraGuides(extraGuideURLs),
               guideURL != nil || guideHeaders.isEmpty,
               mode != .xtream || (!username.isEmpty && !password.isEmpty) else {
             throw AppError.invalidResponse
@@ -66,6 +70,7 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
         self.headers = resolvedHeaders
         self.guideURL = guideURL
         self.additionalGuideURLs = additionalGuideURLs
+        mergedGuideURLs = extraGuideURLs.isEmpty ? nil : extraGuideURLs
         configuredGuideHeaders = guideHeaders
         self.discoversPlaylistGuides = discoversPlaylistGuides
         self.identity = identity
@@ -89,6 +94,7 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
               result.guideURL.map(LiveTVPlaylistSource.isSupportedURL) != false,
               (result.additionalGuideURLs ?? []).allSatisfy(LiveTVPlaylistSource.isSupportedURL),
               (result.additionalGuideURLs ?? []).count < 32,
+              areValidExtraGuides(result.mergedGuideURLs ?? []),
               result.mode != .xtream || (!result.username.isEmpty && !result.password.isEmpty) else {
             throw AppError.unauthorized
         }
@@ -114,6 +120,23 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
 
     public func headers(for url: URL) -> [String: String] {
         Self.sameOrigin(address, url) ? headers : [:]
+    }
+
+    /// Guide addresses added by the user. Their listings fill channels the provider's guide has none for; they never
+    /// replace it (unlike `explicitGuideURLs`).
+    public var extraGuideURLs: [URL] { mergedGuideURLs ?? [] }
+
+    /// The same credential, identity and catalogue key included, with another set of extra guides.
+    public func replacingExtraGuideURLs(_ urls: [URL]) throws -> IPTVCredential {
+        guard Self.areValidExtraGuides(urls) else { throw AppError.invalidResponse }
+        var copy = self
+        copy.mergedGuideURLs = urls.isEmpty ? nil : urls
+        return copy
+    }
+
+    private static func areValidExtraGuides(_ urls: [URL]) -> Bool {
+        urls.count < 32 && urls.allSatisfy(LiveTVPlaylistSource.isSupportedURL)
+            && Set(urls.map(\.absoluteString)).count == urls.count
     }
 
     public var explicitGuideURLs: [URL] { (guideURL.map { [$0] } ?? []) + (additionalGuideURLs ?? []) }

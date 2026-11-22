@@ -37,7 +37,9 @@ struct FocusHostApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if ProcessInfo.processInfo.arguments.contains("--live-jellyfin-onboarding") {
+            if ProcessInfo.processInfo.arguments.contains("--upcoming-capture-fixture") {
+                UpcomingCaptureFixture()
+            } else if ProcessInfo.processInfo.arguments.contains("--live-jellyfin-onboarding") {
                 LiveJellyfinOnboardingFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--live-webdav-watchlist-fixture") {
                 LiveWebDAVWatchlistFixture()
@@ -138,7 +140,16 @@ struct FocusHostApp: App {
             } else if ProcessInfo.processInfo.arguments.contains("--cast-focus-fixture") {
                 CastFocusFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--guide-navigation-fixture") {
-                GuideNavigationFixture()
+                if ProcessInfo.processInfo.arguments.contains("--guide-horizontal-route") {
+                    GuideHorizontalRouteFixture()
+                } else {
+                    GuideNavigationFixture(
+                        showsLongProgramme: ProcessInfo.processInfo.arguments.contains("--guide-long-programme"),
+                        showsLoopRun: ProcessInfo.processInfo.arguments.contains("--guide-loop-run"),
+                        showsUpToNow: ProcessInfo.processInfo.arguments.contains("--guide-up-now"),
+                        benchmarksPagingDuration: ProcessInfo.processInfo.arguments.contains("--guide-paging-duration")
+                    )
+                }
             } else if ProcessInfo.processInfo.arguments.contains("--channel-identity-fixture") {
                 PlozzChannelIdentityFixture()
             } else if ProcessInfo.processInfo.arguments.contains("--library-channel-actions") {

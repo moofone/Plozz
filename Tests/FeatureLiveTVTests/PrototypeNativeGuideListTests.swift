@@ -8,7 +8,94 @@ import XCTest
 
 @MainActor
 final class PrototypeNativeGuideListTests: XCTestCase {
-    private typealias Guide = PrototypeNativeGuideList<Int, Text>
+    private typealias Guide = PrototypeNativeGuideList<Int, Text, Text>
+
+    private func list(rows: [LiveTVGuideRowID], scroll: PrototypeGuideScrollController,
+                      initialOffset: CGFloat = 0, render: @escaping (LiveTVGuideRowID) -> Text) -> Guide {
+        Guide(rows: rows, scrollController: scroll, scrolled: { _, _ in }, revision: { _ in 0 },
+              timelineWidth: 5_000, pinnedWidth: 140, initialTimelineOffset: initialOffset,
+              stationaryContent: render, scrollingContent: { _ in Text("Programme") })
+    }
+
+    func testOversizedPressStepsToEitherEndWithoutPassingIt() {
+        for rtl in [false, true] {
+            let geometry = PrototypeGuideHorizontalGeometry(width: 900, pinnedWidth: 150, timelineWidth: 4_500, isRTL: rtl)
+            let range: ClosedRange<CGFloat> = 200...2_000
+            XCTAssertEqual(geometry.reveal(range, at: 0, forward: true), 200)
+            XCTAssertEqual(geometry.oversizedStep(for: range, at: 200, forward: true), 950)
+            XCTAssertEqual(geometry.oversizedStep(for: range, at: 950, forward: true), 1_250)
+            XCTAssertNil(geometry.oversizedStep(for: range, at: 1_250, forward: true))
+            XCTAssertEqual(geometry.oversizedStep(for: range, at: 1_250, forward: false), 500)
+            XCTAssertEqual(geometry.oversizedStep(for: range, at: 500, forward: false), 200)
+            XCTAssertNil(geometry.oversizedStep(for: range, at: 200, forward: false))
+            XCTAssertEqual(geometry.reveal(range, at: 1_450, forward: false), 1_250)
+            XCTAssertNil(geometry.oversizedStep(for: 2_000...2_400, at: 1_250, forward: true))
+            XCTAssertEqual(geometry.reveal(2_000...2_400, at: 1_250, forward: true), 1_650)
+            XCTAssertEqual(geometry.reveal(2_000...2_400, at: 1_250, forward: true,
+                                           leavingViewportSizedItem: true), 2_000)
+            XCTAssertEqual(geometry.reveal(0...180, at: 200, forward: false), 0)
+            XCTAssertEqual(geometry.reveal(1_400...1_800, at: 1_250, forward: true), 1_250)
+            XCTAssertEqual(geometry.reveal(1_700...2_700, at: 1_250, forward: true), 1_950)
+            XCTAssertEqual(geometry.reveal(1_700...2_700, at: 2_250, forward: false), 1_700)
+            XCTAssertEqual(geometry.reveal(2_900...3_800, at: 1_250, forward: true), 2_000)
+            for logical: CGFloat in [0, 950, 1_250, geometry.maximumOffset] {
+                XCTAssertEqual(geometry.logical(geometry.physical(logical)), logical)
+            }
+        }
+    }
+
+    func testNativeJumpKeepsStationaryContentPinnedAndProgrammeGeometryFixed() throws {
+        for rtl in [false, true] {
+            let rows = (0..<200).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+            let scroll = PrototypeGuideScrollController()
+            let controller = Guide.Controller()
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1_920, height: 720))
+            window.rootViewController = controller
+            window.makeKeyAndVisible()
+            defer {
+                window.isHidden = true
+                Guide.dismantleUIViewController(controller, coordinator: ())
+            }
+            controller.view.frame = window.bounds
+            var environment = EnvironmentValues()
+            environment.layoutDirection = rtl ? .rightToLeft : .leftToRight
+            controller.update(list(rows: rows, scroll: scroll, initialOffset: 240) { Text($0.channelID) },
+                              environment: environment)
+            controller.view.layoutIfNeeded()
+            let collection = try XCTUnwrap(controller.collectionView)
+            let layout = try XCTUnwrap(collection.collectionViewLayout as? PrototypeGuideCollectionLayout)
+            let geometry = layout.horizontal
+            XCTAssertEqual(collection.contentOffset.x, geometry.physical(240), accuracy: 1)
+            scroll.scrollTo(rows[100], anchor: .center)
+            controller.view.layoutIfNeeded()
+            let y = collection.contentOffset.y
+            let path = IndexPath(item: 100, section: 0)
+            let cell = try XCTUnwrap(collection.cellForItem(at: path) as? Guide.Cell)
+            for offset: CGFloat in [500, 1_900, -100, 10_000] {
+                scroll.jump(toTimelineOffset: offset)
+                controller.view.layoutIfNeeded()
+                let x = geometry.physical(offset)
+                XCTAssertEqual(collection.contentOffset.x, x, accuracy: 1)
+                XCTAssertEqual(collection.contentOffset.y, y, accuracy: 1)
+                XCTAssertTrue(collection.cellForItem(at: path) === cell)
+                let station = try XCTUnwrap(cell.stationaryHost?.view)
+                let programme = try XCTUnwrap(cell.scrollingHost?.view)
+                XCTAssertEqual(station.convert(station.bounds, to: collection).minX, x, accuracy: 1)
+                let programmeFrame = programme.convert(programme.bounds, to: collection)
+                XCTAssertEqual(programmeFrame.minX, rtl ? 0 : 140, accuracy: 1)
+                XCTAssertEqual(programmeFrame.width, 5_000, accuracy: 1)
+                let clip = cell.scrollingClip.convert(cell.scrollingClip.bounds, to: collection)
+                if rtl { XCTAssertEqual(clip.maxX, x + geometry.viewport, accuracy: 1) }
+                else { XCTAssertEqual(clip.minX, x + geometry.pinnedWidth, accuracy: 1) }
+                XCTAssertLessThan(controller.children.count, 100)
+            }
+            // Native focus's implicit scroll requests may carry an x as well as y.
+            let finalX = collection.contentOffset.x
+            collection.contentOffset = CGPoint(x: geometry.physical(1_000), y: y + 60)
+            XCTAssertEqual(collection.contentOffset.x, finalX, accuracy: 1)
+            XCTAssertEqual(collection.contentOffset.y, y + 60, accuracy: 1)
+        }
+    }
 
     func testLayoutIncludesSectionHeadersAndOnlyReturnsIntersectingRows() throws {
         let layout = PrototypeGuideCollectionLayout()
@@ -56,9 +143,7 @@ final class PrototypeNativeGuideListTests: XCTestCase {
         let rows = (0..<100_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
         let scroll = PrototypeGuideScrollController()
         var renders = 0
-        let list = Guide(
-            rows: rows, scrollController: scroll, scrolled: { _, _ in }, revision: { _ in 0 }
-        ) { row in
+        let list = list(rows: rows, scroll: scroll) { row in
             renders += 1
             return Text(row.channelID)
         }
@@ -91,9 +176,7 @@ final class PrototypeNativeGuideListTests: XCTestCase {
         let rows = (0..<5_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
         let scroll = PrototypeGuideScrollController()
         var renders = 0
-        let list = Guide(
-            rows: rows, scrollController: scroll, scrolled: { _, _ in }, revision: { _ in 0 }
-        ) { row in
+        let list = list(rows: rows, scroll: scroll) { row in
             renders += 1
             return Text(row.channelID)
         }
@@ -132,6 +215,173 @@ final class PrototypeNativeGuideListTests: XCTestCase {
         environment.isEnabled = true
         environment.layoutDirection = .rightToLeft
         XCTAssertNotEqual(baseline, Guide.RowEnvironment(environment))
+    }
+
+    // MARK: Opening at a saved position
+
+    private func guide(
+        rows: [LiveTVGuideRowID], scroll: PrototypeGuideScrollController,
+        initial: PrototypeGuideListViewport?, reported: ((LiveTVGuideRowID, CGFloat) -> Void)? = nil
+    ) -> Guide {
+        Guide(
+            rows: rows, scrollController: scroll, scrolled: { _, _ in }, viewportChanged: reported,
+            initialViewport: initial, revision: { _ in 0 }, timelineWidth: 5_000, pinnedWidth: 140,
+            stationaryContent: { Text($0.channelID) }, scrollingContent: { _ in Text("Programme") }
+        )
+    }
+
+    func testFirstFrameIsAlreadyAtTheSavedViewportWithoutAnyScrollCommand() throws {
+        let rows = (0..<5_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+        let scroll = PrototypeGuideScrollController()
+        let controller = Guide.Controller()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1920, height: 720))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            Guide.dismantleUIViewController(controller, coordinator: ())
+        }
+        controller.view.frame = window.bounds
+        var reported: [(LiveTVGuideRowID, CGFloat)] = []
+        let initial = PrototypeGuideListViewport(row: rows[3_000], relativeOffset: 37)
+        let list = guide(rows: rows, scroll: scroll, initial: initial) { reported.append(($0, $1)) }
+        controller.update(list, environment: EnvironmentValues())
+        XCTAssertTrue(controller.collectionView.visibleCells.isEmpty,
+                      "update must not force layout or render cells before the native pass")
+        XCTAssertEqual(scroll.scrollCommandCount, 0)
+        controller.view.layoutIfNeeded()
+        let collection = controller.collectionView!
+        let cell = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 3_000, section: 0)))
+        XCTAssertEqual(cell.convert(cell.bounds, to: collection).minY - collection.bounds.minY, -37, accuracy: 0.5)
+        let visible = controller.collectionView.indexPathsForVisibleItems.map(\.item)
+        XCTAssertEqual(visible.min(), 3_000, "the first visible row is the saved anchor, not the top of the list")
+        XCTAssertFalse(visible.contains(0))
+        XCTAssertEqual(scroll.scrollCommandCount, 0)
+        XCTAssertTrue(scroll.isVisible(rows[3_000]))
+        XCTAssertFalse(scroll.isVisible(rows[0]))
+        let settled = expectation(description: "reported")
+        DispatchQueue.main.async { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
+        XCTAssertEqual(reported.last?.0, rows[3_000])
+        XCTAssertEqual(try XCTUnwrap(reported.last?.1), 37, accuracy: 0.5)
+        XCTAssertEqual(scroll.scrollCommandCount, 0)
+    }
+
+    /// The guide loads listings around the row `scrolled` reports. A list opened at a saved position must report that position,
+    /// not the top of the list it had before placement, or the rows on screen are never asked for.
+    func testASavedViewportIsReportedAsTheScrolledRow() throws {
+        let rows = (0..<5_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+        let scroll = PrototypeGuideScrollController()
+        let controller = Guide.Controller()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1920, height: 720))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            Guide.dismantleUIViewController(controller, coordinator: ())
+        }
+        controller.view.frame = window.bounds
+        var scrolled: [LiveTVGuideRowID?] = []
+        let list = Guide(
+            rows: rows, scrollController: scroll, scrolled: { row, _ in scrolled.append(row) }, viewportChanged: nil,
+            initialViewport: PrototypeGuideListViewport(row: rows[3_000], relativeOffset: 0), revision: { _ in 0 },
+            timelineWidth: 5_000, pinnedWidth: 140,
+            stationaryContent: { Text($0.channelID) }, scrollingContent: { _ in Text("Programme") }
+        )
+        controller.update(list, environment: EnvironmentValues())
+        // Report before the native pass places the list, as a SwiftUI update can.
+        let early = expectation(description: "early report")
+        DispatchQueue.main.async { early.fulfill() }
+        wait(for: [early], timeout: 2)
+        controller.view.layoutIfNeeded()
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.async { DispatchQueue.main.async { settled.fulfill() } }
+        wait(for: [settled], timeout: 2)
+        XCTAssertEqual(scrolled.last ?? nil, rows[3_000], "the scrolled row is the placed anchor")
+        XCTAssertEqual(scroll.scrollCommandCount, 0)
+    }
+
+    /// After a programmatic scroll the reported row is the new top row, read from layout geometry. A cell kept alive
+    /// off screen (UIKit keeps the focused one) must not hold the report, and the listings, at the old position.
+    func testAScrollReportsTheNewTopRow() throws {
+        let rows = (0..<5_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+        let scroll = PrototypeGuideScrollController()
+        let controller = Guide.Controller()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1920, height: 720))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            Guide.dismantleUIViewController(controller, coordinator: ())
+        }
+        controller.view.frame = window.bounds
+        var scrolled: [LiveTVGuideRowID?] = []
+        let list = Guide(
+            rows: rows, scrollController: scroll, scrolled: { row, _ in scrolled.append(row) }, viewportChanged: nil,
+            initialViewport: PrototypeGuideListViewport(row: rows[135], relativeOffset: 0), revision: { _ in 0 },
+            timelineWidth: 5_000, pinnedWidth: 140,
+            stationaryContent: { Text($0.channelID) }, scrollingContent: { _ in Text("Programme") }
+        )
+        controller.update(list, environment: EnvironmentValues())
+        controller.view.layoutIfNeeded()
+        scroll.scrollTo(rows[2_258], anchor: .top)
+        // Report before the collection lays out at the new offset, as the async report can.
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.async { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
+        XCTAssertEqual(scrolled.last ?? nil, rows[2_258])
+    }
+
+    func testListWithoutASavedViewportOrWithAnUnknownAnchorStartsAtTheTop() {
+        let rows = (0..<500).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+        for initial in [nil, PrototypeGuideListViewport(row: .init(channelID: "removed"), relativeOffset: 12)] {
+            let scroll = PrototypeGuideScrollController()
+            let controller = Guide.Controller()
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1920, height: 720))
+            window.rootViewController = controller
+            window.makeKeyAndVisible()
+            controller.view.frame = window.bounds
+            controller.update(guide(rows: rows, scroll: scroll, initial: initial), environment: EnvironmentValues())
+            controller.view.layoutIfNeeded()
+            XCTAssertEqual(controller.collectionView.contentOffset.y, 0)
+            XCTAssertEqual(controller.collectionView.indexPathsForVisibleItems.map(\.item).min(), 0)
+            XCTAssertEqual(scroll.scrollCommandCount, 0)
+            window.isHidden = true
+            Guide.dismantleUIViewController(controller, coordinator: ())
+        }
+    }
+
+    func testFullerLineupReplacingSavedRowsKeepsTheVisibleRowsInPlaceWithoutAScrollCommand() throws {
+        let all = (0..<5_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+        let saved = Array(all[2_980..<3_130])
+        let scroll = PrototypeGuideScrollController()
+        let controller = Guide.Controller()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1920, height: 720))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            Guide.dismantleUIViewController(controller, coordinator: ())
+        }
+        controller.view.frame = window.bounds
+        let initial = PrototypeGuideListViewport(row: all[3_000], relativeOffset: 37)
+        controller.update(guide(rows: saved, scroll: scroll, initial: initial), environment: EnvironmentValues())
+        controller.view.layoutIfNeeded()
+        XCTAssertEqual(controller.collectionView.indexPathsForVisibleItems.map(\.item).min(), 20)
+        let list = controller.collectionView!
+        let first = try XCTUnwrap(list.cellForItem(at: IndexPath(item: 20, section: 0)))
+        let y = first.convert(first.bounds, to: list).minY - list.bounds.minY
+        XCTAssertEqual(y, -37, accuracy: 0.5)
+        // The provider's lineup arrives and the saved position is dropped, as it is when the saved rows are replaced.
+        controller.update(guide(rows: all, scroll: scroll, initial: nil), environment: EnvironmentValues())
+        controller.view.layoutIfNeeded()
+        let full = try XCTUnwrap(list.cellForItem(at: IndexPath(item: 3_000, section: 0)))
+        XCTAssertEqual(full.convert(full.bounds, to: list).minY - list.bounds.minY, y, accuracy: 0.5)
+        XCTAssertEqual(controller.collectionView.indexPathsForVisibleItems.map(\.item).min(), 3_000)
+        XCTAssertEqual(scroll.scrollCommandCount, 0)
+        // Later replacements are ordinary: the offset is the viewer's, not held to an anchor.
+        controller.update(guide(rows: Array(all[0..<10]), scroll: scroll, initial: nil), environment: EnvironmentValues())
+        XCTAssertEqual(scroll.scrollCommandCount, 0)
     }
 }
 #endif

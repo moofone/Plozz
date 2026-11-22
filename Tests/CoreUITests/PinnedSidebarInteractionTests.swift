@@ -28,5 +28,19 @@ final class PinnedSidebarInteractionTests: XCTestCase {
         XCTAssertEqual(publications, 2)
         withExtendedLifetime(subscription) {}
     }
+
+    func testRailExpansionMirrorsTheShellAndRepeatsDoNotPublish() {
+        let interaction = PlozzPinnedSidebarInteraction()
+        var publications = 0
+        let subscription = interaction.objectWillChange.sink { publications += 1 }
+        XCTAssertFalse(interaction.railIsExpanded)
+        interaction.setRailExpanded(true)
+        interaction.setRailExpanded(true)
+        XCTAssertTrue(interaction.railIsExpanded)
+        interaction.setRailExpanded(false)
+        XCTAssertFalse(interaction.railIsExpanded)
+        XCTAssertEqual(publications, 2)
+        withExtendedLifetime(subscription) {}
+    }
 }
 #endif

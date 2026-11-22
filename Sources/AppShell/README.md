@@ -223,6 +223,15 @@ registry.
   effect. Native sidebar, tab, and profile controls remain available with their
   system appearance. Other scroll edges are unchanged.
 
+- **Compact Home hero top reflections soften into the status area.** The still-artwork
+  blur begins eight points below the 24-point top reflection seam, eases upward
+  through the seam, and becomes stronger toward the top. It filters only artwork,
+  not profile/mute controls, and does not add a material or tint. Bottom reflections,
+  stage geometry, landscape artwork and trailers remain unchanged. Reduced
+  transparency retains the sharp reflection. Detail heroes keep their sharp top
+  reflection and native navigation treatment; Home's added artwork blur must not
+  be applied there.
+
 - **iPad tabs and profile actions share the native top row.** Apply opaque
   navigation chrome inside each tab's `NavigationStack`, not around the stack:
   an outer background host prevents UIKit from integrating the navigation bar
@@ -234,11 +243,32 @@ registry.
   background is hidden for this item so it cannot merge or stretch the circle.
   No second glass button style is added. Photos, emoji, and symbols keep their
   original colors; reduced-transparency and pre-iOS 26 systems use the shared frosted surface.
-  Home keeps the native top scroll-edge blur behind the status bar while hiding
+  Home uses Apple's native scroll-edge effect, with no additional material, tint,
+  or custom blur mask. The system owns its rendering and extent. With a native
+  toolbar, `.soft` prevents a hard boundary on newer systems.
+  On compact horizontal layouts, Home's profile and trailer-mute actions
+  sit in the scrolling content, like the other browse-page actions. They overlay
+  the top of the hero below the status bar, or precede the rows when the hero is
+  disabled. The navigation bar is hidden there. Like other browse pages, the
+  scroll view respects the top safe area and uses the automatic edge treatment;
+  only the hero artwork extends upward behind the status bar. Trailer pause
+  thresholds use distance scrolled from the resting inset.
+  Empty/error pages retain their settings
+  entry, and regular-width and vertical toolbars retain native placement.
+  Reduced-transparency and Mac behavior remain unchanged. Home hides
   the regular-width tab-bar background so the hero stays visible behind that row.
   The individual native glass controls remain; other destinations and compact
   bottom-tab backgrounds retain their existing treatment. Search's collapsing
   title row does not clip the profile control's native pressed expansion.
+
+- **Detail navigation uses Apple's native top scroll-edge blur.** The detail
+  page hides the navigation-bar background while leaving the system scroll-edge
+  effect enabled. It adds no custom material or blur overlay; the system owns
+  the blur's strength and scrolling behavior. Reduced Transparency retains its
+  scroll-linked, non-blurred status-text fade. Native toolbar controls, Home's
+  blur and the bottom scroll edge are unchanged.
+  The destination owns its appearance rather than inheriting Home's toolbar
+  preference during a push.
 
 - **Mac rails fit complete cards plus a next-card preview.** Home, library
   recommendations, related titles, extras, episodes, and cast derive widths from
@@ -341,6 +371,14 @@ registry.
   grant export permission, including on a TV system user's first launch.
   Credential snapshots are per-system-user, and identity/authority fences reject
   stale captures, restoration and permission responses after account changes.
+  Channel capture and verified-account permission discovery perform their
+  Keychain reads and record encoding on a serial utility queue, not the UI
+  executor. These are fresh reads, not a credential/ownership cache. Before
+  publication they recheck ownership, credential material, current accounts,
+  household removals, cloud identity, authority, cancellation and intervening
+  consent/state mutations. Permission presentation remains main-actor owned.
+  Explicit sign-in, consent, restoration and account-reset writes retain their
+  existing synchronous commit boundaries.
   Only fresh account verification can admit publication; cached snapshots cannot
   reopen withdrawn admission. Account switches reverify identity after resetting
   admission, rather than authorizing new fences with a pre-reset lookup.

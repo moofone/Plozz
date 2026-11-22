@@ -48,6 +48,9 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
     #endif
     public var subtitlePresentationTime: TimeInterval { underlyingEngine.subtitlePresentationTime }
     public var supportsActivePictureAnalysis: Bool { underlyingEngine.supportsActivePictureAnalysis }
+    public var activePictureSourceID: UUID? {
+        hasSource && decoderGeneration == generation ? underlyingEngine.activePictureSourceID : generation
+    }
     public func sampleActivePicture() async -> VideoActivePictureState {
         guard hasPresentedVideoFrame else { return .unavailable }
         let stamp = generation
@@ -566,6 +569,7 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
     /// Playback Info reads the stream's variant, tracks and HLS logs off this.
     public var nowPlayingPlayer: AVPlayer? { underlyingEngine.nowPlayingPlayer }
     public var videoAspectRatio: Double? { underlyingEngine.videoAspectRatio }
+    public var decodedVideoHeight: Int? { underlyingEngine.decodedVideoHeight }
     public var audioTracks: [MediaTrack] { underlyingEngine.audioTracks }
     public var subtitleTracks: [MediaTrack] { underlyingEngine.subtitleTracks }
     public var currentAudioTrackID: Int? { underlyingEngine.currentAudioTrackID }

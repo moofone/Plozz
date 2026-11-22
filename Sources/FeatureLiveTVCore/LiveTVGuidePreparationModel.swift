@@ -166,7 +166,7 @@ public final class LiveTVGuidePreparationModel {
                 statuses[id]?.phase = .notConfigured
                 return
             }
-            if refresh { await context.provider.invalidateLiveTVGuideCache() }
+            if refresh || LiveTVGuideSnapshotWriter.takesForcedReimport() { await context.provider.invalidateLiveTVGuideCache() }
             try Task.checkCancellation()
             guard isCurrent(context, request: request) else { return }
             let catalog = try await context.provider.liveTVChannels()

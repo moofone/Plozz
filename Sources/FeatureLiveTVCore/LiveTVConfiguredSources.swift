@@ -27,7 +27,8 @@ enum LiveTVConfiguredSources {
                     tagline: channel.tagline, logoURL: channel.logoURL, streamURL: channel.streamURL,
                     logoNeedsDarkBackground: channel.logoNeedsDarkBackground,
                     guideID: channel.guideID, guideName: channel.guideName, httpHeaders: channel.httpHeaders,
-                    playlistSourceID: sourceID, language: channel.language, country: channel.country, groups: channel.groups
+                    playlistSourceID: sourceID, language: channel.language, country: channel.country, groups: channel.groups,
+                    guideLogoURL: channel.guideLogoURL
                 )
             },
             entryCount: playlist.entryCount, skippedEntryCount: playlist.skippedEntryCount,
@@ -47,11 +48,25 @@ enum LiveTVConfiguredSources {
             },
             matchedChannelCount: guide.matchedChannelCount, guideChannelCount: guide.guideChannelCount,
             programCount: guide.programCount, coverageStart: guide.coverageStart, coverageEnd: guide.coverageEnd,
-            matches: guide.matches, guideChannels: guide.guideChannels
+            matches: guide.matches, guideChannels: guide.guideChannels,
+            guideIcons: guide.guideIcons
         )
     }
 
+    /// The identifier a playlist channel gets in a scoped source (`scope(_:to:preservesChannelIDs:)`).
+    static func scopedChannelID(sourceID: String, channelID: String) -> String {
+        "iptv-source-\(digest(sourceID + "\u{1F}" + channelID))"
+    }
+
+    private static let hexDigits = Array("0123456789abcdef".utf8)
+
     private static func digest(_ value: String) -> String {
-        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+        var hex: [UInt8] = []
+        hex.reserveCapacity(64)
+        for byte in SHA256.hash(data: Data(value.utf8)) {
+            hex.append(hexDigits[Int(byte >> 4)])
+            hex.append(hexDigits[Int(byte & 0x0f)])
+        }
+        return String(decoding: hex, as: UTF8.self)
     }
 }

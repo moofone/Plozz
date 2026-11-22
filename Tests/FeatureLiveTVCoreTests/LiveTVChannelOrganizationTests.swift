@@ -31,21 +31,25 @@ final class LiveTVChannelOrganizationTests: XCTestCase {
     func testCategoryRulesSurviveEmptyCatalogAndApplyOnlyToTheSelectedSource() throws {
         let store = OrganizationStore()
         let model = LiveTVPrototypeModel(channels: [channel("one"), channel("two", sourceID: "other")], preferencesStore: store)
+        let numberingSaves = store.saves
+        XCTAssertEqual(numberingSaves, 1, "The two new channels are numbered in one save")
         XCTAssertTrue(model.setCategoryRule(.init(sourceID: "source", name: "News", visibility: .hidden, isFavorite: true)))
-        XCTAssertEqual(store.saves, 1)
+        XCTAssertEqual(store.saves, numberingSaves + 1)
         XCTAssertEqual(model.visibleChannels.map(\.id), ["two"])
         XCTAssertEqual(model.favoriteIDs, ["one"])
         XCTAssertTrue(store.value.favoriteIDs.isEmpty, "Category favorites are rules, not expanded catalog IDs")
         try model.replaceChannels([])
         XCTAssertEqual(model.categorySummaries.count, 1)
+        let savesBeforeRefresh = store.saves
         let restored = LiveTVPrototypeModel(
             channels: [channel("new"), channel("two", sourceID: "other")], preferencesStore: store
         )
         XCTAssertEqual(restored.visibleChannels.map(\.id), ["two"])
         XCTAssertEqual(restored.favoriteIDs, ["new"])
-        XCTAssertEqual(store.saves, 1, "Refresh must not save one preference per new channel")
+        XCTAssertEqual(store.saves, savesBeforeRefresh + 1, "Refresh must not save one preference per new channel")
         XCTAssertTrue(restored.setCategoryRule(.init(sourceID: "source", name: "News", visibility: .shown, isFavorite: true)))
-        XCTAssertEqual(restored.visibleChannels.map(\.id), ["new", "two"])
+        // "two" was numbered earlier, so it stays ahead of the new channel.
+        XCTAssertEqual(restored.visibleChannels.map(\.id), ["two", "new"])
     }
 
     func testRemovingCategoryFavoritePreservesIndividualFavoritesAndIndividualExclusions() throws {
@@ -126,8 +130,10 @@ final class LiveTVChannelOrganizationTests: XCTestCase {
         XCTAssertEqual(model.favoriteIDs.count, 10_000)
         XCTAssertEqual(model.guideChannels.filter { $0.section == .favorites }.count, 10_000)
         XCTAssertEqual(model.categorySummaries.first?.channelCount, 10_000)
-        XCTAssertEqual(store.saves, 1)
-        XCTAssertLessThan(try JSONEncoder().encode(store.value).count, 2_048)
+        XCTAssertEqual(store.saves, 2, "One save numbers the lineup; one saves the rule")
+        var rules = store.value
+        rules.stableChannelNumbers = .empty
+        XCTAssertLessThan(try JSONEncoder().encode(rules).count, 2_048)
         XCTAssertEqual(model.homeFavoriteChannelIDs.count, HomeLiveTVSnapshot.maximumCandidateCount)
     }
 

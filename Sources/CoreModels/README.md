@@ -110,6 +110,10 @@ language every other module speaks.
   here (e.g. `Account`, `Profile`) carry only non-secret metadata.
 - **Provider-agnostic.** No type here may assume Jellyfin- or Plex-specific
   behavior; the only provider seam is `MediaProvider`.
+- Provider-ID lookup preserves alias priority and the first nonempty normalized
+  spelling without rebuilding the whole ID map for each lookup. ASCII keys use
+  a byte-based fast path; other spellings retain the same Unicode normalization.
+  No cross-item cache or metadata truncation is involved.
 - **Collections are server-defined groups, not alternate title sources.**
   Collection identity stays scoped to the owning account and item ID, even when
   two groups share a catalogue collection ID or physical server. Library
@@ -313,6 +317,12 @@ a persisted, non-publishing placeholder until a replacement arrives or is added;
 `profilesForSync` excludes it so a restart cannot recreate the deleted record.
 Live TV and media-state captures also exclude `pendingSyncedDeletionProfileIDs`,
 including preserved fallback records, without erasing the temporary local data.
+Live TV's persisted profile-removal markers apply only while the profile remains
+absent from the current roster. A restored profile supersedes an older marker in
+both portable state and playlist-source sync; merely opening an unconfigured
+device must not delete its peer's sources. Pending-deletion placeholders remain
+excluded. Profile removal callers update the roster in the same synchronous
+lifecycle operation as recording the removal.
 The revisioned household Parental PIN moves to the first surviving profile rather
 than disappearing with its former anchor.
 
@@ -426,6 +436,14 @@ Transient `explicitVersionSelection` distinguishes a manual file choice from
 `explicitSourceSelection`, which can also mean a pinned server/library/edition.
 Source-only pins must not freeze a recommendation across inventory refreshes or
 the first-use mode choice.
+
+`SeriesTrackPreferenceStore` retains its existing profile-scoped storage key for
+compatibility, including profile transfer. It stores series audio/subtitles,
+movie audio, and explicit movie/series `VideoZoomPreference` choices. Zoom is a
+typed mode plus a clamped Custom percentage, never a detected picture rectangle.
+Missing zoom fields in older records leave track memory intact; automatic defaults
+and temporary capability fallbacks are not saved. Invalid stored data is logged
+and preserved rather than overwritten by a later preference write.
 
 ## Artwork and profile presentation
 

@@ -188,10 +188,12 @@ final class NightShiftModelTests: XCTestCase {
 
     /// `Duration`'s abbreviations, not hand-built "m"/"h" — those were English,
     /// and "1.5h" also assumed a period as the decimal separator.
+    /// The locale is pinned: the runner's own region changes the abbreviation (`en_CA` writes "45 mins").
     func testFadeLabel() {
-        XCTAssertEqual(NightShiftSettingsModel.fadeLabel(minutes: 45), "45 min")
-        XCTAssertEqual(NightShiftSettingsModel.fadeLabel(minutes: 60), "1 hr")
-        XCTAssertEqual(NightShiftSettingsModel.fadeLabel(minutes: 90), "1 hr, 30 min")
+        let english = Locale(identifier: "en_US")
+        XCTAssertEqual(NightShiftSettingsModel.fadeLabel(minutes: 45, locale: english), "45 min")
+        XCTAssertEqual(NightShiftSettingsModel.fadeLabel(minutes: 60, locale: english), "1 hr")
+        XCTAssertEqual(NightShiftSettingsModel.fadeLabel(minutes: 90, locale: english), "1 hr, 30 min")
     }
 
     func testFadeLabelUsesExplicitAppLocale() {

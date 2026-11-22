@@ -8,6 +8,7 @@ import CoreNetworking
 import FeatureSyncSetup
 import FeatureSyncCloud
 import FeatureWatchlistCore
+import FeatureLiveTVCore
 
 // MARK: - CloudSyncUIModel
 //
@@ -153,6 +154,10 @@ extension AppState {
         channels.append(Self.makeLiveTVSourceSyncChannel(
             bridge: appState.liveTVPortableSync?.sourceSync,
             stateFileURL: syncDir.appendingPathComponent("cloud-live-tv-sources-v1.sealed")
+        ))
+        channels.append(LiveTVChannelLogoRuntime.syncChannel(
+            stateFileURL: syncDir.appendingPathComponent("cloud-live-tv-logos-v1.json"),
+            publish: { [weak appState] in Task { await appState?.cloudSync?.publishLocalChanges() } }
         ))
         appState.observeLiveTVPortableSync()
         return CloudConfigSyncService(.init(
@@ -334,6 +339,7 @@ extension AppState {
             try providerCredentialSync.eraseLocalState()
             try TrackerTokenSyncBridge.eraseLocalTokens()
             try LiveTVSourceStorage.eraseAllSources()
+            try eraseLiveTVLastSeen(profilesModel.profiles.map(\.id))
             for id in profilesModel.profiles.map(\.id) {
                 guard await authorized() else { return .interrupted }
                 try await mediaAliasLedger.removeProfile(id)

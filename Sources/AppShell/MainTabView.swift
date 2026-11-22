@@ -7,6 +7,7 @@ import CoreUI
 import CrashReporting
 import FeatureHomeCore
 import FeatureHome
+import FeatureLiveTV
 import FeatureMusic
 import FeaturePlayback
 import MediaTransportCore
@@ -142,10 +143,11 @@ struct MainTabView: View {
             case .home:
                 switch activeLibraryNavigationDestination {
                 case .home, .library, .allLibraries: return true
-                case .watchlist, .discover, .search, .music, .settings: return false
+                case .watchlist, .upcoming, .discover, .search, .music, .settings: return false
                 case .liveTV: return false
                 }
             case .watchlist: return activeLibraryNavigationDestination == .watchlist
+            case .upcoming: return activeLibraryNavigationDestination == .upcoming
             case .discover: return activeLibraryNavigationDestination == .discover
             case .search: return activeLibraryNavigationDestination == .search
             case .liveTV: return activeLibraryNavigationDestination == .liveTV
@@ -157,7 +159,7 @@ struct MainTabView: View {
     }
 
     private enum MainTab: String {
-        case home, watchlist, discover, search
+        case home, watchlist, upcoming, discover, search
         case liveTV
         case music, settings
     }
@@ -413,6 +415,8 @@ struct MainTabView: View {
     /// type-checker's budget that one extra computed value in it fails the
     /// build outright.
     let homeRuntime: HomeTabRuntime
+    var upcomingAccounts: @MainActor () -> [ResolvedAccount] = { [] }
+    var upcomingWatchlist: @MainActor () -> [MediaItem] = { [] }
     let isAccountIncludedInActiveProfile: (String) -> Bool
     let onSetAccountIncluded: (String, Bool) -> Void
     let onSaveProfile: (ProfileDraft) -> Void
@@ -427,6 +431,7 @@ struct MainTabView: View {
     let onRemoveAccountEverywhere: (Account) -> Void
     var offersRemoveEverywhere: Bool = false
     let onRescanShare: (String) -> Void
+    var onRebuildLibraryIndex: (String) -> Void = { _ in }
     /// Lets Home poke the media shares on a timer, so content that arrives while
     /// the viewer sits there is noticed. Injected like `onRescanShare` rather than
     /// reached through an environment object.
@@ -775,6 +780,7 @@ struct MainTabView: View {
         switch destination {
         case .home, .library, .allLibraries: return .home
         case .watchlist: return .watchlist
+        case .upcoming: return .upcoming
         case .discover: return .discover
         case .search: return .search
         case .liveTV: return .liveTV
@@ -820,6 +826,7 @@ struct MainTabView: View {
         switch tab {
         case .home: return .home
         case .watchlist: return .watchlist
+        case .upcoming: return .upcoming
         case .discover: return .discover
         case .search: return .search
         case .liveTV: return .liveTV
@@ -928,7 +935,8 @@ struct MainTabView: View {
             discoveredAccountIDs: navigationStyleModel.discoveredAccountIDs,
             disabledLibraryKeys: homeVisibility.visibility.disabledKeys,
             hasDiscoverySearch: seer.isConfigured,
-            hasWatchlistItems: navigationStyleModel.hasWatchlistItems
+            hasWatchlistItems: navigationStyleModel.hasWatchlistItems,
+            hasWatchlistTitles: navigationStyleModel.hasWatchlistTitles
         )
     }
 
@@ -942,6 +950,9 @@ struct MainTabView: View {
     private func refreshWatchlistNavigation() {
         if let hasItems = watchlistHasItems() {
             navigationStyleModel.hasWatchlistItems = hasItems
+            navigationStyleModel.hasWatchlistTitles = upcomingWatchlist().contains {
+                $0.kind == .movie || $0.kind == .series
+            }
         }
     }
 
@@ -1157,6 +1168,7 @@ struct MainTabView: View {
                 onRemoveAccountEverywhere: onRemoveAccountEverywhere,
                 offersRemoveEverywhere: offersRemoveEverywhere,
                 onRescanShare: onRescanShare,
+                onRebuildLibraryIndex: onRebuildLibraryIndex,
                 onSignOutAll: onSignOutAll,
                 onResetToFirstRun: debugActions.resetToFirstRun,
                 onReviewSyncErasure: debugActions.reviewSyncErasure,
@@ -1205,16 +1217,18 @@ struct MainTabView: View {
             return HomeTab(
                 root: root,
                 accounts: accounts,
+                upcomingAccounts: upcomingAccounts,
+                upcomingWatchlist: upcomingWatchlist,
                 isProfileAuthorized: isLiveTVProfileAuthorized,
                 configuredServerCount: displayAccounts.count,
                 libraryPreferencesNamespace: liveTVPreferencesNamespace,
                 detailSnapshotCache: detailSnapshotCache,
                 authenticatedHTTPResolver: authenticatedHTTPResolver,
                 seer: seer,
-                activeSeerrIdentity: activeProfile.seerrRequestIdentity,
-                activeSeerrUserName: activeProfile.seerrUserName,
+                activeSeerrIdentity: seer.requestIdentity,
+                activeSeerrUserName: seer.requestAccountName,
                 confirmAdminRequest: profiles.count > 1
-                    && activeProfile.seerrRequestIdentity == .admin,
+                    && seer.needsAdminConfirmation,
                 homeVisibility: homeVisibility,
                 homeLayoutStore: homeLayoutStore,
                 homeContentStore: homeContentStore,
@@ -1288,10 +1302,10 @@ struct MainTabView: View {
                 detailSnapshotCache: detailSnapshotCache,
                 authenticatedHTTPResolver: authenticatedHTTPResolver,
                 seer: seer,
-                activeSeerrIdentity: activeProfile.seerrRequestIdentity,
-                activeSeerrUserName: activeProfile.seerrUserName,
+                activeSeerrIdentity: seer.requestIdentity,
+                activeSeerrUserName: seer.requestAccountName,
                 confirmAdminRequest: profiles.count > 1
-                    && activeProfile.seerrRequestIdentity == .admin,
+                    && seer.needsAdminConfirmation,
                 homeVisibility: homeVisibility,
                 behavior: subtitleBehaviorModel.settings,
                 style: subtitleStyleModel.style,
@@ -1403,6 +1417,10 @@ struct MainTabView: View {
             return AnyView(homeTabContent(
                 root: .discover, id: "\(homeScopeKey)|discover", isActive: isActive
             ))
+        case .upcoming:
+            return AnyView(homeTabContent(
+                root: .upcoming, id: "\(homeScopeKey)|upcoming", isActive: isActive
+            ))
         case .liveTV:
             return AnyView(LiveTVShellDestination(
                 isActive: isActive,
@@ -1445,6 +1463,11 @@ struct MainTabView: View {
             return AnyView(searchTabLabel)
         case .watchlist:
             return AnyView(watchlistTabLabel)
+        case .upcoming:
+            return AnyView(RootNavigationTabLabel(
+                title: navigationTitles(NavigationLibraryLayout.upcomingKey, default: Text("Upcoming")),
+                systemImage: "calendar", usesCompactSidebarText: navigationStyle == .sidebar
+            ))
         case .discover:
             return AnyView(RootNavigationTabLabel(
                 title: navigationTitles(NavigationLibraryLayout.discoverKey, default: Text("Discover")), systemImage: "sparkles",
@@ -1607,9 +1630,13 @@ struct MainTabView: View {
                 .allowsHitTesting(!showsLiveTV)
                 .accessibilityHidden(showsLiveTV)
 
-            RetainedLiveTVDestination(isActive: showsLiveTV) {
+            RetainedLiveTVDestination(
+                isActive: showsLiveTV,
+                preloads: activeNavigationDestinations.contains(.liveTV) && isLiveTVProfileAuthorized()
+            ) {
                 LiveTVShellDestination(
                     isActive: showsLiveTV,
+                    preloadsCatalog: activeNavigationDestinations.contains(.liveTV) && isLiveTVProfileAuthorized(),
                     profileID: activeProfile.id,
                     preferencesNamespace: liveTVPreferencesNamespace,
                     accountsProviders: accountsProviders,
@@ -1644,6 +1671,10 @@ struct MainTabView: View {
         case .discover:
             return AnyView(homeTabContent(
                 root: .discover, id: "\(homeScopeKey)|discover", isActive: true
+            ))
+        case .upcoming:
+            return AnyView(homeTabContent(
+                root: .upcoming, id: "\(homeScopeKey)|upcoming", isActive: true
             ))
         case .search:
             return AnyView(searchTabContent())
@@ -1823,6 +1854,19 @@ struct MainTabView: View {
                 }
             )
         }
+        #if DEBUG
+        .background {
+            LiveTVDebugRemoteOpenRouter {
+                guard activeNavigationDestinations.contains(.liveTV), isLiveTVProfileAuthorized() else { return false }
+                if navigationStyle == .tabBar {
+                    selectedTab.wrappedValue = .liveTV
+                } else {
+                    libraryNavigationSelection.wrappedValue = .liveTV
+                }
+                return true
+            }
+        }
+        #endif
         .background {
             HomeRequestDestinationRouter(
                 pendingPlay: homeRuntime.pendingPlay,
@@ -1918,6 +1962,7 @@ struct MainTabView: View {
             resumePrompt: $resumePrompt,
             pendingPlaylistOrigin: $pendingPlaylistOrigin,
             accounts: accounts,
+            metadataLanguage: { (profileSettings.appLanguageModel.language.locale ?? .current).identifier },
             networkFileResolver: networkFileResolver,
             authenticatedHTTPResolver: authenticatedHTTPResolver,
             offlinePlaybackResolver: offlinePlaybackResolver,
@@ -2067,6 +2112,16 @@ struct MainTabView: View {
             )
         }
         .mediaItemActionHandler(mediaItemActionHandler)
+        .liveTVGuideAutoUpdate(
+            accountIDs: accounts.map(\.account.id),
+            authorizationID: accountsProviders.liveTVAuthorizationID,
+            isAuthorized: activeNavigationDestinations.contains(.liveTV) && isLiveTVProfileAuthorized(),
+            namespace: liveTVPreferencesNamespace,
+            resolver: accountsProviders.liveTVProviderResolver(),
+            sources: LiveTVChannelLogoRuntime.serverSourcesLoader(
+                profileID: activeProfile.id, namespace: liveTVPreferencesNamespace
+            )
+        )
     }
 
     @MainActor

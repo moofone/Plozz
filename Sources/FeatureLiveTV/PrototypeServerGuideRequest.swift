@@ -7,7 +7,10 @@ struct PrototypeServerGuideRequest: Equatable {
         let reference: LiveTVServerChannelReference
     }
 
-    static let rowLimit = 12
+    /// Guide rows a full screen shows (at most 11.3 at the tvOS row height). The anchor is the top visible row and the window
+    /// starts 3 rows above it, so the request reaches one row past the bottom of the screen.
+    static let rowsOnScreen = 12
+    static let rowLimit = 3 + rowsOnScreen + 1
     let channels: [Channel]
     let from: Date
     let to: Date

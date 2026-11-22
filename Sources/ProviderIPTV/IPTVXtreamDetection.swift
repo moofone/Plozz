@@ -29,7 +29,8 @@ enum IPTVXtreamDetection {
             headers: credential.headers, guideURL: credential.explicitGuideURLs.first,
             additionalGuideURLs: Array(credential.explicitGuideURLs.dropFirst()),
             guideHeaders: credential.explicitGuideHeaders,
-            discoversPlaylistGuides: credential.automaticallyDiscoversGuides
+            discoversPlaylistGuides: credential.automaticallyDiscoversGuides,
+            extraGuideURLs: credential.extraGuideURLs
         )
     }
 

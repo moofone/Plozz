@@ -68,6 +68,8 @@ struct SettingsContext {
     let offersRemoveEverywhere: Bool
     /// Force a fresh scan + enrichment of a media share now (its account id).
     let onRescanShare: (String) -> Void
+    /// Clears an account's cached identity details and re-scans its library index.
+    var onRebuildLibraryIndex: (String) -> Void = { _ in }
     let onSignOutAll: () -> Void
     let plexHomeUsersFetcher: (String) async -> [PlexHomeUser]
     let onSelectPlexHomeUser: (String, PlexHomeUser?) -> Void

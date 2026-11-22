@@ -4,6 +4,9 @@ import CoreVideo
 import FeaturePlayback
 import SwiftUI
 import UIKit
+import os.signpost
+import ObjectiveC
+import CryptoKit
 @testable import FeatureLiveTV
 @testable import FeatureLiveTVCore
 @testable import AppShell
@@ -344,6 +347,7 @@ private struct MultiviewGuideFixture: View {
 }
 
 private enum LiveTVRootFixtureStorage {
+    static let testsInstantGuideEscape = ProcessInfo.processInfo.arguments.contains("--instant-guide-escape-fixture")
     static let preferences: LiveTVPreferencesStore = {
         let suite = "com.thatcube.Plozz.MultiviewGuideFixture"
         let defaults = UserDefaults(suiteName: suite)!
@@ -364,6 +368,7 @@ struct LiveTVRootFixture: View {
     @State private var hidesNavigation = false
     @State private var nativeSelection = NavigationRailDestination.liveTV
     @State private var nativeHandoff = NavigationDestinationFocusHandoff()
+    @State private var pinnedChrome = NavigationChromeModel()
     private var usesNativeFullscreen: Bool {
         !ProcessInfo.processInfo.arguments.contains("--inline-live-tv")
     }
@@ -384,7 +389,13 @@ struct LiveTVRootFixture: View {
 
     @ViewBuilder
     var body: some View {
-        if ProcessInfo.processInfo.arguments.contains("--multiview-native-sidebar") {
+        if ProcessInfo.processInfo.arguments.contains("--live-root-pinned-guide") {
+            NavigationRailShell(
+                profile: profiles.activeProfile, entries: [], destinations: [.home, .liveTV, .settings],
+                selection: $nativeSelection, onOpenProfileSwitcher: {}, chrome: pinnedChrome,
+                content: guide, contentDestination: .liveTV
+            )
+        } else if ProcessInfo.processInfo.arguments.contains("--multiview-native-sidebar") {
             NativeSidebarNavigation(
                 selection: nativeSelection, handoff: nativeHandoff,
                 content: TabView(selection: $nativeSelection) {
@@ -441,7 +452,10 @@ struct LiveTVRootFixture: View {
                 outputGroup: state.output, outputID: playback.paneID, isAudible: playback.isAudible,
                 countsAsWatching: playback.countsAsWatching, isMultiview: playback.isMultiview,
                 displayTransitionSettings: {
-                    PlaybackSettings(fadeOnDynamicRangeChange: false, fadeOnFrameRateChange: false)
+                    // An SDR stub with frame-rate fade enabled exercises the old exit-veil
+                    // eligibility without claiming a physical display-mode change.
+                    PlaybackSettings(fadeOnDynamicRangeChange: false,
+                                     fadeOnFrameRateChange: LiveTVRootFixtureStorage.testsInstantGuideEscape)
                 },
                 isAuthorized: playback.isAuthorized
             )
@@ -486,23 +500,28 @@ struct LiveTVRootFixture: View {
             }
         }
         .overlay(alignment: .top) {
-            TimelineView(.periodic(from: .now, by: 0.2)) { _ in
-                Text(verbatim: state.metrics)
-                    .font(.caption2)
-                    .accessibilityIdentifier("multiview-fixture-metrics")
-                    .accessibilityValue(state.engines.first?.motionWidths ?? "")
-                Text(hidesNavigation ? "Navigation hidden" : "Navigation visible")
-                    .accessibilityIdentifier("multiview-fixture-navigation")
-                if ProcessInfo.processInfo.arguments.contains("--motion-fixture") {
-                    Text(verbatim: "Picture motion")
-                        .accessibilityIdentifier("multiview-fixture-picture-motion")
-                        .accessibilityValue(state.engines.map(\.motionFrames).joined(separator: "|"))
+            if !GuideNavigationRecorder.enabled {
+                TimelineView(.periodic(from: .now, by: 0.2)) { _ in
+                    Text(verbatim: state.metrics)
+                        .font(.caption2)
+                        .accessibilityIdentifier("multiview-fixture-metrics")
+                        .accessibilityValue(state.engines.first?.motionWidths ?? "")
+                    Text(hidesNavigation ? "Navigation hidden" : "Navigation visible")
+                        .accessibilityIdentifier("multiview-fixture-navigation")
+                    if ProcessInfo.processInfo.arguments.contains("--motion-fixture") {
+                        Text(verbatim: "Picture motion")
+                            .accessibilityIdentifier("multiview-fixture-picture-motion")
+                            .accessibilityValue(state.engines.map(\.motionFrames).joined(separator: "|"))
+                    }
                 }
+                .padding(.top, 16)
+                .allowsHitTesting(false)
             }
-            .padding(.top, 16)
-            .allowsHitTesting(false)
         }
-        .background { MultiviewFocusDiagnostics() }
+        .background {
+            if GuideNavigationRecorder.enabled { GuideNavigationRecorder() }
+            else { MultiviewFocusDiagnostics() }
+        }
     }
 }
 
@@ -703,25 +722,51 @@ private struct MultiviewFocusDiagnostics: UIViewRepresentable {
 }
 
 private struct LiveTVRootFixtureSettings: LiveTVViewSettingsStoring {
-    func load() -> LiveTVViewSettings { .init(autoPreview: false, hasChosenAutoPreview: true) }
+    func load() -> LiveTVViewSettings {
+        .init(autoPreview: false, previewAfterWatching: !LiveTVRootFixtureStorage.testsInstantGuideEscape,
+              hasChosenAutoPreview: true)
+    }
     func save(_ settings: LiveTVViewSettings) {}
 }
 
 private struct LiveTVRootFixtureLoader: LiveTVSourceLoading {
     func loadPlaylist(from url: URL) async throws -> LiveTVPlaylistImport {
-        let channels = MultiviewFixtureCatalog.channels
+        let loops = ProcessInfo.processInfo.arguments.contains("--live-root-loop-run")
+        let channels = GuideNavigationRecorder.enabled ? (1...32).map {
+            let name = loops ? "24/7: Fixture row \($0)" : "Profile row \($0)"
+            return LiveTVPrototypeChannel(id: "row-\($0)", number: $0, name: name, category: "News",
+                                   symbol: "tv", accent: 0, source: .iptv, tagline: "",
+                                   streamURL: URL(string: "https://example.invalid/row-\($0).m3u8")!)
+        } : MultiviewFixtureCatalog.channels
         return LiveTVPlaylistImport(channels: channels, entryCount: channels.count, skippedEntryCount: 0)
     }
 
     func loadGuide(
         from url: URL, channels: [LiveTVPrototypeChannel], now: Date
     ) async throws -> LiveTVGuideImport {
+        if GuideNavigationRecorder.enabled {
+            let origin = LiveTVGuideClock.windowStart(for: now)
+            let slots = -2...26
+            let programs = channels.flatMap { channel in
+                slots.map { slot in
+                    LiveTVPrototypeProgram(id: "\(channel.id):\(slot)", channelID: channel.id,
+                        title: "\(channel.name) slot \(slot)", subtitle: "",
+                        start: origin.addingTimeInterval(Double(slot) * 1800),
+                        end: origin.addingTimeInterval(Double(slot + 1) * 1800))
+                }
+            }
+            return LiveTVGuideImport(programs: programs, matchedChannelCount: channels.count,
+                guideChannelCount: channels.count, programCount: programs.count,
+                coverageStart: origin.addingTimeInterval(-3600), coverageEnd: origin.addingTimeInterval(27 * 1800))
+        }
         let start = now.addingTimeInterval(-300)
         let end = now.addingTimeInterval(3_600)
         return LiveTVGuideImport(
             programs: channels.map {
                 LiveTVPrototypeProgram(
-                    id: "final-\($0.id)", channelID: $0.id, title: "Championship final",
+                    id: "final-\($0.id)", channelID: $0.id,
+                    title: LiveTVRootFixtureStorage.testsInstantGuideEscape
+                        ? "\($0.name) Championship final" : "Championship final",
                     subtitle: "Live coverage", start: start, end: end
                 )
             },
@@ -962,4 +1007,201 @@ private final class MultiviewFixtureEngine: LiveChannelEngine {
     func selectAudioTrack(_ track: MediaTrack?) {}
     func selectSubtitleTrack(_ track: MediaTrack?) {}
     func makeVideoOutputView() -> UIView { output }
+}
+
+/// In-memory timeline; snapshots are written between test phases, not per input/frame.
+private struct GuideNavigationRecorder: UIViewRepresentable {
+    nonisolated static var enabled: Bool {
+        ProcessInfo.processInfo.environment["PLOZZ_GUIDE_PROFILE_DIR"] != nil
+    }
+
+    func makeUIView(context: Context) -> Recorder { Recorder() }
+    func updateUIView(_ view: Recorder, context: Context) {}
+
+    @MainActor
+    final class Recorder: UIView {
+        static weak var active: Recorder?
+        private static let intercept: Void = {
+            let original = class_getInstanceMethod(UIApplication.self, #selector(UIApplication.sendEvent(_:)))!
+            let observed = class_getInstanceMethod(UIApplication.self, #selector(UIApplication.guideProfileSendEvent(_:)))!
+            method_exchangeImplementations(original, observed)
+        }()
+        private let dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["PLOZZ_GUIDE_PROFILE_DIR"]!)
+        private let signposts = OSLog(subsystem: "com.thatcube.Plozz.GuideProfile", category: .pointsOfInterest)
+        private let markTrace = ProcessInfo.processInfo.environment["PLOZZ_GUIDE_PROFILE_TRACE"] == "1"
+        private weak var collection: UICollectionView?
+        private var link: CADisplayLink?
+        private var pending: [String] = []
+        private var checkpointTimer: DispatchSourceTimer?
+        private static let fixtureIDs: [String: String] = {
+            func digest(_ value: String) -> String {
+                SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+            }
+            var ids: [String: String] = [:]
+            for n in 1...32 {
+                let row = "row-\(n)"
+                let scoped = "iptv-source-" + digest("fixture\u{1F}" + row)
+                ids[scoped] = row
+                ids[LiveTVPrototypeProgram.loopID(channelID: scoped)] = "\(row):loop"
+                for slot in -2...26 {
+                    ids["iptv-program-" + digest("fixture\u{1F}\(scoped):\(slot)")] = "\(row):\(slot)"
+                }
+            }
+            return ids
+        }()
+        private var target = "-"
+        private var lastNativeObject: ObjectIdentifier?
+        private var nativeSequence = 0
+        private var inputSequence = 0
+        private var observedFrame = -1
+
+        init() {
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            link?.invalidate()
+            link = nil
+            checkpointTimer?.cancel()
+            checkpointTimer = nil
+            NotificationCenter.default.removeObserver(self)
+            guard window != nil else { return }
+            Self.active = self
+            _ = Self.intercept
+            #if DEBUG
+            GuideNavigationProfileHook.focus = { [weak self] focus in self?.focused(focus) }
+            GuideNavigationProfileHook.verticalRoute = { [weak self] route in
+                guard let self else { return }
+                self.eventLine("vertical-route", "\(self.inputSequence)\t\(route)")
+            }
+            #endif
+            NotificationCenter.default.addObserver(self, selector: #selector(native(_:)),
+                name: UIFocusSystem.didUpdateNotification, object: nil)
+            let link = CADisplayLink(target: self, selector: #selector(frame(_:)))
+            self.link = link
+            link.add(to: .main, forMode: .common)
+            let requestURL = dir.appendingPathComponent("checkpoint-request")
+            let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            var lastRequest = ""
+            timer.schedule(deadline: .now(), repeating: .milliseconds(80), leeway: .milliseconds(25))
+            timer.setEventHandler { [weak self] in
+                guard let token = try? String(contentsOf: requestURL, encoding: .utf8),
+                      token != lastRequest else { return }
+                lastRequest = token
+                DispatchQueue.main.async { self?.checkpoint(token) }
+            }
+            checkpointTimer = timer
+            timer.resume()
+            try? "\(getpid())\t\(CACurrentMediaTime())\n".write(to: dir.appendingPathComponent("app-pid"), atomically: true, encoding: .utf8)
+        }
+
+        func presses(_ event: UIEvent) {
+            guard let event = event as? UIPressesEvent else { return }
+            for press in event.allPresses where press.type.rawValue <= UIPress.PressType.rightArrow.rawValue {
+                if press.phase == .began { inputSequence += 1 }
+                let name = ["up", "down", "left", "right"][press.type.rawValue]
+                eventLine("press", "\(inputSequence)\t\(name)\t\(press.phase.rawValue)\t\(press.timestamp)")
+                if markTrace { os_signpost(.event, log: signposts, name: "GuideInput", "%{public}d %{public}@ %{public}d", inputSequence, name, press.phase.rawValue) }
+            }
+        }
+
+        private func focused(_ focus: LiveTVGuideFocusTarget) {
+            let rawID: String
+            switch focus {
+            case .channel(let row, _):
+                rawID = row
+                target = "\(Self.fixtureIDs[row] ?? row):station"
+            case .channelContent(let row, _, _):
+                rawID = row
+                target = "\(Self.fixtureIDs[row] ?? row):gap"
+            case .program(_, let program, _):
+                rawID = program
+                target = Self.fixtureIDs[program] ?? program
+            }
+            eventLine("guide", "\(inputSequence)\t\(nativeSequence)\t\(target)\t\(rawID)")
+        }
+
+        @objc private func native(_ note: Notification) {
+            guard let window, let context = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext,
+                  let item = context.nextFocusedItem else { return }
+            nativeSequence += 1
+            lastNativeObject = ObjectIdentifier(item)
+            let bounds = focusBounds(item, in: window)
+            let owner = collection.map { list in itemChain(item).contains { $0 === list } }
+            eventLine("native", "\(inputSequence)\t\(nativeSequence)\t\(context.focusHeading.rawValue)\t\(type(of: item))\t\(owner == true ? "guide" : "other")\t\(bounds.midX)\t\(bounds.midY)")
+            if markTrace { os_signpost(.event, log: signposts, name: "GuideNativeFocus", "%{public}d %{public}d", inputSequence, nativeSequence) }
+        }
+
+        private func focusBounds(_ item: any UIFocusItem, in window: UIWindow) -> CGRect {
+            guard let root = window.rootViewController?.viewIfLoaded,
+                  let rect = NativeFocusRegion.frame(of: item, in: root) else { return .zero }
+            return root.convert(rect, to: window)
+        }
+
+        private func itemChain(_ item: any UIFocusItem) -> [any UIFocusEnvironment] {
+            var environment: (any UIFocusEnvironment)? = item
+            var chain: [any UIFocusEnvironment] = []
+            while let current = environment, chain.count < 24 {
+                chain.append(current)
+                environment = current.parentFocusEnvironment
+            }
+            return chain
+        }
+
+        @objc private func frame(_ link: CADisplayLink) {
+            guard let window else { return }
+            if collection?.window !== window {
+                func find(_ view: UIView) -> UICollectionView? {
+                    if let list = view as? UICollectionView,
+                       list.collectionViewLayout is PrototypeGuideCollectionLayout { return list }
+                    return view.subviews.lazy.compactMap(find).first
+                }
+                collection = find(window)
+            }
+            if let list = collection, let item = UIFocusSystem.focusSystem(for: window)?.focusedItem {
+                let chain = itemChain(item)
+                let inside = chain.contains { $0 === list }
+                let scroll = chain.lazy.compactMap { $0 as? UIScrollView }.first { $0 !== list }
+                let y = (list.layer.presentation() ?? list.layer).bounds.minY
+                let x = scroll.map { ($0.layer.presentation() ?? $0.layer).bounds.minX } ?? -1
+                let first = list.indexPathsForVisibleItems.map(\.item).min() ?? -1
+                let bounds = focusBounds(item, in: window).offsetBy(
+                    dx: scroll.map { $0.bounds.minX - x } ?? 0,
+                    dy: inside ? list.bounds.minY - y : 0)
+                let clip = list.convert(list.bounds, to: window).intersection(window.bounds)
+                let hClip = scroll.map { $0.convert($0.bounds, to: window).intersection(clip) } ?? clip
+                let visible = !(inside ? hClip : window.bounds).intersection(bounds).isEmpty && !bounds.isEmpty
+                let same = ObjectIdentifier(item) == lastNativeObject
+                eventLine("frame", "\(link.timestamp)\t\(link.targetTimestamp)\t\(inputSequence)\t\(nativeSequence)\t\(inside ? target : "other")\t\(visible && same ? 1 : 0)\t\(x)\t\(y)\t\(first)")
+                if markTrace, visible, same, observedFrame != nativeSequence {
+                    observedFrame = nativeSequence
+                    os_signpost(.event, log: signposts, name: "GuideVisibleFrame", "%{public}d %{public}d", inputSequence, nativeSequence)
+                }
+            }
+        }
+
+        private func eventLine(_ kind: String, _ payload: String) {
+            pending.append("\(kind)\t\(CACurrentMediaTime())\t\(payload)\n")
+        }
+
+        private func checkpoint(_ token: String) {
+            let batch = pending.joined()
+            pending.removeAll(keepingCapacity: true)
+            let root = dir
+            DispatchQueue.global(qos: .utility).async {
+                try? batch.write(to: root.appendingPathComponent("app-\(token).tsv"), atomically: true, encoding: .utf8)
+            }
+        }
+    }
+}
+
+private extension UIApplication {
+    @objc func guideProfileSendEvent(_ event: UIEvent) {
+        GuideNavigationRecorder.Recorder.active?.presses(event)
+        guideProfileSendEvent(event) // The original implementation after the fixture-only exchange.
+    }
 }

@@ -87,6 +87,17 @@ TVOS_SHOTS=(
   # of its own. Needs a *text* subtitle track: PGS (image) subtitles cannot be
   # restyled and the panel says so instead of showing the controls.
   "tv-subtitles|play?title=The%20Office&at=420&panel=subtitleStyle&pause=1|55"
+  # The Live TV browse screen (guide + hero), reached by the same tab request
+  # the shell uses. The app acks as soon as the tab is selected — before the
+  # guide has loaded channels — so this takes a fixed 25 s settle instead of
+  # waiting for stillness. It works on an already signed-in simulator (no
+  # --reset) provided Live TV is enabled for the active profile. To photograph
+  # the debug CA/US channel subset, launch with
+  #   PLOZZ_SHOTS_LAUNCH_ARGS="-PlozzLiveTVDebugCountryPrefixes CA,US"
+  # e.g. PLOZZ_SHOTS_LAUNCH_ARGS="-PlozzLiveTVDebugCountryPrefixes CA,US" \
+  #      ./tools/capture-shots.sh --no-build --only tv-live-browse
+  # Tab requests stay together at the end for the reason below.
+  "tv-live-browse|tab?name=liveTV|25"
   # Last on purpose. Switching tabs is performed by a different router than the
   # one that performs navigation, and each router acks independently — so a tab
   # request in the middle of the list would ack the *next* shot early. Nothing
@@ -306,11 +317,16 @@ capture_device() {
   local shots=("$@")
 
   xcrun simctl terminate "$udid" "$BUNDLE_ID" 2>/dev/null || true
+  # Optional extra launch arguments (word-split on purpose), e.g.
+  # PLOZZ_SHOTS_LAUNCH_ARGS="-PlozzLiveTVDebugCountryPrefixes CA,US".
+  # (Keep this comment above the env assignments: a comment between the
+  # backslash-continued lines would turn them into plain shell variables.)
+  # shellcheck disable=SC2086
   SIMCTL_CHILD_PLOZZ_SHOTS_NFS_HOST="$NFS_HOST" \
   SIMCTL_CHILD_PLOZZ_SHOTS_NFS_EXPORT="$NFS_EXPORT" \
   SIMCTL_CHILD_PLOZZ_SHOTS_NFS_NAME="$NFS_NAME" \
   SIMCTL_CHILD_PLOZZ_SHOTS_HOLD_CONTROLS=1 \
-  xcrun simctl launch "$udid" "$BUNDLE_ID" >/dev/null
+  xcrun simctl launch "$udid" "$BUNDLE_ID" ${PLOZZ_SHOTS_LAUNCH_ARGS:-} >/dev/null
 
   # The command channel lives in the app's own Documents directory, which the
   # host can write to directly — no entitlement, no port, and no "Open in Plozz?"

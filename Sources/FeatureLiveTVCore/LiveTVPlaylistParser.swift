@@ -48,7 +48,8 @@ public struct LiveTVPlaylistParser: Sendable {
     public static let maximumLineBytes = M3UPlaylistParser.maximumLineBytes
     private let parser: M3UPlaylistParser
 
-    public init(baseURL: URL? = nil) { parser = .init(baseURL: baseURL) }
+    /// Live TV never draws the playlist provider's logo, so `tvg-logo` is not read (no URL parse, none retained).
+    public init(baseURL: URL? = nil) { parser = .init(baseURL: baseURL, readsLogos: false) }
 
     public func parse(_ data: Data) throws -> LiveTVPlaylistImport {
         try LiveTVPlaylistImport(parser.parse(data))

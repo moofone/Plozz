@@ -108,10 +108,14 @@ public struct M3UPlaylistParser: Sendable {
 
     private let baseURL: URL?
     private let permitsAuthenticationHeaders: Bool
+    /// Whether `tvg-logo` / `logo` attributes are read into `logoURL`. Live TV never draws a playlist provider's logo, so its
+    /// import turns this off and skips the URL parse and the retained URL for every entry.
+    private let readsLogos: Bool
 
-    public init(baseURL: URL? = nil, permitsAuthenticationHeaders: Bool = false) {
+    public init(baseURL: URL? = nil, permitsAuthenticationHeaders: Bool = false, readsLogos: Bool = true) {
         self.baseURL = baseURL
         self.permitsAuthenticationHeaders = permitsAuthenticationHeaders
+        self.readsLogos = readsLogos
     }
 
     public func parse(_ data: Data) throws -> M3UPlaylistImport {
@@ -358,7 +362,7 @@ public struct M3UPlaylistParser: Sendable {
             }
             fallbackNumber += 1
             let tvgID = parser.clean(entry.attributes["tvg-id"])
-            let logoURL = (parser.clean(entry.attributes["tvg-logo"]) ?? parser.clean(entry.attributes["logo"]))
+            let logoURL = !parser.readsLogos ? nil : (parser.clean(entry.attributes["tvg-logo"]) ?? parser.clean(entry.attributes["logo"]))
                 .flatMap { parser.supportedURL($0, relativeTo: parser.baseURL) }
             let groups = parser.categoryNames(from: entry.attributes["group-title"] ?? defaultGroups)
             let groupDescription = groups.isEmpty ? "Other" : groups.joined(separator: " • ")

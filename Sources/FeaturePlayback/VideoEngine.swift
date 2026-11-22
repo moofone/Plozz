@@ -89,6 +89,9 @@ public protocol VideoEngine: AnyObject {
     func installSongTap() -> AsyncStream<SongTapChunk>?
     func removeSongTap()
     var supportsActivePictureAnalysis: Bool { get }
+    /// Stable through seeks and analysis resets; changes on source replacement or stop.
+    /// Nil disables retaining the last confirmed picture through unavailable samples.
+    var activePictureSourceID: UUID? { get }
     func sampleActivePicture() async -> VideoActivePictureState
     func stopActivePictureAnalysis()
     /// Optional association for system Now Playing; custom decoders use the
@@ -278,6 +281,10 @@ public protocol VideoEngine: AnyObject {
     /// instead of stretching them across the full window.
     var videoAspectRatio: Double? { get }
 
+    /// The height in pixels of the video actually being decoded now (the adaptive variant in use), or `nil` before one is.
+    /// Live TV records this to label a channel by what it really plays, not by what its name claims.
+    var decodedVideoHeight: Int? { get }
+
     // MARK: Tracks
 
     /// Selectable audio tracks for the active stream.
@@ -388,6 +395,9 @@ public protocol VideoEngine: AnyObject {
 }
 
 public extension VideoEngine {
+    /// Default: the independently probed height, when the engine has one.
+    var decodedVideoHeight: Int? { probedSourceFacts?.videoHeight.flatMap { $0 > 0 ? Int($0) : nil } }
+
     var canChangeDolbyVisionFELConversion: Bool { false }
     #if canImport(UIKit)
     var discMenu: DiscMenuPlaybackState? { nil }
@@ -396,6 +406,7 @@ public extension VideoEngine {
     func installSongTap() -> AsyncStream<SongTapChunk>? { nil }
     func removeSongTap() {}
     var supportsActivePictureAnalysis: Bool { false }
+    var activePictureSourceID: UUID? { nil }
     func sampleActivePicture() async -> VideoActivePictureState { .unsupported }
     func stopActivePictureAnalysis() {}
     var subtitlePresentationTime: TimeInterval { currentTime }

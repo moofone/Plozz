@@ -2316,6 +2316,71 @@ final class LiveTVPortableSyncTests: XCTestCase {
         })
     }
 
+    func testStableNumbersSyncAndTheEarliestAssignmentWinsWithoutSharingANumber() throws {
+        let deviceA = try makeFixture()
+        let deviceB = try makeFixture()
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        // The two devices assign independently: A numbers "shared" 1 first, B numbers its own channel 1 and "shared" 2 later.
+        let numbersA = LiveTVStableChannelNumbers.empty.assigning(orderedChannelIDs: ["shared", "only-a"], at: base)
+        let numbersB = LiveTVStableChannelNumbers.empty.assigning(
+            orderedChannelIDs: ["only-b", "shared"], at: base.addingTimeInterval(60))
+        try deviceA.preferences.save(LiveTVPreferences(stableChannelNumbers: numbersA))
+        try deviceB.preferences.save(LiveTVPreferences(stableChannelNumbers: numbersB))
+        let recordsA = try deviceA.adapter.capture(sourceStore: deviceA.sources, fallback: [:])
+        let recordsB = try deviceB.adapter.capture(sourceStore: deviceB.sources, fallback: [:])
+        XCTAssertEqual(recordsA.count, 2)
+
+        _ = try deviceB.adapter.apply(recordsA.mapValues(Optional.some), sourceStore: deviceB.sources)
+        let mergedB = try deviceB.preferences.load().stableChannelNumbers
+        XCTAssertEqual(mergedB.number(for: "shared"), 1, "The earlier assignment keeps its number")
+        XCTAssertEqual(mergedB.number(for: "only-a"), 2)
+        XCTAssertEqual(Set(mergedB.assignments.values.map(\.number)).count, 3, "No two channels share a number")
+
+        // Device A learns B's numbers through its next capture, with B's records as the cloud baseline.
+        _ = try deviceA.adapter.capture(sourceStore: deviceA.sources, fallback: recordsB)
+        let mergedA = try deviceA.preferences.load().stableChannelNumbers
+        XCTAssertEqual(mergedA, mergedB, "Both devices converge")
+
+        // The merged numbers publish as the device's records and apply back unchanged.
+        let published = try deviceB.adapter.capture(sourceStore: deviceB.sources, fallback: recordsA)
+        let sharedRecord = try LiveTVPortableRecord.decode(
+            try XCTUnwrap(published[recordKey(.channel, "shared").recordName]), key: recordKey(.channel, "shared"))
+        XCTAssertEqual(sharedRecord.channel?.number, 1)
+        XCTAssertEqual(sharedRecord.channel?.numberAssignedAt, Int(base.timeIntervalSince1970))
+    }
+
+    func testStableNumbersStayReservedWhenARecordHasNoNumberOrIsDeleted() throws {
+        let fixture = try makeFixture()
+        let numbers = LiveTVStableChannelNumbers.empty.assigning(
+            orderedChannelIDs: ["a"], at: Date(timeIntervalSince1970: 1_800_000_000))
+        try fixture.preferences.save(LiveTVPreferences(favoriteIDs: ["a"], stableChannelNumbers: numbers))
+        let key = recordKey(.channel, "a")
+        let unnumbered = try LiveTVPortableRecord(channel: .init(isFavorite: true)).encoded()
+        _ = try fixture.adapter.apply([key.recordName: unnumbered], sourceStore: fixture.sources)
+        XCTAssertEqual(try fixture.preferences.load().stableChannelNumbers, numbers)
+        _ = try fixture.adapter.apply([key.recordName: nil], sourceStore: fixture.sources)
+        XCTAssertEqual(try fixture.preferences.load().stableChannelNumbers, numbers)
+    }
+
+    func testStableNumbersStayLocalAndLoseNothingWithoutICloudSync() throws {
+        let fixture = try makeFixture(enabled: false)
+        let numbers = LiveTVStableChannelNumbers.empty.assigning(
+            orderedChannelIDs: ["a", "b"], at: Date(timeIntervalSince1970: 1_800_000_000))
+        try fixture.preferences.save(LiveTVPreferences(stableChannelNumbers: numbers))
+        let baseline = [recordKey(.channel, "a").recordName: try LiveTVPortableRecord(channel: .init(
+            number: 9, numberAssignedAt: 1)).encoded()]
+        XCTAssertEqual(try fixture.adapter.capture(sourceStore: fixture.sources, fallback: baseline), baseline)
+        _ = try fixture.adapter.apply(baseline.mapValues(Optional.some), sourceStore: fixture.sources)
+        XCTAssertEqual(try fixture.preferences.load().stableChannelNumbers, numbers)
+    }
+
+    func testPortableNumberFieldsMustComeTogetherAndStayInRange() throws {
+        let key = recordKey(.channel, "a")
+        XCTAssertThrowsError(try LiveTVPortableRecord(channel: .init(number: 3)).validate(key: key))
+        XCTAssertThrowsError(try LiveTVPortableRecord(channel: .init(number: 0, numberAssignedAt: 1)).validate(key: key))
+        XCTAssertNoThrow(try LiveTVPortableRecord(channel: .init(number: 3, numberAssignedAt: 1)).validate(key: key))
+    }
+
     private func recordKey(_ kind: LiveTVPortableRecordKey.Kind, _ id: String) -> LiveTVPortableRecordKey {
         .init(profileID: profileID, kind: kind, entityID: id)
     }

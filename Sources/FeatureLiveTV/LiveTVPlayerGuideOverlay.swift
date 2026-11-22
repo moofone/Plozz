@@ -26,7 +26,7 @@ struct LiveTVPlayerGuideOverlay: View {
     @State private var focusedProgram: LiveTVPrototypeProgram?
     @State private var hasFocus = false
     @State private var guideOffset: TimeInterval = 0
-    @State private var timeAnchor = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970 / 1_800) * 1_800)
+    @State private var timeAnchor = LiveTVGuideClock.windowStart(for: Date())
     @State private var timelineOffset: CGFloat = 0
     @State private var restoring: Bool
     #if os(iOS)

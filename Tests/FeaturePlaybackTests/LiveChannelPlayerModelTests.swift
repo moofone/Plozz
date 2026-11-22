@@ -1131,6 +1131,145 @@ final class LiveChannelPlayerModelTests: XCTestCase {
         XCTAssertEqual(engine.stopCount, 1)
     }
 
+    // MARK: - Audio plays, no frame decodes (REPORT-16944)
+
+    /// An engine that plays audio, reports a video track, and never presents a frame.
+    private func makeAudioOnlyDecodingEngine(codec: String? = "avc1") -> LiveEngineSpy {
+        let engine = LiveEngineSpy()
+        engine.liveSnapshot = LiveChannelEngineSnapshot(
+            phase: .playing, firstFrameReady: false, position: 20, bufferedPosition: 30,
+            seekableRange: 10...30, behindLiveSeconds: 10, route: .nativeHLS
+        )
+        engine.liveVideoCodecName = codec
+        engine.supportsLiveSoftwareDecode = true
+        return engine
+    }
+
+    /// Audio position `seconds` after the first sample, on the model's clock.
+    private func observe(
+        _ model: LiveChannelPlayerModel, _ engine: LiveEngineSpy, _ clock: LiveTestClock, at seconds: TimeInterval
+    ) {
+        engine.liveSnapshot.position = 20 + seconds
+        clock.now = seconds
+        model.refreshFromEngine()
+    }
+
+    func testAudioPlayingWithoutFirstFrameRetriesWithSoftwareDecodeOnce() async {
+        let clock = LiveTestClock()
+        let engine = makeAudioOnlyDecodingEngine()
+        let model = makeModel(engine: engine, clock: clock)
+        defer { model.stop() }
+        await model.start()
+        XCTAssertEqual(engine.liveDecodeHint, .automatic)
+
+        for second in [0.0, 1, 3, 5] { observe(model, engine, clock, at: second) }
+        XCTAssertNil(model.requestRetune(), "nothing is scheduled before 6 s of audio")
+        XCTAssertEqual(engine.liveLoads, 1)
+
+        observe(model, engine, clock, at: 6)
+        await model.requestRetune()?.value
+        XCTAssertEqual(engine.liveLoads, 2, "exactly one reload")
+        XCTAssertEqual(engine.liveDecodeHint, .software)
+        XCTAssertEqual(engine.stopCount, 0)
+        XCTAssertFalse(model.phase.isInterrupted)
+    }
+
+    func testNoVideoAfterSoftwareRetryFailsWithVideoNotDecodedAndCodec() async {
+        let clock = LiveTestClock()
+        let engine = makeAudioOnlyDecodingEngine(codec: "avc1")
+        let model = makeModel(engine: engine, clock: clock)
+        defer { model.stop() }
+        await model.start()
+        observe(model, engine, clock, at: 0)
+        observe(model, engine, clock, at: 6)
+        await model.requestRetune()?.value
+        XCTAssertEqual(engine.liveLoads, 2)
+
+        // The retry's own evidence starts from the audio position its load began at (26).
+        observe(model, engine, clock, at: 7)
+        observe(model, engine, clock, at: 11)
+        XCTAssertFalse(model.phase.isInterrupted, "the retry gets its own 6 s")
+        observe(model, engine, clock, at: 12)
+        XCTAssertEqual(model.phase, .failed(.videoNotDecoded(codec: "avc1")))
+        XCTAssertEqual(engine.stopCount, 1)
+        XCTAssertEqual(engine.liveLoads, 2, "never a second retry")
+        XCTAssertEqual(model.failureReport?.failure, .videoNotDecoded(codec: "avc1"))
+    }
+
+    func testEngineWithoutSoftwareDecodeFailsWithoutRetry() async {
+        let clock = LiveTestClock()
+        let engine = makeAudioOnlyDecodingEngine(codec: "hevc")
+        engine.supportsLiveSoftwareDecode = false
+        let model = makeModel(engine: engine, clock: clock)
+        defer { model.stop() }
+        await model.start()
+        observe(model, engine, clock, at: 0)
+        observe(model, engine, clock, at: 6)
+        XCTAssertEqual(model.phase, .failed(.videoNotDecoded(codec: "hevc")))
+        XCTAssertEqual(engine.liveLoads, 1)
+        XCTAssertEqual(engine.stopCount, 1)
+    }
+
+    func testHealthyPlaybackNeverTriggersSoftwareRetry() async {
+        let clock = LiveTestClock()
+        let engine = makeAudioOnlyDecodingEngine()
+        engine.liveSnapshot.firstFrameReady = true
+        let model = makeModel(engine: engine, clock: clock)
+        defer { model.stop() }
+        await model.start()
+        for second in stride(from: 0.0, through: 60, by: 3) { observe(model, engine, clock, at: second) }
+        XCTAssertNil(model.requestRetune())
+        XCTAssertEqual(engine.liveLoads, 1)
+        XCTAssertEqual(model.phase, .playing)
+    }
+
+    func testAudioOnlyStreamWithoutVideoTrackIsNotARetryCandidate() async {
+        let clock = LiveTestClock()
+        let engine = makeAudioOnlyDecodingEngine(codec: nil)
+        let model = makeModel(engine: engine, clock: clock)
+        defer { model.stop() }
+        await model.start()
+        observe(model, engine, clock, at: 0)
+        observe(model, engine, clock, at: 20)
+        XCTAssertFalse(model.phase.isInterrupted)
+        XCTAssertEqual(engine.liveLoads, 1)
+    }
+
+    func testStartupTimeoutStillFiresAt30sWhenPositionNeverAdvances() async {
+        let clock = LiveTestClock()
+        let engine = makeAudioOnlyDecodingEngine()
+        engine.liveSnapshot.position = 20
+        let model = makeModel(engine: engine, clock: clock)
+        defer { model.stop() }
+        await model.start()
+        for second in [0.0, 10, 29] {
+            clock.now = second
+            model.refreshFromEngine()
+        }
+        XCTAssertFalse(model.phase.isInterrupted)
+        clock.now = 30
+        model.refreshFromEngine()
+        XCTAssertEqual(model.phase, .failed(.startupTimedOut))
+        XCTAssertEqual(engine.liveLoads, 1)
+    }
+
+    func testNewSourceResetsTheSoftwareRetry() async {
+        let clock = LiveTestClock()
+        let engine = makeAudioOnlyDecodingEngine()
+        let model = makeModel(engine: engine, clock: clock)
+        defer { model.stop() }
+        await model.start()
+        observe(model, engine, clock, at: 0)
+        observe(model, engine, clock, at: 6)
+        await model.requestRetune()?.value
+        XCTAssertEqual(engine.liveDecodeHint, .software)
+
+        await model.changeSource(
+            channelID: "next", streamURL: URL(string: "https://example.invalid/next.m3u8")!
+        )
+        XCTAssertEqual(engine.liveDecodeHint, .automatic, "a new channel starts on the engine's own route")
+    }
+
     func testStallAllowsEngineRecoveryButIsStillBounded() async {
         let clock = LiveTestClock()
         let engine = LiveEngineSpy()
@@ -1928,6 +2067,9 @@ final class LiveEngineSpy: LiveChannelEngine {
     var livePlaybackFailureDiagnostic: PlaybackFailureDiagnostic?
     var liveTelemetry: EngineLiveTelemetry?
     var isCapturingLiveFailureDiagnostic = false
+    var liveVideoCodecName: String?
+    var supportsLiveSoftwareDecode = false
+    var liveDecodeHint: LiveChannelDecodeHint = .automatic
     let outputView = UIView()
     var liveSnapshot = LiveChannelEngineSnapshot(
         phase: .playing, firstFrameReady: true, position: 100,

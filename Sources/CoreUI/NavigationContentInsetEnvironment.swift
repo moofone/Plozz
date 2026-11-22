@@ -169,6 +169,8 @@ public final class PlozzPinnedSidebarInteraction: ObservableObject {
     @Published public private(set) var heroHasFocus = false
     @Published public private(set) var searchResultsHaveFocus = false
     @Published public private(set) var openRequest = 0
+    /// Whether the shell's rail is expanded; the page reacts to the shell, never the reverse.
+    @Published public private(set) var railIsExpanded = false
 
     public init() {}
 
@@ -181,6 +183,28 @@ public final class PlozzPinnedSidebarInteraction: ObservableObject {
     public func setSearchResultsFocused(_ focused: Bool) {
         guard searchResultsHaveFocus != focused else { return }
         searchResultsHaveFocus = focused
+    }
+
+    /// True while a panel the page owns (Live TV's menus) is open, and until focus is back in the page after it closed. The shell
+    /// keeps its rail out of the focus chain meanwhile, so removing the panel's focused view cannot hand focus to the rail.
+    @Published public private(set) var pageHoldsFocus = false
+    /// The page's Back handler: closes the page's top panel and returns true, or returns false when the page has no panel open.
+    /// The shell asks it before it treats Back as its own. Not published: the shell reads it at the moment of the press.
+    public var pageBackHandler: (@MainActor () -> Bool)?
+
+    @MainActor
+    public func setPageHoldsFocus(_ holds: Bool) {
+        guard pageHoldsFocus != holds else { return }
+        pageHoldsFocus = holds
+    }
+
+    @MainActor
+    public func performPageBack() -> Bool { pageBackHandler?() ?? false }
+
+    @MainActor
+    public func setRailExpanded(_ expanded: Bool) {
+        guard railIsExpanded != expanded else { return }
+        railIsExpanded = expanded
     }
 
     @MainActor

@@ -139,6 +139,14 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         return sourceRange(for: engine.sourceVideoFormat)
     }
 
+    public var decodedVideoHeight: Int? {
+        if let size = engine.softwareDisplaySize ?? engine.currentAVPlayer?.currentItem?.presentationSize,
+           size.height.isFinite, size.height > 0 {
+            return Int(size.height.rounded())
+        }
+        return engine.sourceVideoHeight > 0 ? Int(engine.sourceVideoHeight) : nil
+    }
+
     public var videoAspectRatio: Double? {
         if let size = engine.softwareDisplaySize ?? engine.currentAVPlayer?.currentItem?.presentationSize,
            size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 {
@@ -151,6 +159,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
     }
 
     public var supportsActivePictureAnalysis: Bool { true }
+    public var activePictureSourceID: UUID? { outputLoadGeneration }
     #if DEBUG
     private var lastPictureTimeForTesting: Double?
     private(set) var pictureSampleCountForTesting = 0
@@ -1166,15 +1175,21 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         liveStartupBuffer = buffer
         return Self.liveLoadOptions(
             httpHeaders: httpHeaders, url: url, sourceFormat: sourceFormat,
-            buffer: buffer, losslessAudioEnabled: losslessAudioPreference()
+            buffer: buffer, losslessAudioEnabled: losslessAudioPreference(),
+            decodeHint: liveDecodeHint
         )
     }
+
+    public var liveVideoCodecName: String? { engine.sourceVideoCodecName }
+    public var supportsLiveSoftwareDecode: Bool { true }
+    public var liveDecodeHint: LiveChannelDecodeHint = .automatic
 
     nonisolated static func liveLoadOptions(
         httpHeaders: [String: String], url: URL? = nil,
         sourceFormat: PlozzigenLiveSourceProbe.Format? = nil,
         buffer: LivePlaybackBuffer = .default,
-        losslessAudioEnabled: Bool = LosslessAudioSettingsStore.defaultEnabled
+        losslessAudioEnabled: Bool = LosslessAudioSettingsStore.defaultEnabled,
+        decodeHint: LiveChannelDecodeHint = .automatic
     ) -> LoadOptions {
         let suffix = url?.pathExtension.lowercased() ?? ""
         let format = sourceFormat ?? (["ts", "m2ts", "mts"].contains(suffix)
@@ -1196,6 +1211,12 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         )
         options.foldsDolbyVisionFEL = false
         options.dolbyVisionHandling = .profile7MELOnly
+        if decodeHint == .software {
+            // AVPlayer decodes the bypass itself, so a decode-path preference only acts on a session
+            // the engine demuxes (AE#461): leave the bypass and decode with libavcodec.
+            options.nativeRemoteHLS = false
+            options.preferredDecodePath = .software
+        }
         return options
     }
 

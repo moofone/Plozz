@@ -250,7 +250,8 @@ extension LiveTVPrototypeChannel {
             id: id, number: number, name: name, category: category, symbol: symbol, accent: accent,
             source: source, tagline: tagline, logoURL: logoURL, streamURL: streamURL,
             logoNeedsDarkBackground: logoNeedsDarkBackground, guideID: guideID, guideName: guideName,
-            httpHeaders: httpHeaders, playlistSourceID: sourceID, language: language, country: country, groups: groups
+            httpHeaders: httpHeaders, playlistSourceID: sourceID, language: language, country: country, groups: groups,
+            guideLogoURL: guideLogoURL
         )
     }
 }

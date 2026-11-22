@@ -517,10 +517,7 @@ final class LiveTVPlaylistParserTests: XCTestCase {
             result.channels[0].streamURL?.absoluteString,
             "https://example.com/lists/stream/one.m3u8"
         )
-        XCTAssertEqual(
-            result.channels[0].logoURL?.absoluteString,
-            "https://example.com/logo.png"
-        )
+        XCTAssertNil(result.channels[0].logoURL, "the playlist provider's logo is not read")
         XCTAssertEqual(result.channels[0].guideID, "news.id")
         XCTAssertEqual(result.channels[0].guideName, "News Name")
         XCTAssertEqual(result.channels[0].httpHeaders["Referer"], "https://example.com/watch")
@@ -705,14 +702,18 @@ final class LiveTVPlaylistParserTests: XCTestCase {
         }
     }
 
-    func testKnownTransparentWhiteLogosKeepTheirContrastHint() throws {
+    func testProviderLogosAreNeitherParsedNorRetained() throws {
         let input = """
         #EXTM3U
-        #EXTINF:-1 tvg-logo="https://i.imgur.com/xP7Ehn8.png",Station
+        #EXTINF:-1 tvg-id="a" tvg-logo="https://i.imgur.com/xP7Ehn8.png",Station
         https://example.com/live.m3u8
+        #EXTINF:-1 logo="https://example.com/b.png",Other
+        https://example.com/other.m3u8
         """
-        let imported = try XCTUnwrap(LiveTVPlaylistParser().parse(input).channels.first)
-        XCTAssertTrue(imported.logoNeedsDarkBackground)
+        let imported = try LiveTVPlaylistParser().parse(input).channels
+        XCTAssertEqual(imported.count, 2)
+        XCTAssertTrue(imported.allSatisfy { $0.logoURL == nil && !$0.logoNeedsDarkBackground })
+        XCTAssertEqual(imported[0].guideID, "a", "other attributes are still read")
     }
 
     func testUsesPrimaryCategoryAndPreservesAllGroupLabels() throws {

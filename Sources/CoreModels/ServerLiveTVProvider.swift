@@ -24,7 +24,46 @@ public protocol ServerLiveTVProviding: Sendable {
     ) async throws -> [ServerLiveTVProgramme]
     /// Require revalidation on the next guide request, retaining usable saved listings.
     func invalidateLiveTVGuideCache() async
+    /// Bring a guide that is already saved up to date when the profile's automatic update
+    /// interval has passed, without per-channel requests. An account's saved lineup is
+    /// brought up to date on the same interval. Returns when either next falls due; nil
+    /// when there is nothing to keep up to date.
+    func updateSavedLiveTVGuide() async throws -> Date?
+    /// The same operation for either trigger. `.scheduled` is `updateSavedLiveTVGuide()`. `.manual` skips only the
+    /// due gate of guides that are already saved. Nil when the provider cannot refresh on demand.
+    func refreshSavedLiveTVGuide(trigger: SavedGuideRefreshTrigger) async throws -> SavedGuideRefreshReport?
+    /// The saved guide's stations and the programmes starting in the window, for the debug snapshot only
+    /// (`LiveTVGuideSnapshot`). Nil when the provider keeps no saved guide.
+    func liveTVGuideSnapshotRecords(from: Date, to: Date) async throws -> [LiveTVGuideSnapshot.GuideRecord]?
+    /// The same for the user-added extra guides, all in one list. Nil when the provider has none or none is saved.
+    func liveTVExtraGuideSnapshotRecords(from: Date, to: Date) async throws -> [LiveTVGuideSnapshot.GuideRecord]?
     func openLiveTVChannel(id: String) async throws -> any LiveTVStreamLease
+    /// DEBUG probe (`-PlozzLiveTVEPGProbe N`): what the panel's own per-channel EPG holds for one channel. Never throws, never
+    /// reports URLs, credentials or stream ids. The caller paces the calls.
+    func liveTVEPGProbe(channelID: String, limit: Int) async -> LiveTVEPGProbeResult
+}
+
+public struct LiveTVEPGProbeResult: Sendable, Equatable {
+    public enum Outcome: String, Sendable { case answered, failed, unsupported }
+    public let channelID: String
+    public let outcome: Outcome
+    public let listingCount: Int
+    /// The `epg_id` the panel returned with its listings, if any.
+    public let epgID: String?
+    /// The HTTP status class (2 for 2xx) of the answer; nil when no response arrived.
+    public let statusClass: Int?
+    public let elapsedMilliseconds: Int
+    public init(
+        channelID: String, outcome: Outcome = .answered, listingCount: Int = 0, epgID: String? = nil,
+        statusClass: Int? = nil, elapsedMilliseconds: Int = 0
+    ) {
+        self.channelID = channelID
+        self.outcome = outcome
+        self.listingCount = listingCount
+        self.epgID = epgID
+        self.statusClass = statusClass
+        self.elapsedMilliseconds = elapsedMilliseconds
+    }
 }
 
 public extension ServerLiveTVProviding {
@@ -32,6 +71,18 @@ public extension ServerLiveTVProviding {
     func cachedLiveTVCatalog() async throws -> ServerLiveTVCatalogSnapshot? { nil }
     func completeLiveTVGuideDiscovery() async throws -> Bool? { nil }
     func invalidateLiveTVGuideCache() async {}
+    func updateSavedLiveTVGuide() async throws -> Date? { nil }
+    func refreshSavedLiveTVGuide(trigger: SavedGuideRefreshTrigger) async throws -> SavedGuideRefreshReport? {
+        switch trigger {
+        case .scheduled: SavedGuideRefreshReport(nextDue: try await updateSavedLiveTVGuide(), transferredGuides: 0)
+        case .manual: nil
+        }
+    }
+    func liveTVGuideSnapshotRecords(from: Date, to: Date) async throws -> [LiveTVGuideSnapshot.GuideRecord]? { nil }
+    func liveTVEPGProbe(channelID: String, limit: Int) async -> LiveTVEPGProbeResult {
+        LiveTVEPGProbeResult(channelID: channelID, outcome: .unsupported)
+    }
+    func liveTVExtraGuideSnapshotRecords(from: Date, to: Date) async throws -> [LiveTVGuideSnapshot.GuideRecord]? { nil }
 
     func refreshLiveTVAvailability() async throws -> ServerLiveTVAvailability {
         try await liveTVAvailability()
@@ -130,6 +181,10 @@ public struct ServerLiveTVChannel: Hashable, Identifiable, Sendable {
     public let isRadio: Bool
     public let groups: [String]
     public let currentProgramme: ServerLiveTVProgramme?
+    /// The provider's own guide identity (`epg_channel_id` / `tvg-id`), name and country, when it sends them.
+    public let guideID: String?
+    public let guideName: String?
+    public let guideCountry: String?
 
     public init(
         id: String,
@@ -138,8 +193,14 @@ public struct ServerLiveTVChannel: Hashable, Identifiable, Sendable {
         imageURL: URL? = nil,
         isRadio: Bool = false,
         groups: [String] = [],
-        currentProgramme: ServerLiveTVProgramme? = nil
+        currentProgramme: ServerLiveTVProgramme? = nil,
+        guideID: String? = nil,
+        guideName: String? = nil,
+        guideCountry: String? = nil
     ) {
+        self.guideID = guideID
+        self.guideName = guideName
+        self.guideCountry = guideCountry
         self.id = id
         self.name = name
         self.number = number

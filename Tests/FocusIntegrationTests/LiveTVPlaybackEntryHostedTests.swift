@@ -52,7 +52,7 @@ final class LiveTVPlaybackEntryHostedTests: XCTestCase {
         XCTAssertFalse(store.load().hasChosenAutoPreview)
     }
 
-    func testPreviewStartsAfterDestinationAndSceneBecomeActive() async throws {
+    func testFocusedGuideMountsNoPictureAfterDestinationAndSceneBecomeActive() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive })
         let previous = scene.windows.first(where: \.isKeyWindow)
@@ -70,17 +70,13 @@ final class LiveTVPlaybackEntryHostedTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(1_000))
         XCTAssertNil(probe.input, "Inactive scenes must not auto-preview")
         probe.phase = .active
-        let deadline = ContinuousClock.now + .seconds(5)
-        while probe.input == nil, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        let input = try XCTUnwrap(probe.input, "A visible, focused guide must begin preview after activation")
-        XCTAssertFalse(input.isExpanded)
-        XCTAssertTrue(input.isPlaybackActive)
+        try await Task.sleep(for: .milliseconds(2_500))
+        // The glass guide is the flat guide until Watch: focus alone never mounts a picture.
+        XCTAssertNil(probe.input, "A focused guide must not start a preview")
         XCTAssertNotNil(UIFocusSystem.focusSystem(for: window)?.focusedItem)
     }
 
-    func testUnlockStartsPreviewAndAllowsExplicitWatch() async throws {
+    func testUnlockedGuideStillMountsNoPictureUntilWatch() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive })
         let previous = scene.windows.first(where: \.isKeyWindow)
@@ -100,26 +96,9 @@ final class LiveTVPlaybackEntryHostedTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(1_000))
         XCTAssertNil(probe.input, "Locked profiles must not preview")
         probe.authorized = true
-        var deadline = ContinuousClock.now + .seconds(5)
-        while probe.input == nil, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        let input = try XCTUnwrap(probe.input, "Unlocking must restore preview availability")
-        XCTAssertTrue(input.isAuthorized)
-        XCTAssertTrue(input.isPlaybackActive)
-        XCTAssertFalse(input.isExpanded)
+        try await Task.sleep(for: .milliseconds(2_500))
+        XCTAssertNil(probe.input, "Unlocking must not start a preview; only Watch mounts a picture")
         XCTAssertNotNil(UIFocusSystem.focusSystem(for: window)?.focusedItem)
-
-        // The player guide and the main guide both use LiveTVPrototypeView.tune.
-        input.tuneChannel(input.channel.id)
-        deadline = ContinuousClock.now + .seconds(5)
-        while probe.input?.isExpanded != true, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        let watching = try XCTUnwrap(probe.input)
-        XCTAssertTrue(watching.isExpanded)
-        XCTAssertTrue(watching.countsAsWatching)
-        XCTAssertEqual(watching.channel.id, input.channel.id)
     }
 }
 

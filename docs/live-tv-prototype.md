@@ -53,10 +53,78 @@ For past failures, attempted repairs and related tests, see the short
 [IPTV troubleshooting history](iptv-history.md). It is historical context,
 not a specification.
 
+## Channel-name presentation
+
+Settings > Live TV > **Clean channel names** is on by default and scoped to
+the active profile. Its live preview uses the same formatter as the guide and
+up to three distinct original names from the authorized loaded IPTV catalog,
+preferring names that cleanup changes. It excludes hidden and manually renamed
+channels, never fetches a playlist for the preview, and clears provider samples
+when access is revoked or sources are removed. Until eligible names are loaded,
+a fixed sample is explicitly labeled **Example**.
+It tidies IPTV display names only: whitespace, paired `##` / `**` wrappers,
+pipe separators, and recognized trailing spaced or superscript quality labels.
+Country/provider tags, regional names, channel numbers, `+1`, quality labels,
+and unknown text remain visible. `3840P`, for example, is retained as provider
+text, not interpreted as a verified resolution.
+
+Original imported names remain in the source catalog. Turning cleanup off restores
+them; explicit custom names always win. Plex, Jellyfin, Emby, and scheduled
+library channel names are unchanged. Guide matching, stream URLs/headers,
+channel IDs, favorites, and provider boundaries do not use the cleaned name.
+Equivalent-looking names still produce separate rows; this is not deduplication.
+
+The approach borrows separation and conservative token-boundary principles,
+not source code, from [IPTVnator's optional display cleanup][name-iptvnator]
+and [Lume's quality parsing][name-lume]. It deliberately avoids IPTVnator's
+broad prefix removal (`BBC: News` must not become `News`) and any interpretation
+of hash-wrapped names as non-playable headers. Naming conventions are heuristics,
+not a shared provider standard. Regression examples include decorations,
+regional feeds, numbers, timeshifts, ambiguous acronyms, and untouched custom names.
+
+[name-iptvnator]: https://github.com/4gray/iptvnator/blob/ff90ccb9402cfd53fdc4cbd2dfbbc6d0ede356de/libs/shared/m3u-utils/src/lib/strip-country-prefix.util.ts
+[name-lume]: https://github.com/bilipp/Lume/blob/7b1d324b0ae339a0a77099e9a7b4a54831affb63/Lume/Services/Player/ChannelQuality.swift
+
 For the reliability-first hardening priorities and explicitly deferred feature
 gaps, see [Live TV reliability](live-tv-reliability.md). It records finite
 provider cooldowns, safe connection-limit errors, controlled rolling-playback
 results, and remaining real-provider/long-session coverage gaps.
+
+## Channel logo sources
+
+A channel can have two logo sources. The provider playlist logo (`tvg-logo`, or the
+Xtream `stream_icon`) is `LiveTVPrototypeChannel.logoURL`. The matched XMLTV guide
+declares an optional icon on its `<channel>` element, kept as
+`LiveTVPrototypeChannel.guideLogoURL`.
+
+- The XMLTV parser reads `<channel><icon src>` in its metadata pass, with the same
+  validation as programme icons: http or https only, no user name or password, and
+  at most 4,096 characters. The first valid icon for a guide channel ID is kept, and
+  its bytes count toward the retained-text limit. Programme icons are unchanged and
+  stay programme artwork.
+- The icons are stored with the guide summary (`LiveTVGuideImport.guideIcons`) in the
+  indexed cache. Guide caches written before this field decode without icons, and the
+  parser cache version was raised so the next refresh fetches them. A refresh that
+  fails keeps the last good guide, as before.
+- Matching is unchanged. When the catalog is published, a channel matched to a guide
+  channel gains that guide channel's icon; unmatched channels do not.
+- The playlist provider's logo is never drawn, so Live TV does not read it: the M3U import
+  (`LiveTVPlaylistParser`, `readsLogos: false`) skips `tvg-logo`, and the server-source import
+  skips the channel image, so `logoURL` is `nil` for imported channels. Nothing is downloaded,
+  decoded, hashed or screened. What a channel draws, in order: the user's choice,
+  a TMDB match, a Wikidata/Commons match, the guide icon only when it is not a placeholder and
+  is measured crisp at the largest size Live TV draws (a vector, or at least 702 x 248 px along
+  its limiting axis; `LiveTVGuideIconMeasurer` downloads each icon once per session), else the
+  channel's name. A Plozz channel keeps its own artwork. `preferredLogoURL` (no model, nothing
+  measured) is therefore only a Plozz channel's artwork.
+
+Debug builds can check what a guide provides. Launch with `-PlozzDumpGuideIcons 1`
+(off by default); after a guide is published the app writes
+`<tmp>/guide-icons/summary.json` with the guide channel count, how many have icons,
+the icon hosts (never full URLs), how many matched channels gained an icon and how
+many of those use the playlist logo's URL. For up to 20 matched `CA|`/`US|` channels it
+also saves `<name>.guide.<ext>` and `<name>.playlist.<ext>` with pixel size, format,
+alpha and whether the two files are byte-identical.
 
 ## Diagnosing disappearing sources
 
@@ -168,12 +236,25 @@ Wide layouts use the category sidebar instead of duplicating that menu.
 **Add Source** in the source menu
 opens the existing authorized IPTV/playlist and media-server setup choices.
 **Search** then **More** share one native toolbar group on the directory and
-guide. A native fixed spacer separates Back from the category menu. Guide,
+guide. Back uses leading navigation placement before the category menu; a native
+fixed spacer gives it a separate floating surface. Picker cancellation retains
+its cancellation placement. Guide,
 filters, Multiviews, source management and the existing **Settings** destination
 are contextual actions in **More**; Live TV has no separate profile button.
 Other pages' profile shortcuts are unchanged. Category tiles use
 shorter minimum heights while retaining channel counts and Dynamic Type growth.
-Apple TV navigation is unchanged.
+On Apple TV, the categories sidebar places the same source menu above
+**Search**. It shows the current source, supports **All**, and opens the existing
+**Add Source** choices. Source filtering shares the mobile authorization and
+category-retention behavior without changing connected sources or active playback.
+Closing the menu returns focus to its button; entering the sidebar from the guide
+still lands on the selected category.
+
+On every platform, a single enabled source shows its name on the button and in
+the menu alongside **Add Source**, without a redundant **All** option. Disabled
+sources do not count. This is presentation-only: it does not rewrite the saved
+browse filter. **All** remains available for multiple enabled sources, or when
+Plozz library channels also contribute to the guide.
 
 On iOS/iPadOS 26 and later, the category directory and search results extend
 behind the transparent native navigation controls, retaining their resting
@@ -432,10 +513,15 @@ without relaxing the existing station/region checks or accepting name-only
 guesses. Existing URL accounts refresh once for the new mapping; imported files
 need reimporting to recover previously discarded metadata.
 
-Explicit XMLTV guides are ordered, with separate first-guide-origin headers;
-Xtream otherwise uses its native guide API, falling back to its `xmltv.php`
-for channels with empty, malformed or unsupported API listings. Successful
-native listings are retained. Working explicit guides remain preferred. If an
+Explicit XMLTV guides are ordered, with separate first-guide-origin headers.
+Xtream without an explicit guide uses the saved-index, whole-guide, then
+unavailable-batch native fallback ordering detailed below. A usable saved index
+or successful whole-guide answer, including an empty answer, does not trigger
+per-channel requests to fill gaps.
+The lineup's matching fingerprint is reused across batches for the same committed
+catalog revision; a replacement or explicit invalidation requires validation again.
+Freshness and requested-window coverage are still checked for every batch.
+Working explicit guides remain preferred. If an
 explicit Xtream guide returns HTTP 404, other configured guides are tried in
 order before one attempt at the account's standard `xmltv.php` for uncovered
 channels. A default URL already in the configured list is not requested again.
@@ -446,7 +532,10 @@ apply to playlist/file accounts, and does not replace a working but empty guide.
 An unavailable endpoint is not retried once per remaining channel in the batch.
 Authentication failures, rate limits, transport failures and ordinary server
 errors remain visible rather than triggering another request path; a failed
-XMLTV fallback also remains an error. Playlist-declared HTTP(S) guide URLs load
+XMLTV fallback also remains an error. After such a native failure the remaining
+channels in the batch are not requested. Listings already retrieved are returned
+with the failure, and unanswered channels stay pending for the next on-demand
+request. Playlist-declared HTTP(S) guide URLs load
 automatically, including guides hosted on another server, scheme, or port.
 Each guide is requested at its declared address without copying the playlist's
 query credentials. Account headers stay scoped to their configured origin;
@@ -465,7 +554,7 @@ ten seconds are returned as failures rather than retried ahead of the server's
 deadline. Cancellation, authentication, certificates, blocked redirects, missing
 endpoints, size limits and XML parse errors are not retried. Failed body transfers
 restart from byte zero; incomplete responses are never cached. Native Xtream
-API fallback selection is unchanged.
+API requests are not retried.
 Confirmed XMLTV 404s, malformed guides and transport byte-limit failures are reused
 only within the current provider's refresh,
 across its channel/window batches. Every new refresh can retry immediately;
@@ -540,7 +629,8 @@ an unchanged index conditionally. The legacy raw-response cache remains bounded
 to one document and at most 60 seconds; it is not a second persistent XML store.
 
 The existing guide-use/resume request path checks loaded IPTV windows again after
-12 hours, without adding a timer or a coverage-triggered polling heuristic.
+12 hours, without a coverage-triggered polling heuristic; the optional automatic
+update described below is the only timer.
 Existing listings stay visible during refresh and ordinary failures remain
 observable without advancing freshness. Missing windows load on demand. This
 policy does not promise background execution while the OS suspends the app.
@@ -554,6 +644,95 @@ in the requested window retains normal source freshness: an empty viewport is
 not a reason to repeatedly download the whole feed. Legacy zero-row indexes
 without a source programme count require one full rebuild to distinguish these
 cases. There is no new polling timer.
+
+For Xtream accounts without an explicit XMLTV URL, a guide request first ensures
+that a committed live lineup exists, then reads the saved `xmltv.php` index when
+it can answer without a guide download: indexed for the current lineup and window,
+within its reuse limit, and not awaiting an explicit refresh. A usable saved index
+answers the whole request, including gaps and empty results; it does not trigger
+`get_simple_data_table` requests. Otherwise the request tries the whole-guide
+`xmltv.php` endpoint before native listings. Only an unavailable batch endpoint
+(HTTP 404, 405 or 501) permits native fallback; that discovery is remembered in
+memory until guide invalidation, so later requests can skip the missing batch.
+Authentication, overload, transport and parsing failures do not enable native
+fallback. A successful batch response, even with no matching listings, also does
+not enable it.
+
+Native fallback uses stream IDs, not guide IDs (`epg_channel_id`): it sequentially
+requests each distinct caller-requested channel, including channels without guide
+IDs, never the unrequested lineup. An empty native listing table is remembered
+in memory for six hours (cleared by an explicit refresh). Merely receiving rows
+outside the requested window does not create that suppression.
+
+The saved XMLTV index's matching projection contains only lineup channels with
+guide IDs; it cannot supply XMLTV listings for channels without them. Renaming
+such channels does not change that projection. Native fallback can still supply
+their listings when the batch endpoint is unavailable. The lookup retains the
+prepared lineup, its digest, the decoded station document and normalised station
+names between requests.
+
+The earlier sample of one provider found no native listings absent from its guide
+file; that observation is not a guarantee for other providers. The reported
+few-millisecond answer for twelve channels describes a reused-index lookup, not
+visible Live TV opening, first download, parsing or full-lineup publication.
+PR #458's title claim of 13 seconds to under 200 ms lacks comparable real
+visible-open baseline/candidate evidence and is not an established speedup.
+The import replay and publication checks documented below cover their own
+workloads, not that end-to-end claim.
+
+Separately, Live TV can seed an empty destination from at most 150 last-seen
+server-channel rows in a sealed, disposable local file per profile. Restoration
+requires the currently authorized source, account, provider kind and stable
+server/viewer scope, including the Plex Home viewer; credential/session rotation
+alone does not change that scope. Legacy rows without viewer scope are ignored.
+Authorization is rechecked after asynchronous work. Categories and counts are
+derived from admitted rows under current filters, not restored whole-lineup
+aggregates; the authoritative lineup replaces these provisional rows. Cloud
+erasure and first-run reset on tvOS and iOS/iPadOS remove last-seen files and their
+keys without deleting unrelated catalog secrets. Erasure fences already-prepared
+saves so they cannot recreate the erased files or keys; newly admitted saves may
+persist later authorized rows.
+
+For an Xtream account using its own `xmltv.php`, the lineup and guide share one
+key, so a channel's guide ID alone decides its listings: HD, 4K and regional copies
+that carry the same ID all receive them, and the answer for a channel does not
+depend on which other channels were requested with it. Letter case and surrounding
+spaces in the ID are ignored, and when a provider declares a station under several
+spellings the channel's own is read first and another only if it has no listings in
+the window. Playlists and explicit guide
+addresses keep the stricter matcher, where channels sharing an ID must also share a
+name, because there the ID and the guide come from different parties.
+
+Settings > Live TV > Guide preferences > **Update guide automatically** (Off, or
+every 1, 3, 6, 12 or 24 hours; 12 by default; profile-scoped) sets how long a saved
+account guide is reused. A chosen interval can outlast the built-in 12-hour default
+but never a lifetime the server stated. While the app is in the foreground and the
+profile may use Live TV, a low-priority task brings guides that are *already saved*
+up to date once they are older than the interval: one conditional whole-guide
+request per interval and account, never per-channel requests, and never a first
+download for a profile that has not loaded that guide. An Xtream account's saved
+live lineup is refreshed by the same task on the same interval. Independently,
+reading a saved Xtream live lineup can start a background refresh once it is at
+least 24 hours old, while returning the committed channels immediately. Off
+disables the periodic task, not this stale-lineup refresh or on-demand guide
+loading. Playlist accounts and the film and series libraries keep the 30-minute
+rule. The periodic task starts one minute after launch, waits at least five
+minutes between checks, and backs off from 15 minutes after a failure. Off restores the on-demand behaviour
+described above.
+
+A guide request answered with HTTP 429, 502, 503 or 504 is a signal to back off.
+After any applicable in-request retries, the account makes no new guide transfer
+(per-channel or whole-guide) for five minutes, doubling on each further refusal up
+to one hour, or for a longer valid `Retry-After`, capped at 24 hours. The delay
+applies to 429 and 502/503/504 responses. Requests needing a transfer during that
+period fail with the provider's error without touching the network; reusable
+saved listings remain available. The deadline, refusal count, status and granted
+delay are persisted in the account's catalog and validated on restoration, so
+reopening the provider does not reset the cooldown. A successful guide transfer
+clears it. Explicit refresh bypasses the current deadline but retains the refusal
+count, so another refusal continues the exponential sequence rather than
+restarting at five minutes. Cancellation does not record a new refusal. Guide
+backoff does not affect playback or lineup requests.
 
 Xtream without an explicit XMLTV URL advertises per-channel guide loading.
 Startup discovery and guide preparation warm only the first 12 channels, then
@@ -2301,7 +2480,8 @@ the Release model is empty; imported listings never receive synthetic gap filler
 
 Account-backed IPTV guide batches write `IPTV_GUIDE` events to Recent Activity
 on both platforms. A random batch ID links the source mode, requested channel
-count, Xtream-to-XMLTV fallback counts (empty, malformed, or unavailable), and
+count, Xtream-to-XMLTV fallback counts (empty, malformed, or unavailable),
+channels whose whole window the saved index answered (`indexed`), and
 completion outcome. Up to six operation samples retain the first four, first
 failure, and last operation, with the omitted count reported explicitly.
 Samples identify `get_simple_data_table` or XMLTV, lookup/request/download/parse
@@ -2451,7 +2631,39 @@ It exercises native sidebar/top-bar presentation, actual dismissal, focus
 ownership, in-flight startup, channel changes and reuse of the engine's output
 view. It does not substitute for a physical Siri Remote usability pass.
 
+## Channel logos
+
+A channel's logo is the first of: the user's choice, the matched TMDB network, the
+provider's `logoURL`. TMDB wins over the provider whenever it matches.
+
+- **Network list.** `TMDbNetworkDirectory` (MetadataKit) keeps TMDB's keyless daily
+  `tv_network_ids_MM_DD_YYYY.json.gz` export in Application Support. It is refreshed
+  when older than 30 days (stepping back up to seven days when today's file is not
+  published) and a failed refresh keeps the last copy. The sheet's search needs no key.
+- **Matching.** `LiveTVTMDbLogoMatcher` ports the exploration rules: exact name, a
+  small alias table, then the name with city and feed words removed. A channel is
+  matched only above a confidence threshold with a clear lead, and the country of the
+  channel (`CA|` group, `CA EN:` prefix or declared country) filters TMDB's origin
+  country. Only IPTV channels are matched. TMDB network details and logos are
+  requested through the existing TMDB access (proxy, bundled token or the key in
+  Settings › Metadata) at most once per network, and stored.
+- **Storage.** `LiveTVChannelLogoStore` writes versioned JSON in Application Support,
+  keyed by playlist source and channel ID, shared by all profiles. Removing a source
+  removes its entries. A "no match" is forgotten when the list refreshes or TMDB access
+  is turned on; a TMDB failure stores nothing so the channel is tried again.
+- **Images.** `LiveTVLogoImageStore` keeps downloaded logo bytes in Application Support
+  (200 MB, least recently used first) so each logo is downloaded once.
+- **Change Logo…** In a channel's context menu opens a sheet to search TMDB networks
+  with previews, enter an image URL, or reset to automatic. Where the app has no
+  TMDB access the sheet simply omits the TMDB search, like other metadata; there is no
+  Live TV key prompt. Logos are never stretched.
+
 The [native Live TV regression fixture](../Tests/FeatureLiveTVRemoteTests/README.md)
 provides that scene-backed host, actual remote Search traversal and isolated
 source-onboarding navigation. Its independent project and inputs are committed;
 it does not require a configured server or download a channel feed.
+
+### Logo sync and the keyless Wikidata layer
+
+- **iCloud.** Logo overrides and resolved matches (TMDB and Wikidata, including "no match" results) sync across a household through the `liveTVLogosV1` channel. It uses the deployed non-secret `PlozzMediaStateV1Record` type in its own zone (`PlozzLiveTVLogosV1Zone`) on the one existing sync engine, so no schema deploy is needed. It is not per profile, follows the device's iCloud Sync setting (off means local only), and carries data only — never image bytes. A record is `logo:<source>:<channel>` (base64url parts), the newer `modifiedAt` wins, and Reset to Automatic deletes the record. Removing a source removes its records.
+- **Wikidata.** Without a TMDB key, or where TMDB has no match, channels in Canada and the US are matched by name against Wikidata items that have a Commons logo (P154). One SPARQL query per country, stored permanently in Application Support and refreshed every 30 days, paced at one request per 5 s with the Wikimedia User-Agent; a 429 waits 60 s and retries once. Each matched file's licence is read once from Commons and kept with the list. TMDB still wins when both match.

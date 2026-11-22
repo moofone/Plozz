@@ -5,9 +5,24 @@ import SwiftUI
 
 typealias PrototypeBrowseFocus = LiveTVGuideFocusTarget
 
+enum PrototypeGuidePlateRequest: Equatable {
+    case rememberedRow
+    case firstVisibleRow
+}
+
+#if DEBUG && os(tvOS)
+/// Installed only by the app-hosted navigation profiler, never by the product app.
+@MainActor enum GuideNavigationProfileHook {
+    static var focus: ((LiveTVGuideFocusTarget) -> Void)?
+    static var verticalRoute: ((String) -> Void)?
+}
+#endif
+
 struct PrototypeBrowser: View {
     let model: LiveTVPrototypeModel
     let imports: LiveTVPrototypeImportModel
+    /// Says a selected favourite filter's country is not in My Channels (shown when the filter matches nothing).
+    var lineupNotice: String?
     @Binding var selectedID: String?
     @Binding var selectedRowID: LiveTVGuideRowID?
     @Binding var railActive: Bool
@@ -22,6 +37,7 @@ struct PrototypeBrowser: View {
     let isPresented: Bool
     let isRestoringFocus: Bool
     let restoresPlaybackFocus: Bool
+    var guideFocusMayScroll = true
     let watchOrigin: LiveTVGuideRowID?
     let focusRestored: (Int) -> Void
     let tune: (LiveTVGuideRowID) -> Void
@@ -41,8 +57,15 @@ struct PrototypeBrowser: View {
     var loadLibraryGuide: ((Set<String>, DateInterval) -> Void)?
     var openLibraryItem: ((LibraryChannelItem) -> Void)?
     var leadingExit: (() -> Void)?
+    var plateRequest: Binding<PrototypeGuidePlateRequest?>?
     var isEmbeddedInPlayer = false
     var previewChannel: ((LiveTVGuideRowID) -> Void)?
+    /// tvOS Liquid Glass presentation hooks. With either set, the plate's `Menu`
+    /// and the cells' `.contextMenu` are not attached; nil keeps them.
+    /// Plate Select.
+    var onChannelSelect: ((LiveTVPrototypeChannel) -> Void)?
+    /// Select held on a cell, with the cell's screen frame (`nil` programme on a gap).
+    var onProgramHold: ((LiveTVPrototypeChannel, LiveTVPrototypeProgram?, CGRect) -> Void)?
     @State private var scrollID: LiveTVGuideRowID?
     @State private var pendingFocus: PrototypeBrowseFocus?
     @State private var restorationFallback: PrototypeBrowseFocus?
@@ -51,7 +74,6 @@ struct PrototypeBrowser: View {
     @State private var confirmedFocus: PrototypeBrowseFocus?
     @State private var mountedRows = Set<LiveTVGuideRowID>()
     @State private var restrictDirectionalEntry = true
-    @State private var usesNativeSpatialNavigation = false
     @State private var guideHours = Self.initialGuideHours
     @State private var guideWidth: CGFloat = 0
     @State private var timeline = PrototypeTimelineScroll()
@@ -59,15 +81,16 @@ struct PrototypeBrowser: View {
     @Environment(LiveTVGuidePreparationModel.self) private var guidePreparation: LiveTVGuidePreparationModel?
     #if os(tvOS)
     @State private var nativeScroll = PrototypeGuideScrollController()
+    @State private var browsesTimeline = false
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @State private var timelineJump: PrototypeGuideTimelineJump?
+    @Environment(\.prototypeGuideSheetPlan) private var sheetPlan
     @ScaledMetric(relativeTo: .subheadline) private var nativeRowHeight = PrototypeLayout.rowHeight
-    @ScaledMetric(relativeTo: .caption) private var nativeSectionFontSize = PrototypeLayout.sectionFontSize
     #endif
     @FocusState private var focused: PrototypeBrowseFocus?
     @FocusState private var recoveryFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
-    @Environment(\.layoutDirection) private var layoutDirection
 
     private struct GuideWorkRequest: Equatable {
         let window: PrototypeServerGuideRequest?
@@ -75,14 +98,14 @@ struct PrototypeBrowser: View {
     }
 
     var body: some View {
-        let guideRequest = serverGuideRequest
+        let guideRequest = guideOpenTraced("browse.serverGuideRequest") { serverGuideRequest }
         let cachedWindowRequest = cachedGuideRequest
         let generatedWindowRequest = libraryGuideRequest
         let preparationRevision = guidePreparation?.completionRevision ?? 0
         GeometryReader { geometry in
             let focusReturnTarget = returnTarget
             VStack(spacing: PrototypeLayout.rulerGap) {
-                if !model.guideChannels.isEmpty || isLoading {
+                if !guideOpenTraced("browse.guideChannels", { model.guideChannels.isEmpty }) || isLoading {
                     if geometry.size.width > 0 {
                         PrototypeTimelineReader(timeline: timeline) { offset in
                             PrototypeTimeRuler(
@@ -143,6 +166,8 @@ struct PrototypeBrowser: View {
                     } description: {
                         if model.guideOnly && imports.guidePhase == .loading {
                             Text("Matching channels appear as each guide source loads. Clear filters to browse all channels now.")
+                        } else if let lineupNotice {
+                            Text(lineupNotice)
                         } else {
                             Text("Try another search or clear your filters.")
                         }
@@ -156,22 +181,29 @@ struct PrototypeBrowser: View {
                     let gatesFocus = (railActive && restrictDirectionalEntry)
                         || isRestoringFocus || requiresContentFocusHandoff
                     PrototypeNativeGuideList(
-                        rows: model.guideRowIDs,
+                        rows: guideOpenTraced("browse.guideRowIDs") { model.guideRowIDs },
                         rowHeight: PrototypeLayout.rowHeight(for: geometry.size.width, scaledHeight: nativeRowHeight)
                             + PrototypeLayout.rowGap,
-                        sectionHeight: PrototypeLayout.guideSectionLabelHeight(fontSize: nativeSectionFontSize)
-                            + PrototypeLayout.smallGap + PrototypeLayout.sectionLabelGap,
+                        // The tvOS guide draws no section labels, so sections take no height.
+                        sectionHeight: 0,
                         scrollController: nativeScroll,
                         scrolled: { row, offset in
                             if scrollID != row { scrollID = row }
                             let fade = PrototypeScrollFade(before: offset)
                             if verticalFade != fade { verticalFade = fade }
                         },
+                        viewportChanged: isEmbeddedInPlayer ? nil : { row, relativeOffset in
+                            imports.noteGuideViewport(anchor: row, relativeOffset: Double(relativeOffset))
+                        },
+                        initialViewport: isEmbeddedInPlayer ? nil : imports.restoredGuideViewport.map {
+                            PrototypeGuideListViewport(row: $0.anchor, relativeOffset: CGFloat($0.relativeOffset))
+                        },
                         revision: { row in
                             model.guideEntry(for: row).map { entry in
                                 PrototypeGuideRowRevision(
                                     entry: entry,
-                                    showsSection: entry.startsSection && entry.section != model.guideChannels.first?.section,
+                                    showsSection: Self.showsSectionLabels
+                                        && entry.startsSection && entry.section != model.guideChannels.first?.section,
                                     programs: model.programs(for: row.channelID, from: guideStart, hours: guideHours),
                                     start: guideStart, hours: guideHours, now: model.now,
                                     width: geometry.size.width, gatesFocus: gatesFocus,
@@ -183,19 +215,42 @@ struct PrototypeBrowser: View {
                                     selectionAction: selectionAction,
                                     selectionMarked: selectedChannelIDs.contains(row.channelID),
                                     canHide: hideChannel != nil,
-                                    focusPolicy: rowFocusPolicy(for: row))
+                                    routesGlassPresentation: onChannelSelect != nil || onProgramHold != nil,
+                                    page: timeline.page)
                             }
                         },
-                        horizontalNavigation: useNativeNavigation,
-                        leadingExit: leadingExit
+                        leadingExit: !gatesFocus && !voiceOver ? leadingExit : nil,
+                        focusNow: plateRequest != nil && !gatesFocus && !voiceOver ? focusNowOnRow : nil,
+                        isAtNowBoundary: plateRequest != nil && !gatesFocus && !voiceOver ? isAtNowBoundary : nil,
+                        focusChannel: focusChannelPlate,
+                        focusEarlierSlot: plateRequest != nil && !gatesFocus && !voiceOver ? focusEarlierSlot : nil,
+                        didBrowseHorizontally: { browsesTimeline = true },
+                        focusAdjacentCurrent: !browsesTimeline && !voiceOver && !gatesFocus ? focusCurrentRow : nil,
+                        hasProgrammePlane: { row in
+                            !model.programs(for: row.channelID, from: guideStart, hours: guideHours).isEmpty
+                        },
+                        timelineWidth: PrototypeLayout.timelineContentWidth(for: geometry.size.width, span: guideSpan),
+                        pinnedWidth: PrototypeLayout.stationWidth(for: geometry.size.width) + PrototypeLayout.columnGap,
+                        initialTimelineOffset: timelineOffset,
+                        timelineJump: timelineJump,
+                        timelineDidScroll: timeline.scrolled
                     ) { row in
                         if let entry = model.guideEntry(for: row) {
-                            guideRow(
-                                entry, width: geometry.size.width, returnTarget: focusReturnTarget,
-                                scrollTo: nativeScroll.scrollTo)
-                                .padding(.bottom, PrototypeLayout.rowGap)
+                            let content = guideRow(entry, width: geometry.size.width, returnTarget: focusReturnTarget,
+                                                   scrollTo: nativeScroll.scrollTo)
+                            rowPlane(entry) { content.inPlane(.stationary) }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        }
+                    } scrollingContent: { row in
+                        if let entry = model.guideEntry(for: row) {
+                            let content = guideRow(entry, width: geometry.size.width, returnTarget: focusReturnTarget,
+                                                   scrollTo: nativeScroll.scrollTo)
+                            content.inPlane(.programmes)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         }
                     }
+                    // On the glass sheet the list holds whole rows only: it ends where the sheet's last row does.
+                    .frame(height: sheetPlan?.listHeight)
                     .verticalEdgeFadeMask(
                         fadeHeight: PrototypeLayout.verticalFade,
                         topStrength: verticalFade.leading, bottomStrength: 0)
@@ -203,16 +258,23 @@ struct PrototypeBrowser: View {
                         goToTop(scrollTo: nativeScroll.scrollTo, movesFocus: !railActive)
                     }
                     .task(id: isPresented && isRestoringFocus ? restoreFocusRequest : -1) {
-                        await restoreFocus(scrollTo: nativeScroll.scrollTo, width: geometry.size.width)
+                        await restoreFocus(
+                            scrollTo: nativeScroll.scrollTo, isVisible: nativeScroll.isVisible,
+                            width: geometry.size.width)
                     }
                     #else
                     ScrollViewReader { proxy in
                         ScrollView {
                             LazyVStack(spacing: PrototypeLayout.rowGap) {
                                 ForEach(model.guideChannels) { entry in
-                                    guideRow(entry, width: geometry.size.width, returnTarget: focusReturnTarget) {
-                                        proxy.scrollTo($0, anchor: $1)
+                                    rowPlane(entry) {
+                                        guideRow(entry, width: geometry.size.width, returnTarget: focusReturnTarget) {
+                                            proxy.scrollTo($0, anchor: $1)
+                                        }
                                     }
+                                    .id(entry.id)
+                                    .onAppear { mountRow(entry.id) }
+                                    .onDisappear { mountedRows.remove(entry.id) }
                                 }
                             }
                             .scrollTargetLayout()
@@ -273,34 +335,47 @@ struct PrototypeBrowser: View {
         }
         .onChange(of: guideStart) { _, _ in
             guideHours = PrototypeLayout.hoursCoveringTimelineOffset(timelineOffset, for: guideWidth)
+            refocusIfProgramLeftWindow()
+        }
+        .onChange(of: model.guideWindowStart) { old, new in
+            shiftScrolledTimeline(from: old, to: new)
         }
         .onChange(of: timelineOffset, initial: true) { _, value in
             // Now, guide time and bookmarks move the guide from outside.
             if abs(timeline.offset - value) >= 1 {
                 guideHours = max(guideHours, PrototypeLayout.hoursCoveringTimelineOffset(value, for: guideWidth))
-                timeline.offset = value
+                setTimelineOffset(value)
             }
         }
-        .padding(.leading, PrototypeLayout.guideInset)
-        #if os(iOS)
-        .padding(.top, isEmbeddedInPlayer ? 0 : PrototypeLayout.guideInset)
+        #if os(tvOS)
+        // The Liquid Glass guide fills its container edge to edge (plate at its
+        // leading edge, ruler at its top) and sits flat on the app background.
+        .background { PrototypeGuideSurface() }
+        .focusSection()
+        .onChange(of: plateRequest?.wrappedValue) { _, request in
+            guard let request else { return }
+            plateRequest?.wrappedValue = nil
+            guard isPresented, !isRestoringFocus, !railActive, !voiceOver else { return }
+            let row: LiveTVGuideRowID?
+            switch request {
+            case .rememberedRow:
+                row = selectedRowID.flatMap { model.guideEntry(for: $0)?.id } ?? nativeScroll.firstVisibleRow?()
+            case .firstVisibleRow:
+                row = nativeScroll.firstVisibleRow?()
+            }
+            if let row { focusChannelPlate(row) }
+        }
+        .onExitCommand(perform: openToolbar.map { action in
+            { if !isRestoringFocus, !TVBackConsumption.wasJustConsumed() { action() } }
+        })
         #else
-        .padding(.top, PrototypeLayout.guideInset)
-        #endif
+        .padding(.leading, PrototypeLayout.guideInset)
+        .padding(.top, isEmbeddedInPlayer ? 0 : PrototypeLayout.guideInset)
         .padding(.trailing, PrototypeLayout.guideTrailingInset)
         .background {
-            #if os(iOS)
             if !isEmbeddedInPlayer { PrototypeGuideSurface() }
-            #else
-            PrototypeGuideSurface()
-            #endif
         }
         .clipShape(PrototypeLayout.guideShape)
-        #if os(tvOS)
-        .focusSection()
-        .onExitCommand(perform: openToolbar.map { action in
-            { if !isRestoringFocus { action() } }
-        })
         #endif
         .onChange(of: confirmedFocus, initial: true) { _, target in
             hasFocus = target != nil
@@ -315,6 +390,7 @@ struct PrototypeBrowser: View {
                 }
                 selectedID = target.channelID
                 selectedRowID = target.rowID
+                if !isEmbeddedInPlayer { imports.noteGuideFocus(target.channelID) }
                 lastFocused = target
                 restrictDirectionalEntry = true
                 railActive = false
@@ -418,6 +494,15 @@ struct PrototypeBrowser: View {
         .onDisappear { hasFocus = false }
     }
 
+    /// The tvOS glass guide draws no section labels.
+    private static var showsSectionLabels: Bool {
+        #if os(tvOS)
+        false
+        #else
+        true
+        #endif
+    }
+
     private struct PrototypeGuideRowRevision: Equatable {
         let entry: LiveTVGuideChannel
         let showsSection: Bool
@@ -434,76 +519,147 @@ struct PrototypeBrowser: View {
         let selectionAction: LocalizedStringResource?
         let selectionMarked: Bool
         let canHide: Bool
-        let focusPolicy: LiveTVGuideRowFocusPolicy
+        let routesGlassPresentation: Bool
+        let page: Int
     }
 
-    private func rowFocusPolicy(for row: LiveTVGuideRowID) -> LiveTVGuideRowFocusPolicy {
-        let native: Bool
-        #if os(tvOS)
-        native = usesNativeSpatialNavigation || voiceOver
-        #else
-        native = true
-        #endif
-        return LiveTVGuideRowFocusPolicy(
-            entryTarget: .defaultContent(in: model, row: row, from: guideStart, hours: guideHours),
-            isActiveRow: selectedRowID == row,
-            usesNativeNavigation: native
-        )
+    #if os(tvOS)
+    private func focusCurrentRow(_ row: LiveTVGuideRowID) {
+        requestRowFocus(.defaultContent(in: model, row: row, from: guideStart, hours: guideHours),
+                        usesNativeCell: true)
     }
 
-    private func useNativeNavigation() {
-        #if os(tvOS)
-        guard !isRestoringFocus, !usesNativeSpatialNavigation,
-              !DetailTransitionNavigation.isNavigationInputSuppressed else { return }
-        usesNativeSpatialNavigation = true
+    private func focusNowOnRow(_ row: LiveTVGuideRowID) {
+        guard model.now >= guideStart, model.now < guideStart.addingTimeInterval(guideSpan) else {
+            goToNow()
+            return
+        }
+        revealCurrentTime(width: guideWidth)
+        browsesTimeline = false
+        requestRowFocus(horizontalNowTarget(on: row))
+    }
+
+    private func isAtNowBoundary(_ row: LiveTVGuideRowID, offset: CGFloat) -> Bool {
+        let nowX = PrototypeLayout.timelineX(model.now.timeIntervalSince(guideStart), for: guideWidth)
+        return model.now >= guideStart && model.now < guideStart.addingTimeInterval(guideSpan)
+            && offset <= nowX + 1 && confirmedFocus == horizontalNowTarget(on: row)
+    }
+
+    private func focusChannelPlate(_ row: LiveTVGuideRowID) {
+        browsesTimeline = false
+        requestRowFocus(.channel(row.channelID, section: row.section))
+    }
+
+    private func horizontalSlots(on row: LiveTVGuideRowID) -> [LiveTVGuideSlot] {
+        let programs = model.programs(for: row.channelID, from: guideStart, hours: guideHours)
+        guard !programs.isEmpty else { return [] }
+        return PrototypeGuideRow.drawnSlots(programs: programs, start: guideStart, span: guideSpan, width: guideWidth)
+    }
+
+    private func horizontalTarget(for slot: LiveTVGuideSlot, on row: LiveTVGuideRowID) -> PrototypeBrowseFocus {
+        if let program = slot.program {
+            return .program(channelID: row.channelID, programID: program.id, section: row.section)
+        }
+        return .channelContent(row.channelID, slotID: slot.id, section: row.section)
+    }
+
+    private func horizontalNowTarget(on row: LiveTVGuideRowID) -> PrototypeBrowseFocus {
+        if let slot = horizontalSlots(on: row).first(where: { $0.start <= model.now && model.now < $0.end }) {
+            return horizontalTarget(for: slot, on: row)
+        }
+        return .channelContent(row.channelID, section: row.section)
+    }
+
+    /// UIKit can ignore a clipped preceding cell even when a few points of it are visible.
+    /// Reveal and focus that cell together, without using the press on the pinned column.
+    private func focusEarlierSlot(_ row: LiveTVGuideRowID, offset: CGFloat, viewport: CGFloat) -> Bool {
+        let slots = horizontalSlots(on: row)
+        guard let index = slots.firstIndex(where: { horizontalTarget(for: $0, on: row) == confirmedFocus }),
+              index > slots.startIndex else { return false }
+        let previous = slots[index - 1]
+        let start = PrototypeLayout.timelineX(previous.start.timeIntervalSince(guideStart), for: guideWidth)
+        let end = PrototypeLayout.timelineX(previous.end.timeIntervalSince(guideStart), for: guideWidth)
+        let reveal = max(0, min(offset, max(start, end - viewport)))
+        guard offset - reveal <= viewport else { return false }
+        if reveal < offset {
+            setTimelineOffset(reveal)
+            nativeScroll.jump(toTimelineOffset: reveal)
+        }
+        requestRowFocus(horizontalTarget(for: previous, on: row))
+        return true
+    }
+
+    private func requestRowFocus(_ target: PrototypeBrowseFocus, usesNativeCell: Bool = false) {
+        let row = target.rowID
+        pendingFocus = target
+        let ready = usesNativeCell ? nativeScroll.hasVisibleCell(row) : mountedRows.contains(row)
+        #if DEBUG
+        GuideNavigationProfileHook.verticalRoute?("request row=\(row.channelID) nativeReady=\(ready) mounted=\(mountedRows.contains(row)) visible=\(nativeScroll.isVisible(row)) restoring=\(isRestoringFocus)")
         #endif
+        if ready {
+            completePendingFocus(row)
+        } else {
+            nativeScroll.scrollTo(row, anchor: .center)
+            if usesNativeCell, pendingFocus == target, nativeScroll.hasVisibleCell(row, layingOut: true) {
+                completePendingFocus(row)
+            }
+        }
+    }
+    #endif
+
+    /// A row's stationary content: the touch guide's section label, then the row. It reports mounting for focus restoration.
+    private func rowPlane<Content: View>(
+        _ entry: LiveTVGuideChannel, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: PrototypeLayout.sectionLabelGap) {
+            #if !os(tvOS)
+            if entry.startsSection, entry.section != model.guideChannels.first?.section {
+                PrototypeGuideSectionLabel(section: entry.section)
+            }
+            #endif
+            content()
+        }
+        .id(entry.id)
+        .onAppear { mountRow(entry.id) }
+        .onDisappear { mountedRows.remove(entry.id) }
+    }
+
+    private func mountRow(_ row: LiveTVGuideRowID) {
+        mountedRows.insert(row)
+        completePendingFocus(row)
     }
 
     private func guideRow(
         _ entry: LiveTVGuideChannel, width: CGFloat, returnTarget: PrototypeBrowseFocus?,
         scrollTo: @escaping (LiveTVGuideRowID, UnitPoint) -> Void
-    ) -> some View {
+    ) -> PrototypeGuideRow {
         let channel = entry.channel
-        return VStack(alignment: .leading, spacing: PrototypeLayout.sectionLabelGap) {
-            if entry.startsSection, entry.section != model.guideChannels.first?.section {
-                PrototypeGuideSectionLabel(section: entry.section)
-                    #if os(tvOS)
-                    .padding(.top, PrototypeLayout.smallGap)
-                    #endif
-            }
-            PrototypeGuideRow(
-                channel: channel, section: entry.section,
-                programs: model.programs(for: channel.id, from: guideStart, hours: guideHours),
-                start: guideStart, now: model.now,
-                width: width, span: guideSpan, timeline: timeline, focus: $focused,
-                railActive: (railActive && restrictDirectionalEntry)
-                    || isRestoringFocus || requiresContentFocusHandoff,
-                returnTarget: returnTarget,
-                favorite: model.favoriteIDs.contains(channel.id),
-                playing: model.playingChannelID == channel.id,
-                toggleFavorite: { model.toggleFavoriteWithFeedback(channel.id) },
-                tune: { tune(entry.id) }, details: details, controls: openControls,
-                top: { goToTop(scrollTo: scrollTo) }, goToNow: goToNow,
-                focusChanged: confirmFocus, sources: openSources, guideTime: openGuideTime,
-                hide: hideChannel.map { action in { action(channel, entry.id) } },
-                guideGapState: imports.gapState(for: channel, from: dataRange.start, to: dataRange.end),
-                selectionAction: selectionAction.map {
-                    selectedChannelIDs.contains(channel.id) ? "Show in Multiview" : $0
-                },
-                selectionMarked: selectedChannelIDs.contains(channel.id),
-                openLibraryItem: openLibraryItem,
-                focusPolicy: rowFocusPolicy(for: entry.id),
-                horizontalNavigation: useNativeNavigation,
-                selectedTarget: touchSelection,
-                selectForPreview: previewChannel.map { action in { action(entry.id) } }
-            )
-        }
-        .id(entry.id)
-        .onAppear {
-            mountedRows.insert(entry.id)
-            completePendingFocus(entry.id)
-        }
-        .onDisappear { mountedRows.remove(entry.id) }
+        return PrototypeGuideRow(
+            channel: channel, section: entry.section,
+            programs: model.programs(for: channel.id, from: guideStart, hours: guideHours),
+            start: guideStart, now: model.now,
+            width: width, span: guideSpan, timeline: timeline, focus: $focused,
+            railActive: (railActive && restrictDirectionalEntry)
+                || isRestoringFocus || requiresContentFocusHandoff,
+            returnTarget: returnTarget,
+            favorite: model.favoriteIDs.contains(channel.id),
+            playing: model.playingChannelID == channel.id,
+            toggleFavorite: { model.toggleFavoriteWithFeedback(channel.id) },
+            tune: { tune(entry.id) }, details: details, controls: openControls,
+            top: { goToTop(scrollTo: scrollTo) }, goToNow: goToNow,
+            focusChanged: confirmFocus, sources: openSources, guideTime: openGuideTime,
+            hide: hideChannel.map { action in { action(channel, entry.id) } },
+            guideGapState: imports.gapState(for: channel, from: dataRange.start, to: dataRange.end),
+            selectionAction: selectionAction.map {
+                selectedChannelIDs.contains(channel.id) ? "Show in Multiview" : $0
+            },
+            selectionMarked: selectedChannelIDs.contains(channel.id),
+            openLibraryItem: openLibraryItem,
+            selectedTarget: touchSelection,
+            selectForPreview: previewChannel.map { action in { action(entry.id) } },
+            onChannelSelect: onChannelSelect.map { action in { action(channel) } },
+            onProgramHold: onProgramHold.map { action in { program, frame in action(channel, program, frame) } }
+        )
     }
 
     private var serverGuideRequest: PrototypeServerGuideRequest? {
@@ -606,6 +762,9 @@ struct PrototypeBrowser: View {
 
     private func completePendingFocus(_ id: LiveTVGuideRowID) {
         guard !isRestoringFocus, pendingFocus?.rowID == id else { return }
+        #if DEBUG && os(tvOS)
+        GuideNavigationProfileHook.verticalRoute?("submit row=\(id.channelID) repeated=\(focused == pendingFocus) alreadyConfirmed=\(confirmedFocus == pendingFocus) visible=\(nativeScroll.isVisible(id))")
+        #endif
         focused = pendingFocus
         pendingFocus = nil
     }
@@ -620,11 +779,20 @@ struct PrototypeBrowser: View {
     }
 
     private func confirmFocus(_ target: PrototypeBrowseFocus, _ isFocused: Bool) {
+        #if DEBUG && os(tvOS)
+        if isFocused { GuideNavigationProfileHook.focus?(target) }
+        #endif
+        model.noteGuideInteraction()
         if isFocused { confirmedFocus = target }
         else if confirmedFocus == target { confirmedFocus = nil }
     }
 
-    private func restoreFocus(scrollTo: (LiveTVGuideRowID, UnitPoint) -> Void, width: CGFloat) async {
+    /// `isVisible` lets a row that is already on screen keep its position: focus is restored on it without a scroll.
+    private func restoreFocus(
+        scrollTo: (LiveTVGuideRowID, UnitPoint) -> Void,
+        isVisible: (LiveTVGuideRowID) -> Bool = { _ in false },
+        width: CGFloat
+    ) async {
         guard isPresented, isRestoringFocus else { return }
         let request = restoreFocusRequest
         if restoresPlaybackFocus { revealCurrentTime(width: width) }
@@ -635,19 +803,33 @@ struct PrototypeBrowser: View {
         }
         pendingFocus = nil
         restorationFallback = nil
-        scrollTo(target.rowID, .center)
-        if reduceMotion { await Task.yield() }
-        else { try? await Task.sleep(for: .milliseconds(340)) }
+        let mayScroll = guideFocusMayScroll
+        let needsScroll = mayScroll && !isVisible(target.rowID)
+        if needsScroll { scrollTo(target.rowID, .center) }
+        if needsScroll && !reduceMotion { try? await Task.sleep(for: .milliseconds(340)) }
+        else { await Task.yield() }
         guard !Task.isCancelled else { return }
-        guard let latestTarget = restorationTarget else {
+        guard var latestTarget = restorationTarget else {
             railActive = false
             focusRestored(request)
             return
         }
         if restoresPlaybackFocus { revealCurrentTime(width: width) }
-        if latestTarget.rowID != target.rowID {
+        if mayScroll, latestTarget.rowID != target.rowID, !isVisible(latestTarget.rowID) {
             scrollTo(latestTarget.rowID, .center)
         }
+        #if os(tvOS)
+        if !mayScroll, !isVisible(latestTarget.rowID) {
+            // A saved focus row can still be admitted without being in the saved viewport.
+            // Keep the viewport and hand off to the first mounted row instead.
+            if scrollID == nil { await waitForRow(latestTarget.rowID) }
+            guard !Task.isCancelled else { return }
+            if !isVisible(latestTarget.rowID), let row = scrollID, isVisible(row) {
+                latestTarget = .defaultContent(in: model, row: row, from: guideStart, hours: guideHours)
+                restorationFallback = latestTarget
+            }
+        }
+        #endif
         await waitForRow(latestTarget.rowID)
         guard !Task.isCancelled else { return }
         focused = latestTarget
@@ -659,7 +841,7 @@ struct PrototypeBrowser: View {
         }
         let fallback = PrototypeBrowseFocus.channel(latestTarget.channelID, section: latestTarget.rowID.section)
         restorationFallback = fallback
-        scrollTo(latestTarget.rowID, .center)
+        if mayScroll, !isVisible(latestTarget.rowID) { scrollTo(latestTarget.rowID, .center) }
         await Task.yield()
         guard !Task.isCancelled else { return }
         HandoffDiagnostics.emit("LIVE_TV event=guideFocusFallback kind=channel")
@@ -689,8 +871,39 @@ struct PrototypeBrowser: View {
         }
     }
 
+    /// The window start moved while the viewer has scrolled right: the anchor follows the clock and
+    /// the scroll gives back the same distance, so the programmes on screen stay where they are.
+    /// A guide at its start is moved by the owner, and a guide set to another day stays put.
+    private func shiftScrolledTimeline(from old: Date, to new: Date) {
+        guard guideOffset == 0, timelineOffset > 0, timeAnchor == old, new > old, guideWidth > 0 else { return }
+        let shifted = LiveTVGuideClock.timelineAfterShift(
+            anchor: old, offset: timelineOffset, newAnchor: new,
+            pointsPerSecond: PrototypeLayout.timelineX(1, for: guideWidth))
+        let apply = {
+            timeAnchor = shifted.anchor
+            setTimelineOffset(shifted.offset)
+        }
+        if reduceMotion || new.timeIntervalSince(old) > LiveTVGuideClock.slot { apply() }
+        else { withAnimation(.easeInOut(duration: LiveTVGuideClock.shiftAnimationDuration), apply) }
+    }
+
+    /// The window moved on with the clock: a focused programme that ended before the new start has
+    /// scrolled out, so focus moves to the same channel's current programme. The row never changes.
+    private func refocusIfProgramLeftWindow() {
+        guard guideStart == model.guideWindowStart,
+              case .program(let channelID, let programID, let section)? = confirmedFocus,
+              let focusedProgram, focusedProgram.id == programID, focusedProgram.end <= guideStart,
+              let row = confirmedFocus?.rowID else { return }
+        let target: PrototypeBrowseFocus = model.programToFocusAfterWindowShift(
+            focusedProgramID: programID, channelID: channelID
+        ).map { .program(channelID: channelID, programID: $0.id, section: section) }
+            ?? .defaultContent(in: model, row: row, from: guideStart, hours: guideHours)
+        lastFocused = target
+        pendingFocus = target
+        focused = target
+    }
+
     private func revealCurrentTime(width: CGFloat) {
-        usesNativeSpatialNavigation = false
         if model.now < guideStart || model.now >= guideStart.addingTimeInterval(Double(guideHours) * 3_600) {
             goToNow()
         }
@@ -726,13 +939,19 @@ struct PrototypeBrowser: View {
     /// Moves the rows and the owner's committed offset together, so a pending
     /// scroll commit can't restore where the guide was.
     private func setTimelineOffset(_ offset: CGFloat) {
-        timeline.offset = offset
+        timeline.reset(to: offset)
         timelineOffset = offset
+        #if os(tvOS)
+        timelineJump = PrototypeGuideTimelineJump(offset: offset, sequence: (timelineJump?.sequence ?? 0) + 1)
+        #endif
     }
 
     private func goToNow() {
-        usesNativeSpatialNavigation = false
-        timeAnchor = Date(timeIntervalSince1970: floor(model.now.timeIntervalSince1970 / 1_800) * 1_800)
+        #if os(tvOS)
+        browsesTimeline = false
+        #endif
+        model.alignGuideWindowToNow()
+        timeAnchor = model.guideWindowStart
         guideOffset = 0
         guideHours = Self.initialGuideHours
         setTimelineOffset(0)
@@ -789,11 +1008,28 @@ struct PrototypeTimeRuler: View {
     var span: TimeInterval = PrototypeLayout.timelineSpanSeconds
     @Environment(\.themePalette) private var palette
     @Environment(\.calendar) private var calendar
-    @ScaledMetric(relativeTo: .caption) private var height: CGFloat = PrototypeLayout.rulerHeight
+    #if os(tvOS)
+    @Environment(\.prototypeGuideSheetPlan) private var sheetPlan
+    #endif
+    @Environment(\.layoutDirection) private var direction
+    @ScaledMetric(relativeTo: .caption) private var scaledHeight: CGFloat = PrototypeLayout.rulerHeight
+
+    /// The sheet's shorter ruler while the guide sits on it.
+    private var height: CGFloat {
+        #if os(tvOS)
+        sheetPlan?.rulerHeight ?? scaledHeight
+        #else
+        scaledHeight
+        #endif
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: PrototypeLayout.columnGap) {
             Group {
+                #if os(tvOS)
+                // The channel heading is drawn above the guide; this cell stays empty.
+                Color.clear.frame(height: height)
+                #else
                 if isLoading {
                     PrototypeSkeletonText(font: .caption, fraction: 0.6)
                         .padding(.horizontal, PrototypeLayout.rowInset)
@@ -801,6 +1037,7 @@ struct PrototypeTimeRuler: View {
                 } else {
                     PrototypeGuideSectionLabel(section: section)
                 }
+                #endif
             }
             .frame(width: PrototypeLayout.stationWidth(for: width), alignment: .leading)
             GeometryReader { geometry in
@@ -817,12 +1054,20 @@ struct PrototypeTimeRuler: View {
                             : .dateTime.hour().minute())
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
+                            #if os(tvOS)
+                            .font(.system(size: PrototypeLayout.rulerFontSize, weight: .medium).monospacedDigit())
+                            .foregroundStyle(Color.white.opacity(PrototypePlayingGlass.rulerInkOpacity))
+                            .padding(.leading, PrototypeLayout.rulerLabelInset)
+                            #else
                             .padding(.leading, PrototypeLayout.rowInset)
+                            #endif
                             .frame(width: tickWidth, alignment: .leading)
                     }
                 }
-                .frame(height: height)
-                .offset(x: -timelineOffset)
+                .frame(width: PrototypeLayout.timelineContentWidth(for: width, span: span), height: height,
+                       alignment: .leading)
+                .frame(width: geometry.size.width, alignment: .leading)
+                .offset(x: direction == .rightToLeft ? timelineOffset : -timelineOffset)
             }
             .frame(height: height)
             .horizontalEdgeFadeMask(
@@ -844,7 +1089,8 @@ struct PrototypeTimeRuler: View {
                 }
             }
             .overlay(alignment: .bottom) {
-                if showsNowMarker {
+                // Apple-style tvOS shows "now" by the focused programme's fill instead.
+                if showsNowMarker && Self.drawsNowMarker {
                     PrototypeNowMarker(
                         start: start, now: now, timelineOffset: timelineOffset,
                         viewportSeconds: PrototypeLayout.viewportSeconds(for: width)
@@ -855,6 +1101,14 @@ struct PrototypeTimeRuler: View {
         }
         .font(.caption.monospacedDigit())
         .foregroundStyle(palette.primaryText)
+    }
+
+    private static var drawsNowMarker: Bool {
+        #if os(tvOS)
+        false
+        #else
+        true
+        #endif
     }
 
     /// Half-hour ticks from a screen before the visible time to a screen after it.
@@ -967,18 +1221,20 @@ struct PrototypeGuideRow: View {
     var selectionAction: LocalizedStringResource?
     var selectionMarked = false
     var openLibraryItem: ((LibraryChannelItem) -> Void)?
-    var focusPolicy: LiveTVGuideRowFocusPolicy?
-    var horizontalNavigation: () -> Void = {}
     /// What the viewer picked by touch, which has no focus to show it with.
     var selectedTarget: PrototypeBrowseFocus?
     var selectForPreview: (() -> Void)?
+    var onChannelSelect: (() -> Void)?
+    var onProgramHold: ((LiveTVPrototypeProgram?, CGRect) -> Void)?
+    #if os(tvOS)
+    /// Set once a hold fires, so the release that follows doesn't also act as a tap.
+    @State private var holdConsumedSelect = false
+    #endif
     @ScaledMetric(relativeTo: .subheadline) private var scaledRowHeight: CGFloat = PrototypeLayout.rowHeight
 
     private var rowHeight: CGFloat {
         PrototypeLayout.rowHeight(for: width, scaledHeight: scaledRowHeight)
     }
-
-    private var viewportSeconds: TimeInterval { PrototypeLayout.viewportSeconds(for: width) }
 
     private var currentLibraryItem: LibraryChannelItem? {
         guard channel.source == .plozz else { return nil }
@@ -991,13 +1247,35 @@ struct PrototypeGuideRow: View {
         // would silently swallow taps after the toolbar or search had focus.
         return false
         #else
-        if railActive { return returnTarget != target }
-        return focusPolicy?.allows(target) == false
+        return railActive && returnTarget != target
         #endif
     }
 
+    #if os(tvOS)
+    enum Plane { case stationary, programmes }
+    var plane: Plane = .stationary
+    func inPlane(_ plane: Plane) -> Self {
+        var copy = self
+        copy.plane = plane
+        return copy
+    }
+    #endif
+
     var body: some View {
-        HStack(spacing: PrototypeLayout.columnGap) {
+        #if os(tvOS)
+        if plane == .programmes { programmes }
+        else { stationary }
+        #else
+        stationary
+        #endif
+    }
+
+    private var stationary: some View {
+        // These metrics depend on the row's geometry, not on the timeline page or slot.
+        let timelineWidth = PrototypeLayout.timelineWidth(for: width)
+        let viewportSeconds = PrototypeLayout.viewportSeconds(for: width)
+        let cellGap = PrototypeLayout.cellGap
+        return HStack(spacing: PrototypeLayout.columnGap) {
             PrototypeGuideStation(
                 channel: channel, section: section,
                 favorite: favorite, playing: playing, tune: tune, toggleFavorite: toggleFavorite,
@@ -1007,7 +1285,7 @@ struct PrototypeGuideRow: View {
                 sources: sources, guideTime: programs.isEmpty ? nil : guideTime, hide: hide,
                 selectionAction: selectionAction, selectionMarked: selectionMarked,
                 libraryItem: currentLibraryItem, openLibraryItem: openLibraryItem,
-                selectForPreview: selectForPreview
+                selectForPreview: selectForPreview, onSelect: onChannelSelect
             )
                 .frame(width: PrototypeLayout.stationWidth(for: width))
                 .focused(focus, equals: channelFocus)
@@ -1015,98 +1293,81 @@ struct PrototypeGuideRow: View {
             if programs.isEmpty {
                 channelContent(
                     elapsedWidth: timelineWidth * now.timeIntervalSince(start) / viewportSeconds,
-                    followsTimeline: true
+                    followsTimeline: true, viewportWidth: timelineWidth
                 )
                     .frame(maxWidth: .infinity)
-            } else {
-                PrototypeSynchronizedTimeline(
+                    #if os(tvOS)
+                    .padding(.trailing, cellGap)
+                    #endif
+            }
+            #if os(iOS)
+            if !programs.isEmpty {
+                PrototypeTouchSynchronizedTimeline(
                     timeline: timeline,
                     isFocusedRow: focus.wrappedValue?.rowID == channelFocus.rowID,
                     viewportWidth: timelineWidth,
-                    maximumOffset: PrototypeLayout.maximumTimelineOffset(for: width, span: span),
-                    horizontalNavigation: horizontalNavigation
-                ) {
-                    // Only programmes near the viewport are built. A lazy stack
-                    // can't be used: focus can't move to cells it hasn't made.
-                    HStack(spacing: 0) {
-                        ForEach(timelineItems) { item in
-                            if let slot = item.slot {
-                                if let program = slot.program {
-                                    Button { activate(program) } label: {
-                                        PrototypeProgramLabel(
-                                            program: program, now: now,
-                                            availableWidth: max(0, cellWidth(slot) - PrototypeLayout.rowInset * 2)
-                                        )
-                                        .padding(.horizontal, min(PrototypeLayout.rowInset, slotWidth(slot) / 4))
-                                        .frame(
-                                            width: cellWidth(slot),
-                                            height: PrototypeLayout.programHeight(in: rowHeight),
-                                            alignment: .leading
-                                        )
-                                        .clipped()
-                                        .background {
-                                            PrototypeElapsedProgramFill(
-                                                elapsedWidth: timelineWidth * now.timeIntervalSince(slot.start) / viewportSeconds
-                                            )
-                                        }
-                                    }
-                                    .buttonStyle(PrototypeButtonStyle(
-                                        selected: selectedTarget == programFocus(program.id),
-                                        padded: false, surface: .program,
-                                        focusChanged: { focusChanged(programFocus(program.id), $0) }
-                                    ))
-                                    .focusEffectDisabled()
-                                    .padding(.vertical, PrototypeLayout.programInset)
-                                    .padding(.trailing, min(PrototypeLayout.cellGap, slotWidth(slot) / 4))
-                                    .frame(width: slotWidth(slot), height: rowHeight)
-                                    .clipped()
-                                    .focused(focus, equals: programFocus(program.id))
-                                    .disabled(isFocusDisabled(programFocus(program.id)))
-                                    .contextMenu {
-                                        Button("Program details", systemImage: "info.circle") { details(program) }
-                                        PrototypeChannelActions(
-                                            favorite: favorite, play: tune, toggleFavorite: toggleFavorite, hide: hide,
-                                            primaryTitle: selectionAction ?? "Play channel", isSelection: selectionAction != nil,
-                                            libraryItem: channel.source == .plozz ? program.libraryItem : nil,
-                                            openLibraryItem: openLibraryItem)
-                                        Button("Search channels", systemImage: "magnifyingglass", action: controls)
-                                        Button(action: sources) {
-                                            Label {
-                                                Text(SettingsCopy.tvSources)
-                                            } icon: {
-                                                Image(systemName: "antenna.radiowaves.left.and.right")
-                                            }
-                                        }
-                                        Button("Guide time", systemImage: "calendar", action: guideTime)
-                                        Button("Back to top", systemImage: "arrow.up.to.line", action: top)
-                                        Button("Now", systemImage: "clock", action: goToNow)
-                                    }
-                                } else {
-                                    channelContent(
-                                        slotID: slot.id,
-                                        elapsedWidth: timelineWidth * now.timeIntervalSince(slot.start) / viewportSeconds
-                                    )
-                                        .frame(width: cellWidth(slot))
-                                        .padding(.trailing, min(PrototypeLayout.cellGap, slotWidth(slot) / 4))
-                                        .frame(width: slotWidth(slot), height: rowHeight)
-                                        .clipped()
-                                }
-                            } else {
-                                Color.clear.frame(width: item.width, height: rowHeight)
-                            }
-                        }
-                    }
-                    .frame(width: PrototypeLayout.timelineContentWidth(for: width, span: span), height: rowHeight)
-                }
-                .frame(width: timelineWidth, height: rowHeight)
+                    maximumOffset: max(0, PrototypeLayout.timelineContentWidth(for: width, span: span) - timelineWidth)
+                ) { programmes }
+                    .frame(width: timelineWidth, height: rowHeight)
             }
+            #endif
         }
         .frame(height: rowHeight)
+    }
+
+    /// The programme cells at the full timeline width. On tvOS the native guide list scrolls this plane and the touch
+    /// guide scrolls it in its own row. Only programmes near the viewport are built, because focus can't move to cells
+    /// that haven't been made.
+    private var programmes: some View {
+        let timelineWidth = PrototypeLayout.timelineWidth(for: width)
+        let viewportSeconds = PrototypeLayout.viewportSeconds(for: width)
+        let cellGap = PrototypeLayout.cellGap
+        return HStack(spacing: 0) {
+            if !programs.isEmpty {
+                ForEach(timelineItems(timelineWidth: timelineWidth, viewportSeconds: viewportSeconds)) { item in
+                    if let slot = item.slot {
+                        let gap = min(cellGap, item.width / 4)
+                        let elapsed = timelineWidth * now.timeIntervalSince(slot.start) / viewportSeconds
+                        if let program = slot.program {
+                            programCell(
+                                program, slot: slot, slotWidth: item.width, trailingGap: gap, elapsedWidth: elapsed)
+                        } else if !Self.drawsGapCell(isEventSlot: channel.eventSlot != nil) {
+                            // An event slot's single programme is all its row has: the time around it is left empty, as in the
+                            // mockup (a row draws only its programmes), not filled with "No guide information".
+                            Color.clear.frame(width: item.width, height: rowHeight)
+                        } else {
+                            channelContent(
+                                slotID: slot.id,
+                                elapsedWidth: elapsed, cellWidth: item.width - gap, viewportWidth: timelineWidth
+                            )
+                                .frame(width: item.width - gap)
+                                .padding(.trailing, gap)
+                                .frame(width: item.width, height: rowHeight)
+                                .programSlotClip()
+                        }
+                    } else {
+                        Color.clear.frame(width: item.width, height: rowHeight)
+                    }
+                }
+            }
+        }
+        .frame(width: PrototypeLayout.timelineContentWidth(for: width, span: span), height: rowHeight)
     }
 
     private var channelFocus: PrototypeBrowseFocus {
         .channel(channel.id, section: section)
     }
+
+    /// Where a slot starts on the full timeline (the `programmes` plane), leading-relative.
+    private func cellX(of slot: LiveTVGuideSlot) -> CGFloat {
+        let seconds = PrototypeLayout.viewportSeconds(for: width)
+        guard seconds > 0 else { return 0 }
+        return PrototypeLayout.timelineWidth(for: width) * slot.start.timeIntervalSince(start) / seconds
+    }
+
+    /// Whether the time with no listing draws a "No guide information" cell. Not on an event slot's row: its one programme is
+    /// all the row has, and the mockup draws nothing around it.
+    static func drawsGapCell(isEventSlot: Bool) -> Bool { !isEventSlot }
 
     private struct TimelineItem: Identifiable {
         let id: String
@@ -1117,8 +1378,11 @@ struct PrototypeGuideRow: View {
     /// The row's slots within a screen either side of the visible one, with
     /// the rest collapsed into spacers. The window moves a screen at a time,
     /// so scrolling rebuilds rows only when it crosses into the next screen.
-    private var timelineItems: [TimelineItem] {
-        let slots = LiveTVGuideTimeline.slots(programs: programs, from: start, to: start.addingTimeInterval(span))
+    private func timelineItems(timelineWidth: CGFloat, viewportSeconds: TimeInterval) -> [TimelineItem] {
+        let slots = Self.drawnSlots(programs: programs, start: start, span: span, width: width)
+        func slotWidth(_ slot: LiveTVGuideSlot) -> CGFloat {
+            timelineWidth * slot.end.timeIntervalSince(slot.start) / viewportSeconds
+        }
         guard timeline.pageWidth > 0 else {
             return slots.map { TimelineItem(id: $0.id, slot: $0, width: slotWidth($0)) }
         }
@@ -1149,7 +1413,8 @@ struct PrototypeGuideRow: View {
     }
 
     private func channelContent(
-        slotID: String? = nil, elapsedWidth: CGFloat = 0, followsTimeline: Bool = false
+        slotID: String? = nil, elapsedWidth: CGFloat = 0, followsTimeline: Bool = false,
+        cellWidth: CGFloat? = nil, viewportWidth: CGFloat
     ) -> some View {
         let target = PrototypeBrowseFocus.channelContent(channel.id, slotID: slotID, section: section)
         return Button {
@@ -1158,14 +1423,17 @@ struct PrototypeGuideRow: View {
             if selectionAction != nil { tune() }
             else { selectForPreview?() }
             #else
+            if consumeHold() { return }
             tune()
             #endif
         } label: {
             PrototypeGuideGap(
                 channelName: channel.name, height: rowHeight,
-                state: guideGapState, showsStatus: focus.wrappedValue?.rowID == channelFocus.rowID
+                state: guideGapState, showsStatus: focus.wrappedValue?.rowID == channelFocus.rowID,
+                cellWidth: cellWidth, isIdleEvent: channel.eventSlot?.isIdle == true
             )
                 .frame(maxWidth: .infinity)
+                #if !os(tvOS)
                 .background {
                     if followsTimeline {
                         PrototypeTimelineReader(timeline: timeline) {
@@ -1175,12 +1443,20 @@ struct PrototypeGuideRow: View {
                         PrototypeElapsedProgramFill(elapsedWidth: elapsedWidth)
                     }
                 }
+                #endif
                 .contentShape(Rectangle())
         }
+        #if os(tvOS)
+        .buttonStyle(PrototypeGuideCellStyle(
+            tone: .noData, cellWidth: cellWidth ?? viewportWidth, elapsedWidth: 0,
+            focusChanged: { focusChanged(target, $0) }))
+        .holdsForPresentation(onProgramHold.map { hold in { frame in hold(nil, frame) } }, consumed: $holdConsumedSelect)
+        #else
         .buttonStyle(PrototypeButtonStyle(
             selected: selectedTarget == target,
             padded: false, surface: .guide, focusChanged: { focusChanged(target, $0) }
         ))
+        #endif
         .focusEffectDisabled()
         .focused(focus, equals: target)
         .disabled(isFocusDisabled(target))
@@ -1189,11 +1465,11 @@ struct PrototypeGuideRow: View {
         .accessibilityHint(Text(selectionAction ?? "Play channel"))
         .accessibilityAddTraits(selectionMarked ? .isSelected : [])
         .accessibilityIdentifier("live-tv-channel-content-\(section.rawValue)-\(channel.number)-\(slotID ?? "whole")")
-        .contextMenu {
+        .optionalContextMenu(isAttached: onProgramHold == nil) {
             PrototypeChannelActions(
                 favorite: favorite, play: tune, toggleFavorite: toggleFavorite, hide: hide,
                 primaryTitle: selectionAction ?? "Play channel", isSelection: selectionAction != nil,
-                libraryItem: currentLibraryItem, openLibraryItem: openLibraryItem)
+                libraryItem: currentLibraryItem, openLibraryItem: openLibraryItem, channel: channel)
             Button("Search channels", systemImage: "magnifyingglass", action: controls)
             Button(action: sources) {
                 Label {
@@ -1206,17 +1482,113 @@ struct PrototypeGuideRow: View {
         }
     }
 
-    private func slotWidth(_ slot: LiveTVGuideSlot) -> CGFloat {
-        let seconds = slot.end.timeIntervalSince(slot.start)
-        return timelineWidth * seconds / viewportSeconds
+    /// One programme cell. Touch and the classic TV guide keep the outlined,
+    /// padded button; the tvOS Liquid Glass guide tones the cell by the clock.
+    private func programCell(
+        _ program: LiveTVPrototypeProgram, slot: LiveTVGuideSlot, slotWidth: CGFloat, trailingGap: CGFloat, elapsedWidth: CGFloat
+    ) -> some View {
+        let cell = slotWidth - trailingGap
+        return Button {
+            #if os(tvOS)
+            if consumeHold() { return }
+            #endif
+            activate(program)
+        } label: {
+            #if os(tvOS)
+            // A programme that began before the visible edge keeps its title on screen: it starts at the edge.
+            PrototypeTimelineReader(timeline: timeline) { offset in
+                let lead = PrototypeGuideCellMetrics.titleLead(offset: offset, cellX: cellX(of: slot), cellWidth: cell)
+                PrototypeGuideCellTitle(program: program, now: now, cellWidth: cell - lead, channelIsPlaying: playing)
+                    .padding(.leading, lead)
+            }
+                .padding(.horizontal, PrototypeLayout.cellInset)
+                .frame(width: cell, height: PrototypeLayout.programHeight(in: rowHeight), alignment: .leading)
+            #else
+            PrototypeProgramLabel(
+                program: program, now: now,
+                availableWidth: max(0, cell - PrototypeLayout.rowInset * 2)
+            )
+            .padding(.horizontal, min(PrototypeLayout.rowInset, slotWidth / 4))
+            .frame(
+                width: cell,
+                height: PrototypeLayout.programHeight(in: rowHeight),
+                alignment: .leading
+            )
+            .clipped()
+            .background {
+                PrototypeElapsedProgramFill(elapsedWidth: elapsedWidth)
+            }
+            #endif
+        }
+        #if os(tvOS)
+        .buttonStyle(PrototypeGuideCellStyle(
+            tone: PrototypeGuideTone(program: program, now: now), cellWidth: cell, elapsedWidth: elapsedWidth,
+            clipsLeading: PrototypeGuideCellMetrics.continuesBeforeWindow(programStart: program.start, slotStart: slot.start),
+            focusChanged: { focusChanged(programFocus(program.id), $0) }))
+        .holdsForPresentation(onProgramHold.map { hold in { frame in hold(program, frame) } }, consumed: $holdConsumedSelect)
+        #else
+        .buttonStyle(PrototypeButtonStyle(
+            selected: selectedTarget == programFocus(program.id),
+            padded: false, surface: .program,
+            focusChanged: { focusChanged(programFocus(program.id), $0) }
+        ))
+        #endif
+        .focusEffectDisabled()
+        .padding(.vertical, PrototypeLayout.programInset)
+        .padding(.trailing, trailingGap)
+        .frame(width: slotWidth, height: rowHeight)
+        .programSlotClip()
+        .focused(focus, equals: programFocus(program.id))
+        .accessibilityIdentifier("live-tv-programme-\(program.id)")
+        .disabled(isFocusDisabled(programFocus(program.id)))
+        .optionalContextMenu(isAttached: onProgramHold == nil) {
+            Button("Program details", systemImage: "info.circle") { details(program) }
+            PrototypeChannelActions(
+                favorite: favorite, play: tune, toggleFavorite: toggleFavorite, hide: hide,
+                primaryTitle: selectionAction ?? "Play channel", isSelection: selectionAction != nil,
+                libraryItem: channel.source == .plozz ? program.libraryItem : nil,
+                openLibraryItem: openLibraryItem)
+            Button("Search channels", systemImage: "magnifyingglass", action: controls)
+            Button(action: sources) {
+                Label {
+                    Text(SettingsCopy.tvSources)
+                } icon: {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                }
+            }
+            Button("Guide time", systemImage: "calendar", action: guideTime)
+            Button("Back to top", systemImage: "arrow.up.to.line", action: top)
+            Button("Now", systemImage: "clock", action: goToNow)
+        }
     }
 
-    private func cellWidth(_ slot: LiveTVGuideSlot) -> CGFloat {
-        slotWidth(slot) - min(PrototypeLayout.cellGap, slotWidth(slot) / 4)
+    /// True once when a hold has already handled this Select press.
+    private func consumeHold() -> Bool {
+        #if os(tvOS)
+        guard holdConsumedSelect else { return false }
+        holdConsumedSelect = false
+        TVBackDiagnostics.notice("event=glassInputDropped reason=select-release-after-hold channel=\(channel.id)")
+        return true
+        #else
+        return false
+        #endif
     }
 
-    private var timelineWidth: CGFloat {
-        PrototypeLayout.timelineWidth(for: width)
+    /// The shortest slot drawn: a thinner one is absorbed by a neighbour. On tvOS a cell has to be wide enough to read as a
+    /// programme (its gap included), not merely wider than its corner radii; elsewhere it only has to clear the radii.
+    static func drawnSlots(
+        programs: [LiveTVPrototypeProgram], start: Date, span: TimeInterval, width: CGFloat
+    ) -> [LiveTVGuideSlot] {
+        #if os(tvOS)
+        let minimumWidth = max(PrototypeLayout.rowRadius * 2, PrototypeLayout.minimumCellWidth + PrototypeLayout.cellGap)
+        #else
+        let minimumWidth = PrototypeLayout.rowRadius * 2
+        #endif
+        let minimumDuration = LiveTVGuideTimeline.minimumDuration(
+            viewportSeconds: PrototypeLayout.viewportSeconds(for: width),
+            timelineWidth: Double(PrototypeLayout.timelineWidth(for: width)), minimumSlotWidth: Double(minimumWidth))
+        return LiveTVGuideTimeline.slots(
+            programs: programs, from: start, to: start.addingTimeInterval(span), minimumDuration: minimumDuration)
     }
 
     /// Touch selects the info bar and starts the channel's inline preview.
@@ -1233,8 +1605,11 @@ struct PrototypeGuideRow: View {
     }
 
     private func open(_ program: LiveTVPrototypeProgram) {
-        if selectionAction != nil || (program.start <= now && now < program.end) { tune() }
-        else { details(program) }
+        switch LiveTVGuideCellSelection.action(for: program, now: now, picksChannel: selectionAction != nil) {
+        case .tune: tune()
+        case .details: details(program)
+        case .nothing: break
+        }
     }
 }
 
@@ -1258,6 +1633,8 @@ struct PrototypeGuideStation: View {
     var libraryItem: LibraryChannelItem?
     var openLibraryItem: ((LibraryChannelItem) -> Void)?
     var selectForPreview: (() -> Void)?
+    /// Select on the plate, when the presentation owner replaces the channel menu.
+    var onSelect: (() -> Void)?
 
     var body: some View {
         Group {
@@ -1266,8 +1643,10 @@ struct PrototypeGuideStation: View {
                     .contextMenu {
                         PrototypeChannelActions(
                             favorite: favorite, play: tune, toggleFavorite: toggleFavorite, hide: hide,
-                            primaryTitle: selectionAction ?? "Play channel", isSelection: true)
+                            primaryTitle: selectionAction ?? "Play channel", isSelection: true, channel: channel)
                     }
+            } else if let onSelect {
+                Button(action: onSelect) { stationMark }
             } else if let selectForPreview {
                 Button {
                     focusChanged?(true)
@@ -1284,7 +1663,11 @@ struct PrototypeGuideStation: View {
                 }
             }
         }
+        #if os(tvOS)
+        .buttonStyle(PrototypeGuidePlateStyle(focusChanged: focusChanged))
+        #else
         .buttonStyle(PrototypeButtonStyle(padded: false, surface: .station, focusChanged: focusChanged))
+        #endif
         .focusEffectDisabled()
         .accessibilityLabel(Text(channel.name))
         .accessibilityValue(Text("Channel \(channel.number)"))
@@ -1297,7 +1680,7 @@ struct PrototypeGuideStation: View {
         Group {
             PrototypeChannelActions(
                 favorite: favorite, play: tune, toggleFavorite: toggleFavorite, hide: hide,
-                libraryItem: libraryItem, openLibraryItem: openLibraryItem
+                libraryItem: libraryItem, openLibraryItem: openLibraryItem, channel: channel
             )
             Divider()
             Button("Search channels", systemImage: "magnifyingglass", action: controls)
@@ -1315,24 +1698,39 @@ struct PrototypeGuideStation: View {
         }
     }
 
+    @ViewBuilder
     private var stationMark: some View {
+        #if os(tvOS)
+        PrototypeGuidePlateContent(
+            channel: channel,
+            size: CGSize(
+                width: width ?? PrototypeLayout.stationColumnWidth, height: height ?? PrototypeLayout.rowHeight)
+        )
+        .overlay(alignment: .topTrailing) { selectionBadge }
+        #else
         PrototypeStationMark(
             channel: channel,
             plateSize: CGSize(
                 width: width ?? PrototypeLayout.stationColumnWidth, height: height ?? PrototypeLayout.rowHeight
             ),
-            cornerRadius: PrototypeLayout.rowRadius
+            cornerRadius: PrototypeLayout.rowRadius,
+            usesBareLogo: true,
+            usesSyncedMarks: true
         )
         .clipped()
-        .overlay(alignment: .topTrailing) {
-            if selectionMarked {
-                Image(systemName: "checkmark.circle.fill")
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .black.opacity(0.8))
-                    .padding(10)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
+        .overlay(alignment: .topTrailing) { selectionBadge }
+        #endif
+    }
+
+    @ViewBuilder
+    private var selectionBadge: some View {
+        if selectionMarked {
+            Image(systemName: "checkmark.circle.fill")
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, .black.opacity(0.8))
+                .padding(10)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
     }
 }
@@ -1346,6 +1744,10 @@ private struct PrototypeChannelActions: View {
     var isSelection = false
     var libraryItem: LibraryChannelItem?
     var openLibraryItem: ((LibraryChannelItem) -> Void)?
+    /// The channel the menu is for; "Change Logo…" is offered when the host can change it.
+    var channel: LiveTVPrototypeChannel?
+    @Environment(\.changeChannelLogo) private var changeLogo
+    @Environment(LiveTVPrototypeModel.self) private var logoModel: LiveTVPrototypeModel?
 
     var body: some View {
         Button(action: play) {
@@ -1361,6 +1763,9 @@ private struct PrototypeChannelActions: View {
         )
         if !isSelection, let libraryItem, let openLibraryItem {
             LibraryChannelNavigationButton(item: libraryItem, action: openLibraryItem)
+        }
+        if !isSelection, let channel, let changeLogo, logoModel?.canChangeLogo(of: channel) == true {
+            Button("Change Logo…", systemImage: "photo") { changeLogo(channel) }
         }
         if let hide {
             Button("Hide channel", systemImage: "eye.slash", action: hide)
@@ -1406,14 +1811,28 @@ struct PrototypeGuideGap: View {
     let height: CGFloat
     var state: LiveTVGuideGapState?
     var showsStatus = false
+    /// The tvOS cell's width; the "No guide information" title hides below 110 pt.
+    var cellWidth: CGFloat?
+    /// An event slot with no event: the cell says so instead of "No guide information".
+    var isIdleEvent = false
     @Environment(\.themePalette) private var palette
+    @Environment(\.isFocused) private var focused
     @ScaledMetric(relativeTo: .subheadline) private var fontSize = PrototypeLayout.guideFontSize
     var body: some View {
         VStack(alignment: .leading, spacing: PrototypeLayout.smallGap) {
+            #if os(tvOS)
+            if PrototypeGuideCellMetrics.showsTitle(cellWidth: cellWidth ?? .infinity) {
+                Text(isIdleEvent ? "No event" : "No guide information")
+                    .font(.system(size: fontSize, weight: .medium))
+                    .foregroundStyle(PrototypeGuideCellTitle.ink(tone: .ended, focused: focused).opacity(isIdleEvent && !focused ? 0.7 : 1))
+                    .lineLimit(1)
+            }
+            #else
             Text(channelName)
                 .font(.system(size: fontSize))
                 .foregroundStyle(palette.primaryText.opacity(0.8))
                 .lineLimit(2)
+            #endif
             if showsStatus, let state, state == .loading || state == .failed || state == .unrequested {
                 Text(state.title)
                     .font(.caption)
@@ -1421,16 +1840,15 @@ struct PrototypeGuideGap: View {
                     .lineLimit(1)
             }
         }
-        .padding(.horizontal, PrototypeLayout.rowInset)
+        .padding(.horizontal, PrototypeLayout.cellInset)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: height)
         .accessibilityHint("No program listing for this time.")
     }
 }
 
-/// The guide's live horizontal position. Rows and the ruler observe it
-/// directly, so a scroll frame reaches only them instead of re-rendering the
-/// whole guide; the owner's binding is committed once scrolling settles.
+/// Observes horizontal position without driving a scroll view. The ruler reads
+/// the live value; rows and data requests subscribe to page and block changes.
 @MainActor
 @Observable
 final class PrototypeTimelineScroll {
@@ -1445,7 +1863,7 @@ final class PrototypeTimelineScroll {
     /// Which six-hour block the leading edge is in; guide listings load around it.
     private(set) var block = 0
     @ObservationIgnored var settled: ((CGFloat) -> Void)?
-    /// Called on every scroll a row makes, while it is still moving.
+    /// Called during motion to prefetch the next timeline block.
     @ObservationIgnored var moved: ((CGFloat) -> Void)?
     @ObservationIgnored private var commit: Task<Void, Never>?
 
@@ -1461,7 +1879,13 @@ final class PrototypeTimelineScroll {
         if nextBlock != block { block = nextBlock }
     }
 
-    /// Records a scroll made in a row and commits it after the movement stops.
+    func reset(to value: CGFloat) {
+        commit?.cancel()
+        commit = nil
+        offset = value
+    }
+
+    /// Publishes the scroll owner's position, then commits it after movement stops.
     func scrolled(to value: CGFloat) {
         offset = value
         moved?(value)
@@ -1490,16 +1914,14 @@ struct PrototypeTimelineReader<Content: View>: View {
     var body: some View { content(timeline.offset) }
 }
 
-/// Each virtualized row keeps its station outside the horizontal scroller.
-/// Only the focused/dragged row publishes movement; followers never feed back.
-/// Per-frame values stay out of this view's body so scrolling never rebuilds
-/// the row's programmes.
-private struct PrototypeSynchronizedTimeline<Content: View>: View {
+#if os(iOS)
+/// On iPhone and iPad, the dragged row publishes movement and the other touch
+/// scrollers follow it without feeding back.
+private struct PrototypeTouchSynchronizedTimeline<Content: View>: View {
     let timeline: PrototypeTimelineScroll
     let isFocusedRow: Bool
     let viewportWidth: CGFloat
     let maximumOffset: CGFloat
-    let horizontalNavigation: () -> Void
     @ViewBuilder let content: () -> Content
     @State private var position = ScrollPosition(x: 0)
     @State private var tracking = Tracking()
@@ -1515,7 +1937,11 @@ private struct PrototypeSynchronizedTimeline<Content: View>: View {
             content()
         }
         .scrollIndicators(.hidden)
-        .modifier(PrototypeTimelineEdgeFade(timeline: timeline, maximumOffset: maximumOffset))
+        #if os(tvOS)
+        // A focused cell grows and casts its shadow past the row.
+        .scrollClipDisabled()
+        #endif
+        .modifier(PrototypeTouchTimelineEdgeFade(timeline: timeline, maximumOffset: maximumOffset))
         .scrollPosition($position)
         .onScrollPhaseChange { _, phase in
             isDragging = phase == .tracking || phase == .interacting || phase == .decelerating
@@ -1530,10 +1956,9 @@ private struct PrototypeSynchronizedTimeline<Content: View>: View {
                 return
             }
             guard isFocusedRow || isDragging, abs(timeline.offset - value) >= 1 else { return }
-            if isDragging { horizontalNavigation() }
             timeline.scrolled(to: value)
         }
-        .modifier(PrototypeTimelineFollower(
+        .modifier(PrototypeTouchTimelineFollower(
             timeline: timeline, viewportWidth: viewportWidth, maximumOffset: maximumOffset,
             synchronize: synchronize
         ))
@@ -1547,7 +1972,7 @@ private struct PrototypeSynchronizedTimeline<Content: View>: View {
     }
 }
 
-private struct PrototypeTimelineFollower: ViewModifier {
+private struct PrototypeTouchTimelineFollower: ViewModifier {
     let timeline: PrototypeTimelineScroll
     let viewportWidth: CGFloat
     let maximumOffset: CGFloat
@@ -1562,7 +1987,7 @@ private struct PrototypeTimelineFollower: ViewModifier {
     }
 }
 
-private struct PrototypeTimelineEdgeFade: ViewModifier {
+private struct PrototypeTouchTimelineEdgeFade: ViewModifier {
     let timeline: PrototypeTimelineScroll
     let maximumOffset: CGFloat
 
@@ -1573,8 +1998,19 @@ private struct PrototypeTimelineEdgeFade: ViewModifier {
         )
         content.horizontalEdgeFadeMask(
             fadeWidth: PrototypeLayout.horizontalFade,
+            verticalOverhang: Self.verticalOverhang,
             leadingStrength: fade.leading,
             trailingStrength: fade.trailing
         )
     }
+
+    private static var verticalOverhang: CGFloat {
+        #if os(tvOS)
+        // Room for a focused cell's scale and shadow above and below the row.
+        PrototypeLayout.rowGap * 3
+        #else
+        0
+        #endif
+    }
 }
+#endif

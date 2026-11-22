@@ -20,7 +20,13 @@ struct PrototypePreviewLayout {
     /// side, halving the dead space beside the logos and the trailing fade.
     /// Nothing where the edge is a notch or rounded-corner inset.
     let guideSideBleed: CGFloat
+    #if os(tvOS)
+    /// Beside the shell rail the guide sits on the mockup's screen edges (144 / 80) and stops there.
+    let guideIsScreenAligned: Bool
+    #endif
     private let isSearching: Bool
+    /// The Liquid Glass tokens this layout was computed with (the screen's display class).
+    let glass: LiveTVGlassLayout
 
     var videoReflectionHeight: CGFloat {
         #if os(iOS)
@@ -53,6 +59,15 @@ struct PrototypePreviewLayout {
         let height = max(0, min(heroHeight - PrototypeLayout.smallGap, compact ? 92 : 220))
         return CGSize(width: (height * 16 / 9).rounded(), height: height.rounded())
     }
+
+    #if os(tvOS)
+    /// Where the guide's ruler starts on the 1080p canvas: the hero block's bottom plus its gap (330 + 28; 4K 297 + 25.5).
+    var guideScreenTop: CGFloat { glass.guideTop }
+    /// Screen x of the guide's channel plates beside the rail (mockup `LX`).
+    var guideScreenLeading: CGFloat { glass.leadingInset }
+    /// Gap from the guide's trailing edge to the screen edge (mockup `PX`).
+    var guideScreenTrailingInset: CGFloat { glass.trailingInset }
+    #endif
 
     var heroAlignment: Alignment {
         #if os(tvOS)
@@ -109,7 +124,7 @@ struct PrototypePreviewLayout {
 
     var guideTrailingExtension: CGFloat {
         #if os(tvOS)
-        max(0, bounds.maxX - contentFrame.maxX)
+        guideIsScreenAligned ? 0 : max(0, bounds.maxX - contentFrame.maxX)
         #else
         guideSideBleed
         #endif
@@ -129,8 +144,10 @@ struct PrototypePreviewLayout {
         topNavigationInsets: EdgeInsets = EdgeInsets(),
         largeText: Bool = false, isSearching: Bool = false,
         hidesSidebar: Bool = false, showsCategories: Bool = false,
-        showsVideoPreview: Bool = false, toolbarControlsBottom: CGFloat? = nil
+        showsVideoPreview: Bool = false, toolbarControlsBottom: CGFloat? = nil,
+        glass: LiveTVGlassLayout = .active
     ) {
+        self.glass = glass
         #if os(tvOS)
         self.hidesSidebar = hidesSidebar
         #else
@@ -143,11 +160,16 @@ struct PrototypePreviewLayout {
         )
         compact = bounds.width < 650
         #if os(tvOS)
-        let side: CGFloat = topNavigationInsets.top > 0 ? topNavigationInsets.trailing : 32
+        let alignsToScreen = topNavigationInsets.top == 0 && navigationInset > 0
+        guideIsScreenAligned = alignsToScreen
+        let side: CGFloat = topNavigationInsets.top > 0 ? topNavigationInsets.trailing
+            : (alignsToScreen ? glass.trailingInset : 32)
         // The rail and guide share physical-screen coordinates. Title-safe insets
         // can change during mounting and must not move or resize the pinned guide.
-        let leading = (topNavigationInsets.top > 0 ? topNavigationInsets.leading : 32)
-            + (navigationInset > 0 ? PrototypeLayout.inset : 0)
+        // Beside the rail the guide's leading edge is `guideScreenLeading` on screen,
+        // whatever the shell's own content inset is.
+        let leading = topNavigationInsets.top > 0 ? topNavigationInsets.leading
+            : (alignsToScreen ? max(0, glass.leadingInset - navigationInset) : 32)
         let top = max(32, topNavigationInsets.top > 0 ? topNavigationInsets.top : safeAreaInsets.top)
             + (nativeNavigation || topNavigationInsets.top > 0 ? 16 : 0)
         let bottom: CGFloat = 20
@@ -182,9 +204,16 @@ struct PrototypePreviewLayout {
         #if os(tvOS)
         let videoLeading = bounds.minX
         let videoWidth = bounds.width
+        // Browsing: the guide's top lands on `guideScreenTop`, whatever the safe area did
+        // to the content frame, so the hero is whatever height reaches it.
+        // The cap only matters on a canvas smaller than any Apple TV, where the guide must keep its room.
+        let hero = min(
+            max(0, glass.guideTop - PrototypeLayout.sectionGap - (contentFrame.minY - bounds.minY)),
+            contentFrame.height * 0.45
+        )
         heroHeight = isSearching
             ? min(browsingHeroHeight, largeText ? 230 : (compact ? 140 : 180))
-            : browsingHeroHeight
+            : hero
         #else
         let categoryWidth = Self.categorySidebarWidth(contentFrame.size)
         let videoLeading = categoryWidth > 0
@@ -466,10 +495,38 @@ struct PrototypePreviewHero: View {
     let watch: () -> Void
     var watchTitle: LocalizedStringResource?
     var isLoading = false
+    #if os(tvOS)
+    var glass: PrototypeGlassHeroInputs?
+    #endif
     @Environment(\.themePalette) private var palette
     @Environment(\.locale) private var locale
 
     var body: some View {
+        Group {
+            #if os(tvOS)
+            if isLoading {
+                PrototypePreviewHeroSkeleton(layout: layout)
+            } else if let glass {
+                PrototypeGlassHero(
+                    channel: channel, program: program, layout: layout, inputs: glass,
+                    watch: watch, watchTitle: watchTitle)
+            } else {
+                legacyBody
+            }
+            #else
+            legacyBody
+            #endif
+        }
+        .frame(width: layout.heroWidth, height: layout.heroHeight, alignment: layout.heroAlignment)
+        #if !os(tvOS)
+        .clipped()
+        #endif
+        #if DEBUG
+        .modifier(PrototypeHeroLayoutObservation(phase: isLoading ? "loading" : "content"))
+        #endif
+    }
+
+    @ViewBuilder private var legacyBody: some View {
         Group {
             if isLoading {
                 PrototypePreviewHeroSkeleton(layout: layout)
@@ -506,11 +563,6 @@ struct PrototypePreviewHero: View {
                 .frame(width: layout.metadataWidth, alignment: .leading)
             }
         }
-        .frame(width: layout.heroWidth, height: layout.heroHeight, alignment: layout.heroAlignment)
-        .clipped()
-        #if DEBUG
-        .modifier(PrototypeHeroLayoutObservation(phase: isLoading ? "loading" : "content"))
-        #endif
     }
 
     /// The TV's info bar squeezed into a phone's landscape strip: art, then

@@ -115,3 +115,48 @@ final class IPTVCatalogReuseTests: XCTestCase {
         XCTAssertEqual(try reopened.record("series:one").item.title, "Original 2")
     }
 }
+
+final class IPTVCatalogDetailsRetentionTests: XCTestCase {
+    func testRefreshKeepsRowsWithUnchangedStampsAndDropsChangedOnes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
+        let catalog = try IPTVCatalog(url: root.appendingPathComponent("catalog.sqlite"), key: Data(repeating: 3, count: 32))
+        func series(_ id: String, stamp: String, title: String) -> IPTVRecord {
+            var record = IPTVRecord(item: MediaItem(id: id, title: title, kind: .series, libraryID: "series"))
+            record.listingStamp = stamp
+            return record
+        }
+        func children(of seriesID: String) -> [IPTVRecord] {
+            let season = IPTVRecord(item: MediaItem(id: "season:\(seriesID):1", title: "S1", kind: .season, libraryID: "series"), parentID: seriesID)
+            let episode = IPTVRecord(item: MediaItem(id: "episode:\(seriesID):1", title: "E1", kind: .episode, libraryID: "series"),
+                                     parentID: season.item.id)
+            return [season, episode]
+        }
+        try catalog.beginImport()
+        try catalog.insert(series("series:1", stamp: "a", title: "One"), into: .incoming)
+        try catalog.insert(series("series:2", stamp: "a", title: "Two"), into: .incoming)
+        try catalog.commitImport(library: "series", scope: "series")
+        catalog.discardImport()
+        for id in ["series:1", "series:2"] {
+            for record in children(of: id) { try catalog.insert(record) }
+            try catalog.markDetailsFetched(id, library: "series", stamp: "a")
+        }
+
+        try catalog.beginImport()
+        try catalog.insert(series("series:1", stamp: "a", title: "One"), into: .incoming)
+        try catalog.insert(series("series:2", stamp: "b", title: "Two changed"), into: .incoming)
+        for id in ["series:1", "series:2"] where try catalog.detailsStamp(id) == (id == "series:1" ? "a" : "b") {
+            try catalog.keepForImport(id)
+        }
+        try catalog.commitImport(library: "series", scope: "series", listingFingerprint: "2:x")
+        catalog.discardImport()
+
+        XCTAssertEqual(try catalog.state("series-listing"), "2:x")
+        XCTAssertTrue(try catalog.detailsFetched("series:1"))
+        XCTAssertFalse(try catalog.detailsFetched("series:2"))
+        XCTAssertEqual(try catalog.count(where: "id = 'episode:series:1:1'"), 1)
+        XCTAssertEqual(try catalog.count(where: "id = 'episode:series:2:1'"), 0)
+        XCTAssertEqual(try catalog.count(where: "id = 'season:series:2:1'"), 0)
+        XCTAssertEqual(try catalog.record("series:2").item.title, "Two changed")
+    }
+}

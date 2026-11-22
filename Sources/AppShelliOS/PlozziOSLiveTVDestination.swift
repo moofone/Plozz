@@ -79,6 +79,7 @@ struct PlozziOSLiveTVDestination: View {
     private func liveTVContent(cache: LiveTVIndexedCache, runtime: LiveTVLibraryRuntime) -> some View {
         LiveTVPrototypeView(
             isActive: isActive,
+            preloadsCatalog: false,
             preferencesStore: preferencesStore,
             viewSettingsStore: viewSettingsStore,
             sourceStore: sourceStore,
@@ -97,6 +98,9 @@ struct PlozziOSLiveTVDestination: View {
             playbackUnavailableReason: effectiveNetworkBlock?.playbackMessage,
             restoreDestination: restoreDestination,
             catalogCache: cache,
+            lastSeenStore: LiveTVLastSeenStore(
+                profileID: profileID, secureStore: LiveTVSourceStorage.catalogSecrets()
+            ),
             sourceLoader: LiveTVCatalogStorage.loader(profileID: profileID, namespace: preferencesNamespace),
             importModel: importModel,
             profileID: profileID,
@@ -118,7 +122,7 @@ struct PlozziOSLiveTVDestination: View {
                 channelID: playback.channel.id,
                 title: playback.channel.name,
                 input: playback.input,
-                logoURL: playback.channel.logoURL,
+                logoURL: playback.channel.displayedLogoURL,
                 plozzChannelMood: playback.channel.plozzChannelMood,
                 makeEngine: {
                     runtime.makeEngine(
@@ -161,6 +165,10 @@ struct PlozziOSLiveTVDestination: View {
                 onPlaybackUpdate: playback.playbackUpdate,
                 onPlaybackFailed: playback.playbackFailed,
                 onVideoAspectRatioChange: playback.videoAspectRatioChanged,
+                onMeasuredResolution: { height in
+                    let key = playback.channel.qualityKey
+                    LiveChannelMeasuredQualityStore.shared.record(height: height, sourceID: key.sourceID, channelID: key.channelID)
+                },
                 onMultiview: playback.canOpenMultiview ? playback.openMultiview : nil,
                 outputGroup: liveOutputGroup,
                 outputID: playback.paneID,

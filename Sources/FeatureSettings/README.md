@@ -12,6 +12,15 @@ system green appearance instead of inheriting the page's monochrome navigation t
 
 The Settings screen and its detail pages. Profile-aware and integration-aware.
 
+Live TV's **Clean channel names** switch is profile-scoped and off by default.
+The shared TV/mobile section previews up to three distinct original names from
+the authorized loaded IPTV catalog, preferring names affected by cleanup.
+It updates immediately without fetching a source or changing stream/guide identities.
+Hidden and manually renamed channels are excluded. With no eligible loaded names,
+the fallback is explicitly labeled Example. Custom names win;
+the formatting rules and retained metadata are documented in
+[Live TV](../../docs/live-tv-prototype.md#channel-name-presentation).
+
 On mobile, Appearance starts with the shared visual theme cards, Gradient
 Backgrounds and Liquid Glass. Cards, Artwork and Circadian Mode form a separate
 group below. Theme search results open Appearance directly.
@@ -28,6 +37,11 @@ explicit choices stay independent. The picker updates the active player's
 settings model directly, without changing the app theme or music browsing pages.
 Preview-card title heights match only within each visible row; wrapped labels
 do not add empty space to other rows or single-column accessibility layouts.
+Both mobile grids own even 8-point outer insets and gaps through
+`settingsPreviewRow()`, without a second row inset from the group. Their 18-point
+card corners nest inside the 26-point settings group; the 8-point preview inset
+leaves 10-point swatch corners. Ordinary rows keep their 16-point insets.
+Onboarding and TV retain their standalone card geometry.
 Settings search reaches the same
 control; production mobile builds hide the page and its search entry. The TV-only track
 details toggle is not offered on mobile.
@@ -58,6 +72,20 @@ Its helper note explains HDMV-only menus, automatic video playback for BD-J,
 and the watch-progress limitation once on both platforms; disc action menus
 and video pickers do not repeat it.
 
+Controls with supporting text use CoreUI's `SettingsDescribedControl` on both
+platforms. It owns helper typography and spacing, keeps the native control's
+normal clearance, and places group separators after the complete row. Settings
+summaries use `SettingsRowMetrics.descriptionFont`, not per-page caption sizes.
+Seerr appears in the active profile's category list, not Manage Plozz. It edits only
+that profile's connections; the existing Kids-profile restrictions still apply.
+Downloads follows Libraries in the mobile profile card and uses that profile's
+existing download model. It remains hidden for Kids profiles and unavailable on tvOS.
+On mobile, the active profile's avatar and name form the first row of this same
+settings card, matching the tvOS grouping. The household Profiles entry remains
+under Manage Plozz. The shared section has no scope footer; device and sync
+details belong inside the relevant settings. The profile card has no repeated
+scope footer.
+
 Playback groups its five optional **Player tabs** in one shared control surface
 on TV and mobile. Labels match the player tabs, Info stays always available, and
 visibility preferences are independent of autoplay and Up Next behavior.
@@ -79,6 +107,9 @@ Mobile disclosure and action rows share `settingsActionRow()` from CoreUI;
 composite controls retain separate minimum touch targets with
 `settingsControlTarget()`. Per-view customization menus respond across their
 whole title/value row, not only the value. Native toggles remain independent.
+Do not put `SettingsFormButtonStyle` inside `settingsActionRow()`: it overrides
+the mobile padding while the group omits its own insets. Grouped Live TV links
+inherit the TV form style from `SettingsSectionGroup` instead.
 
 TV label customization uses `ViewCustomizationRow` for Only show descriptions on focus,
 matching the neighboring controls' sizing and focus treatment. Its live episode
@@ -294,10 +325,24 @@ asked once after this migration; reporting stays off until they choose to share.
 Either choice continues setup and survives relaunch and profile switching.
 Help & Diagnostics can change it later. Consent is not synced or transferred.
 The prompt and its primary Share Diagnostics and secondary Don't Share actions
-use the shared Settings card above a separate bottom privacy footer, with
+use the shared Settings card, with
 48-point content insets on tvOS and the standard card insets on mobile.
-Its GitHub-marked link opens the repository
-on mobile or a scannable QR sheet on Apple TV; opening it does not grant consent.
+Like other first-use prompts, it supplies the palette's neutral accent to native
+controls rather than inheriting the system-blue tint.
+Its circular info button uses the same native secondary action style as Don't
+Share (Liquid Glass where available). On mobile, the glass circle is 44 points
+across and the GitHub action is 44 points tall at the default text size, scaling
+with Dynamic Type. Flexible native button sizing sets the glass height rather
+than enlarging the label vertically. The mobile GitHub label adds 6 points of
+trailing padding while retaining the icon's native leading inset.
+Older mobile systems retain 44-point minimum
+targets, and tvOS keeps its native control sizing.
+It sits 12 points inside the card's top-trailing corner, independently of its
+content insets. It opens the shared sheet with detailed disclosures, the
+optional-sharing explanation and the Privacy Policy link; opening or dismissing
+it does not choose consent. The footer contains only the GitHub repo link, which
+opens the repository on mobile or a scannable QR sheet on Apple TV; opening it
+does not grant consent.
 
 Settings and the consent screen also expose **Privacy Policy**, opening the
 public policy on mobile or its URL and QR code on Apple TV. `SettingsCopy` keeps
@@ -997,23 +1042,19 @@ watch history and planning-list behavior are documented in
   exclude that library's content from the combined grid; disabling its content does.
   Settings opens as a sheet from direct tabs or native More without replacing
   the selected page or its navigation history.
-  Everyone uses the TV order, with mobile-only Downloads last. Version/build,
+  Manage Plozz uses the TV order; mobile-only Downloads belongs to the profile card. Version/build,
   release notes, and community links are inline on both mobile root layouts.
   Mobile Community uses standard-height, single-line Discord and GitHub links
   with small brand icons, without subtitles or QR codes. TV keeps its scannable
   community cards.
-  Mobile Settings also includes a **More apps** section linking Mozz to its
-  public TestFlight beta. Both compact and regular layouts share the same native
-  link and preserve the official full-color light/dark app icon. Its three-line
-  label identifies Mozz as a free, open-source music player and names the
-  TestFlight public beta without adding another line. Mozz is not
-  advertised on tvOS. The iOS-only `MozzAppIcon` imageset is copied unchanged from
-  `brandomoore/Mozz` at `b262a5a1257ac20369287599e6fea888462f8284`,
-  `App/Mozz/Assets.xcassets/AppIcon.appiconset`; `AppLinks.mozzTestFlight`
-  owns the invite URL.
+  Mobile Version and Build rows use native labeled icons. Sign Out of All
+  Accounts is a separate final section, with a red sign-out label and icon,
+  retaining the existing confirmation and Kids-profile restrictions.
+  The shared mobile action-row style propagates destructive roles to primary
+  text and icons, instead of overriding them with the neutral settings foreground.
   The compact and regular root menus eagerly lay out their small, fixed set of
   sections. This keeps variable-height groups stable while scrolling rather
-  than repeatedly revising lazy height estimates as the promotion enters view.
+  than repeatedly revising lazy height estimates as sections enter view.
   Kids-profile gates and profile/household storage ownership are unchanged.
   `SettingsLibrarySourcesSummary` shares configured source grouping and profile
   inclusion with TV. Mobile keeps the source icons/names on one horizontal line,
@@ -1514,6 +1555,10 @@ watch history and planning-list behavior are documented in
   the column and stack at accessibility text sizes; long profile/user names
   wrap without widening the scroll content. TV retains its bounded settings
   layout with contained row focus.
+  The shared connections page offers account sign-in or an explicit API key.
+  It lists only this profile's saved connections, never the whole Seerr user
+  directory. Defaults, request choice, and migration rules are documented in
+  [SeerService](../SeerService/README.md).
 - **Mobile Settings is a presentation action.** The profile button is the default
   entry point. Its navigation shortcut starts hidden on iPhone and iPad, keeping
   the default navigation at Home, Downloads, and Search.
