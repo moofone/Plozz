@@ -39,19 +39,23 @@ final class LiveTVGlassScreenHostedTests: XCTestCase {
 
     // MARK: Fixtures
 
-    private func hostedHero(_ glass: LiveTVGlassLayout) -> some View {
+    private func hostedHero(
+        _ glass: LiveTVGlassLayout, withProgram: Bool = true, playing: Bool = false, glassBacking: Bool = false,
+        background: Color = .black
+    ) -> some View {
         let layout = PrototypePreviewLayout(
             size: canvas, navigationInset: 64, hidesSidebar: true, glass: glass)
         let channel = LiveTVPrototypeModel().channels[0]
         let now = Date()
-        let program = LiveTVPrototypeProgram(
+        let program = withProgram ? LiveTVPrototypeProgram(
             id: "p", channelID: channel.id, title: "CBC News: Toronto", subtitle: "News",
-            start: now.addingTimeInterval(-600), end: now.addingTimeInterval(1_800))
+            start: now.addingTimeInterval(-600), end: now.addingTimeInterval(1_800)) : nil
         let inputs = PrototypeGlassHeroInputs(
             headingTitle: "Canada", headingCount: "7", isHeadingOpen: false, openHeading: {}, focusScope: nil,
-            isPlaying: false, now: now, isFavorite: false, toggleFavorite: {}, multiview: {}, info: {})
+            isPlaying: playing, now: now, isFavorite: false, toggleFavorite: {}, multiview: {}, info: {},
+            glassBacking: glassBacking)
         return ZStack(alignment: .topLeading) {
-            Color.black
+            background
             PrototypeGlassHero(channel: channel, program: program, layout: layout, inputs: inputs, watch: {})
                 .frame(width: layout.heroWidth, height: layout.heroHeight, alignment: layout.heroAlignment)
                 .offset(x: layout.contentFrame.minX - layout.bounds.minX, y: layout.contentFrame.minY - layout.bounds.minY)
@@ -166,6 +170,26 @@ final class LiveTVGlassScreenHostedTests: XCTestCase {
 
     func testHeroAndHeadingMatchTheMockupAt4K() throws {
         try checkHero(.uhd4K, Self.mockup4K, "4K")
+    }
+
+    /// Mockup `appleHero` without a programme, Plozz-like over a playing picture: one line, "No guide information", over the buttons —
+    /// no channel-name title and no labels — on the free shade (`.herofree`), not a panel.
+    func testAHeroWithoutAGuideIsOneLineOnTheFreeShade() throws {
+        for (glass, name) in [(LiveTVGlassLayout.hd1080, "1080"), (.uhd4K, "4K")] {
+            LiveTVGlassLayout.override = glass
+            // Over black the shade is invisible: what is drawn is the text and the Resume pill.
+            let dark = try render(hostedHero(glass, withProgram: false, playing: true, glassBacking: true), name: "hero-noguide-\(name)")
+            let resume = try XCTUnwrap(dark.solidWhiteBounds(in: CGRect(x: 960, y: 0, width: 960, height: 520)), "Resume pill")
+            let text = try XCTUnwrap(dark.ink(in: CGRect(x: 960, y: 0, width: 960, height: resume.minY - 4)), "\(name) text")
+            XCTAssertLessThan(text.height, glass.ui(25) * 1.3, "\(name): one 25 pt line, no 52 pt channel-name title")
+            XCTAssertEqual(resume.minY - text.maxY, glass.ui(26), accuracy: glass.ui(25) * 0.5, "\(name): the line sits right over the buttons")
+            // Over white the shade shows beside the text, and nothing is drawn far from it.
+            let light = try render(
+                hostedHero(glass, withProgram: false, playing: true, glassBacking: true, background: .white), name: "hero-noguide-shade-\(name)")
+            let besideText = Int(light.luma[Int(resume.midY) * light.width + Int(resume.minX - glass.ui(20))])
+            XCTAssertLessThan(besideText, 200, "\(name): the soft shade reaches past the text")
+            XCTAssertEqual(Int(light.luma[40 * light.width + 40]), 255, "\(name): no panel or shade far from the text")
+        }
     }
 
     func testHeroIsSmallerAt4KThanAt1080p() throws {

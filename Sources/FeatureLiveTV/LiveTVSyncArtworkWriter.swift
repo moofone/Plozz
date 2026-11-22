@@ -48,7 +48,7 @@ public actor LiveTVSyncArtworkWriter {
     private let logoService: LiveTVChannelLogoService
     private let logoData: @Sendable (URL) async -> Data?
     private let stationMarks: LiveTVGuideStationMarkIndex
-    private var bootstrapped = Set<String>()
+    private var bootstrapped: [String: Int] = [:]
     /// Logos whose download or decode failed this launch; not retried by a bootstrap, only by a changed refresh (Sync Now) or the next launch.
     private var failed = Set<ThemedChannelLogoIdentity>()
 
@@ -77,7 +77,8 @@ public actor LiveTVSyncArtworkWriter {
             guard let context = await scope.resolver(accountID), context.kind == .iptv else { continue }
             let bootstrapKey = accountID + "\u{1F}" + context.authorizationID
             // A revoked index must be refilled even though this writer already bootstrapped the account.
-            let needsBootstrap = !bootstrapped.contains(bootstrapKey) || !stationMarks.hasCommitted(accountID: accountID)
+            let artworkRevision = logoService.store.artworkChoicesRevision
+            let needsBootstrap = bootstrapped[bootstrapKey] != artworkRevision || !stationMarks.hasCommitted(accountID: accountID)
             // A delivered refresh (Sync Now or a scheduled run) retries the launch's failed logos once, even when it changed nothing.
             let retriesFailed = retriesFailedLogos && !failed.isEmpty && !needsBootstrap && committed == nil
             guard committed != nil || needsBootstrap || retriesFailed else { continue }
@@ -98,11 +99,12 @@ public actor LiveTVSyncArtworkWriter {
                 // Persisted logos first (each probed once) and the marks committed, so the guide draws them at once; then the
                 // never-prepared ones fill in.
                 guard let unprepared = await restore(all, scope: scope, into: &summary) else { return summary }
-                guard await commitStationMarks(plans, accountID: accountID, sources: sources, revision: revision, scope: scope) else {
-                    return summary
-                }
+                guard await commitStationMarks(plans, accountID: accountID, sources: sources, revision: revision,
+                                               artworkRevision: artworkRevision, scope: scope) else { return summary }
                 guard await download(unprepared, skipFailed: true, scope: scope, into: &summary) else { return summary }
-                bootstrapped.insert(bootstrapKey)
+                if artworkRevision == logoService.store.artworkChoicesRevision && stationMarks.currentRevision == revision {
+                    bootstrapped[bootstrapKey] = artworkRevision
+                }
             }
             if let committed {
                 let affected = LiveTVSyncArtworkPlanner.affectedChannelIDs(in: snapshot.channels, committed: committed)
@@ -110,7 +112,8 @@ public actor LiveTVSyncArtworkWriter {
                     channels: snapshot.channels, onlyChannelIDs: affected, sources: sources, accountID: accountID,
                     kind: context.kind, logoService: logoService, limit: Int.max)
                 guard await submit(changed, downloads: true, skipFailed: needsBootstrap, scope: scope, into: &summary) else { return summary }
-                guard await commitStationMarks(plans, accountID: accountID, sources: sources, revision: revision, scope: scope) else {
+                guard await commitStationMarks(plans, accountID: accountID, sources: sources, revision: revision,
+                                               artworkRevision: artworkRevision, scope: scope) else {
                     return summary
                 }
             } else if retriesFailed {
@@ -126,9 +129,11 @@ public actor LiveTVSyncArtworkWriter {
 
     /// Publishes the channel-keyed presentations the guide rows read. Returns false when the run was cancelled or its scope retired.
     private func commitStationMarks(
-        _ plans: [LiveTVSyncArtworkChannelPlan], accountID: String, sources: [LiveTVServerSource], revision: Int, scope: Scope
+        _ plans: [LiveTVSyncArtworkChannelPlan], accountID: String, sources: [LiveTVServerSource], revision: Int,
+        artworkRevision: Int, scope: Scope
     ) async -> Bool {
-        guard !Task.isCancelled, await scope.isCurrent() else { return false }
+        guard !Task.isCancelled, await scope.isCurrent(), !Task.isCancelled,
+              artworkRevision == logoService.store.artworkChoicesRevision else { return false }
         var presentations: [String: LiveTVGuideStationMarkPresentation] = [:]
         for plan in plans {
             presentations[plan.channelID] = LiveTVGuideStationMarkPresentation(

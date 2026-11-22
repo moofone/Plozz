@@ -50,6 +50,15 @@ enum PrototypeGuideCellMetrics {
         return min(elapsed, cellWidth)
     }
 
+    /// How far to move a cell's title in from its leading edge so it starts at the visible timeline's leading edge
+    /// (mockup: a cell is drawn from `max(start, windowStart)`). `offset` is the scrolled timeline offset and
+    /// `cellX` the cell's position on the timeline, both leading-relative. The title keeps at least
+    /// `minimumTitleWidth` of the cell, so near the cell's end it rides out with the cell rather than vanishing.
+    static func titleLead(offset: CGFloat, cellX: CGFloat, cellWidth: CGFloat) -> CGFloat {
+        guard offset.isFinite, cellX.isFinite, cellWidth.isFinite else { return 0 }
+        return min(max(0, offset - cellX), max(0, cellWidth - minimumTitleWidth))
+    }
+
     /// Whether the programme began before the cell's visible start (the window start clips it), so the cell
     /// is drawn flat on its leading side to show it continues earlier.
     static func continuesBeforeWindow(programStart: Date, slotStart: Date) -> Bool {

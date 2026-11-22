@@ -16,6 +16,7 @@ private struct LiveTVGuideAutoUpdateModifier: ViewModifier {
     @State private var interval: LiveTVGuideUpdateInterval
     #if canImport(UIKit)
     @State private var artworkWriter = LiveTVSyncArtworkWriter()
+    @State private var artworkRevision = 0
     #endif
 
     init(
@@ -75,10 +76,15 @@ private struct LiveTVGuideAutoUpdateModifier: ViewModifier {
     }
 
     #if canImport(UIKit)
-    /// Restores the persisted prepared artwork and channel marks for the saved lineup without waiting for a scheduled tick or a
-    /// committed guide change: nothing is downloaded (an empty result commits no inputs).
+    private struct ArtworkRun: Equatable {
+        let scope: MarkScope
+        let isForeground: Bool
+        let choicesRevision: Int
+    }
+
+    /// Restores prepared artwork and fills missing logos for saved lineups without waiting for a guide update.
     private func restoreStationMarks() async {
-        guard isAuthorized, scenePhase == .active, let sources else { return }
+        guard !Task.isCancelled, isAuthorized, scenePhase == .active, let sources else { return }
         let coordinator = coordinator, authorizationID = authorizationID, accountIDs = accountIDs
         coordinator.configure(refreshScope)
         await artworkWriter.publish(LiveTVGuideRefreshResult(), scope: .init(
@@ -115,12 +121,16 @@ private struct LiveTVGuideAutoUpdateModifier: ViewModifier {
                 Task { await writer.reset() }
             }
             .task(
-                id: Run(
-                    accountIDs: accountIDs, authorizationID: authorizationID, seconds: nil,
-                    isActive: isAuthorized && scenePhase == .active
+                id: ArtworkRun(
+                    scope: MarkScope(accountIDs: accountIDs, authorizationID: authorizationID, isAuthorized: isAuthorized),
+                    isForeground: scenePhase == .active, choicesRevision: artworkRevision
                 ),
                 priority: .utility
             ) { await restoreStationMarks() }
+            .onReceive(NotificationCenter.default.publisher(for: LiveTVChannelLogoStore.didResolveArtworkChoices,
+                                                             object: LiveTVChannelLogoService.shared.store)) { _ in
+                artworkRevision = LiveTVChannelLogoService.shared.store.artworkChoicesRevision
+            }
             #endif
             .onReceive(NotificationCenter.default.publisher(for: LiveTVViewSettingsStore.didChange)) { _ in
                 interval = Self.interval(namespace)

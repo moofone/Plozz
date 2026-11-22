@@ -26,7 +26,7 @@ struct PrototypeGlassHeroInputs {
     /// Nil hides Multiview (nothing to add to, or already choosing channels).
     var multiview: (() -> Void)?
     var info: () -> Void
-    /// A picture plays under the guide with no edge scrim: the text column sits on a panel of system glass.
+    /// A picture plays under the guide on its glass sheet: the text column sits on a soft shade (mockup Plozz-like `.herofree`).
     var glassBacking = false
 }
 
@@ -51,11 +51,15 @@ struct PrototypeGlassHero: View {
     /// adds the section gap.
     static func bottomInset(_ glass: LiveTVGlassLayout) -> CGFloat { glass.guideTop - glass.heroBlockBottom - PrototypeLayout.sectionGap }
 
-    /// The glass panel behind the text while a picture plays (mockup `.heroglass`, Plozz-like: `--hp`/`--hq` 24 px, `--hr` the sheet's
-    /// radius), drawn outside the column so the text keeps its place.
-    static func backingPadding(_ glass: LiveTVGlassLayout) -> CGFloat { PrototypePlayingGlass.heroPadding * glass.pixelScale }
-    static func backingCornerRadius(_ glass: LiveTVGlassLayout) -> CGFloat {
-        glass.cellRadius + PrototypePlayingGlass.sheetPadding * glass.pixelScale
+    /// The shade behind the text while a picture plays (mockup Plozz-like `.herofree`, the design's default since `hp=1` became the
+    /// option): no panel and no edge, a 50% black rounded shape reaching 70 px above/below and 90 px either side of the text, radius
+    /// 120 px, blurred 46 px, all at the hero's scale. Static, so nothing samples the picture behind it.
+    struct Shade: Equatable {
+        var vertical: CGFloat, horizontal: CGFloat, cornerRadius: CGFloat, blur: CGFloat
+        static let opacity = 0.5
+    }
+    static func shade(_ glass: LiveTVGlassLayout) -> Shade {
+        Shade(vertical: glass.ui(70), horizontal: glass.ui(90), cornerRadius: glass.ui(120), blur: glass.ui(46))
     }
     /// How far the heading's capsule bottom hangs below the hero block's bottom: Plozz-like puts it level with the panel's own.
     static func headingDropPoints(_ glass: LiveTVGlassLayout, onSheet: Bool) -> CGFloat {
@@ -67,12 +71,6 @@ struct PrototypeGlassHero: View {
         guard onSheet else { return layout.glassHeadingLeadingInset }
         let screenX = glass.leadingInset - PrototypePlayingGlass.sheetPadding * glass.pixelScale
         return screenX - (layout.contentFrame.minX - layout.bounds.minX)
-    }
-    /// How far the column's right edge sits inside the guide's right edge so the panel's lines up with the sheet's: the panel's padding,
-    /// less the sheet's overhang past the programmes (mockup `margin-right: 24 - (20 - cg)`).
-    static func columnTrailingInset(_ glass: LiveTVGlassLayout, onSheet: Bool) -> CGFloat {
-        guard onSheet else { return 0 }
-        return backingPadding(glass) - (PrototypePlayingGlass.sheetPadding * glass.pixelScale - glass.cellGap)
     }
 
     var body: some View {
@@ -87,16 +85,22 @@ struct PrototypeGlassHero: View {
                 .frame(width: glass.ui(Self.columnWidth), alignment: .leading)
                 .background { if inputs.glassBacking { backing } }
                 .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.trailing, layout.glassHeroTrailingInset + Self.columnTrailingInset(glass, onSheet: inputs.glassBacking))
+                .padding(.trailing, layout.glassHeroTrailingInset)
         }
         .padding(.bottom, Self.bottomInset(glass))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     }
 
-    /// Drawn outside the column's frame, so the text keeps its place with or without it. The same glass as the guide's sheet.
+    /// Drawn outside the column's frame, so the text keeps its place with or without it.
     private var backing: some View {
-        PrototypePanelGlass(shape: RoundedRectangle(cornerRadius: Self.backingCornerRadius(glass), style: .continuous))
-            .padding(-Self.backingPadding(glass))
+        let shade = Self.shade(glass)
+        return RoundedRectangle(cornerRadius: shade.cornerRadius, style: .continuous)
+            .fill(Color.black.opacity(Shade.opacity))
+            .padding(.vertical, -shade.vertical)
+            .padding(.horizontal, -shade.horizontal)
+            .blur(radius: shade.blur)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 
     private var column: some View {
@@ -106,34 +110,24 @@ struct PrototypeGlassHero: View {
                     .font(.system(size: glass.ui(52), weight: .bold))
                     .tracking(-0.022 * glass.ui(52))
                     .lineLimit(1)
-                if let meta = meta(for: program) {
-                    Text(verbatim: meta)
-                        .font(.system(size: glass.ui(25)))
-                        .foregroundStyle(.white.opacity(PrototypePlayingGlass.heroMetaOpacity))
-                        .lineLimit(1)
-                        .padding(.top, glass.ui(12))
-                }
-                tagRow
-                if let summary = program.playerInfo.summary {
-                    Text(verbatim: summary)
+                metaLine(for: program)
+                if let description = Self.description(of: program) {
+                    // Two lines (`.adesc`). The hero's height is fixed, so the text must not give its lines up to fit.
+                    Text(verbatim: description)
                         .font(.system(size: glass.ui(25)))
                         .lineSpacing(glass.ui(25) * 0.3)
                         .foregroundStyle(.white.opacity(PrototypePlayingGlass.heroDescriptionOpacity))
                         .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, glass.ui(12))
                 }
             } else if let channel {
-                // `channel.name` already follows the clean-channel-names setting.
-                Text(verbatim: channel.name)
-                    .font(.system(size: glass.ui(52), weight: .bold))
-                    .tracking(-0.022 * glass.ui(52))
-                    .lineLimit(1)
+                // Mockup `appleHero` without a programme: only the line saying so, then the buttons. The channel's name and labels
+                // are the guide row's (no title, no tags here).
                 Text(channel.eventSlot?.isIdle == true ? "No event" : "No guide information")
                     .font(.system(size: glass.ui(25)))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
-                    .padding(.top, glass.ui(12))
-                tagRow
             }
             buttons
                 .padding(.top, glass.ui(26))
@@ -143,26 +137,64 @@ struct PrototypeGlassHero: View {
         .accessibilityElement(children: .contain)
     }
 
+    /// Mockup `appleHero`: one line holding the time (only when the programme is not on now), the episode, then the
+    /// programme's labels (category, language, resolution). Nothing on it leaves an empty line out.
     @ViewBuilder
-    private var tagRow: some View {
-        if let channel, !channel.displayedTagTexts().isEmpty {
-            LiveTVGlassTagRow(texts: channel.displayedTagTexts(), fontSize: glass.ui(21)).padding(.top, glass.ui(12))
+    private func metaLine(for program: LiveTVPrototypeProgram) -> some View {
+        let words = Self.metaWords(for: program, now: inputs.now, ended: actions.showsEndedLabel, locale: locale)
+        let labels = Self.programmeLabels(for: program, channel: channel)
+        if words != nil || !labels.isEmpty {
+            HStack(spacing: glass.ui(12)) {
+                if let words {
+                    Text(verbatim: words)
+                        .font(.system(size: glass.ui(25)))
+                        .foregroundStyle(.white.opacity(PrototypePlayingGlass.heroMetaOpacity))
+                        .lineLimit(1)
+                        .layoutPriority(-1)
+                }
+                if !labels.isEmpty {
+                    LiveTVGlassTagRow(texts: labels, fontSize: glass.ui(20)).fixedSize()
+                }
+            }
+            .padding(.top, glass.ui(6))
         }
+    }
+
+    /// "8:00 – 8:30 PM · Season 2, Episode 4". On now the time left is in the Watch button, so the line keeps only the
+    /// episode; "Ended" comes first once it is over. A 24/7 loop has no times to read: its words are the loop tag.
+    static func metaWords(for program: LiveTVPrototypeProgram, now: Date, ended: Bool, locale: Locale) -> String? {
+        if program.isContinuousLoop { return LiveTVPrototypeProgram.loopTag }
+        let isOnNow = program.start <= now && now < program.end
+        let range = isOnNow && !ended ? "" :
+            "\(program.start.formatted(.dateTime.hour().minute().locale(locale))) – \(program.end.formatted(.dateTime.hour().minute().locale(locale)))"
+        let parts = [ended ? String(localized: "Ended") : "", range, program.subtitle].filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// The programme's own facts as labels (`progFacts`): its category from the listing, then the feed's language and
+    /// resolution. The channel's country is the guide row's, not the programme's.
+    static func programmeLabels(for program: LiveTVPrototypeProgram, channel: LiveTVPrototypeChannel?) -> [String] {
+        let category = program.details?.categories.lazy
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.first { !$0.isEmpty }
+        var feed: [String] = []
+        if let channel {
+            let tags = channel.tags.filter { if case .country = $0 { false } else { true } }
+            feed = IPTVChannelTag.displayTexts(for: tags, measured: channel.measuredResolution())
+        }
+        return (category.map { [$0] } ?? []) + feed
+    }
+
+    /// The synopsis alone: the episode is already on the meta line.
+    static func description(of program: LiveTVPrototypeProgram) -> String? {
+        guard let text = program.details?.description?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        return text
     }
 
     private var actions: LiveTVHeroActions {
         LiveTVHeroActions(program: program, isPlayingChannel: inputs.isPlaying, now: inputs.now)
     }
 
-    /// "8:00 – 8:30 PM · Season 2, Episode 4", leaving out whatever the guide lacks; "Ended · " first when it is over.
-    private func meta(for program: LiveTVPrototypeProgram) -> String? {
-        // A 24/7 loop has no times to read: its meta line is the tag.
-        if program.isContinuousLoop { return LiveTVPrototypeProgram.loopTag }
-        let range = "\(program.start.formatted(.dateTime.hour().minute().locale(locale))) – \(program.end.formatted(.dateTime.hour().minute().locale(locale)))"
-        let ended = actions.showsEndedLabel ? String(localized: "Ended") : ""
-        let parts = [ended, range, program.subtitle].filter { !$0.isEmpty }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
 
     private var buttons: some View {
         HStack(spacing: glass.ui(16)) {

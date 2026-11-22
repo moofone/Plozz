@@ -541,6 +541,34 @@ final class LiveTVServerGuideImportTests: XCTestCase {
         XCTAssertEqual(LiveTVServerImportError.sanitized(AppError.notFound, fallback: .serviceUnavailable), .unsupportedAPI)
     }
 
+    /// The guide hero and programme details show the provider's synopsis; a window load must not drop it.
+    func testWindowProgrammesKeepTheProviderSynopsisCategoriesAndArtwork() async throws {
+        let start = now.addingTimeInterval(86_400)
+        let end = start.addingTimeInterval(21_600)
+        let artwork = URL(string: "https://example.invalid/briefing.jpg")!
+        let provider = WindowGuideProvider(channels: channels, programs: [
+            ServerLiveTVProgramme(
+                id: "briefing", channelID: "one", title: "The Sunday Briefing",
+                overview: "  The week's political stories.\n", startDate: start, endDate: start.addingTimeInterval(3_600),
+                imageURL: artwork, categories: ["News"]
+            ),
+            ServerLiveTVProgramme(
+                id: "bare", channelID: "one", title: "Bare", overview: "   ",
+                startDate: start.addingTimeInterval(3_600), endDate: start.addingTimeInterval(7_200)
+            )
+        ])
+        let (imports, model) = makeImport(provider)
+        await imports.reload(into: model)
+        let id = try globalID("one", in: imports)
+        await imports.reloadServerGuides(channelIDs: [id], from: start, to: end, into: model)
+        let programs = model.programs(for: id, from: start, hours: 6)
+        XCTAssertEqual(programs.map(\.title), ["The Sunday Briefing", "Bare"])
+        XCTAssertEqual(programs[0].playerInfo.description, "The week's political stories.")
+        XCTAssertEqual(programs[0].details?.categories, ["News"])
+        XCTAssertEqual(programs[0].details?.artworkURL, artwork)
+        XCTAssertNil(programs[1].details, "a blank synopsis stores no details")
+    }
+
     func testOversizedWindowPreservesLastGoodScheduleAndReportsSanitizedGuideFailure() async throws {
         let provider = WindowGuideProvider(
             channels: channels, programs: [program("current"), program("last-good", offset: 86_400)]

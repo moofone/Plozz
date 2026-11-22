@@ -50,20 +50,27 @@ final class LiveTVFinalFix2Tests: XCTestCase {
             playlistSourceID: "server-1")
     }
 
-    func testAMonochromeTMDBLogoGivesWayToAColourCommonsLogo() async throws {
+    private func service() -> LiveTVChannelLogoService {
         let tmp = FileManager.default.temporaryDirectory
-        let service = LiveTVChannelLogoService(
+        return LiveTVChannelLogoService(
             store: LiveTVChannelLogoStore(fileURL: tmp.appendingPathComponent("ff2-\(UUID().uuidString).json")),
             directory: .init(fileURL: tmp.appendingPathComponent("n-\(UUID().uuidString).json"), fetch: { _ in Data() }),
             wikidata: .init(fileURL: tmp.appendingPathComponent("w-\(UUID().uuidString).json"), fetch: { _ in (Data(), 500) }),
             accessProvider: { .directToken("test") },
             measureGuideIcon: { _ in nil },
             measureLogoColour: { url in url.host == "image.tmdb.org" })
+    }
+
+    /// A TMDB show logo (not a network's) measured black and white gives way to the channel's colour Commons logo of the same
+    /// quality, and the change is published.
+    func testAMonochromeTMDBShowLogoGivesWayToAColourCommonsLogo() async throws {
+        let service = service()
         let amc = channel("amc", "AMC")
         let identity = LiveTVChannelLogoIdentity(channel: amc)
-        service.store.recordNetwork(TMDbNetworkLogo(networkID: 174, name: "AMC", originCountry: "US", filePath: "/amc.png", pixelWidth: 2_000, pixelHeight: 700))
-        service.store.recordMatches([identity: .network(id: 174, filePath: "/amc.png")])
-        service.store.recordWikidataMatches([identity: .logo(qid: "Q1", file: "AMC logo.svg")])
+        service.store.recordMatches([identity: .show(id: 174, filePath: "/amc.png")])
+        // A raster Commons file: the same quality tier as the unmeasured TMDB show logo, so only colour decides (an SVG would win on
+        // quality before anything is measured).
+        service.store.recordWikidataMatches([identity: .logo(qid: "Q1", file: "AMC logo.png")])
         XCTAssertEqual(service.displayedLogoURL(for: amc)?.host, "image.tmdb.org", "nothing measured yet: source order")
 
         let published = PublishedURLs()
@@ -71,6 +78,22 @@ final class LiveTVFinalFix2Tests: XCTestCase {
         XCTAssertEqual(service.displayedLogoURL(for: amc)?.host, "commons.wikimedia.org")
         let urls = await published.urls
         XCTAssertEqual(urls[LiveTVChannelLogoKey(channel: amc)]?.host, "commons.wikimedia.org")
+    }
+
+    /// A matched TMDB network keeps its logo even when it measures monochrome (`LiveTVLogoQuality.choose`): nothing is published.
+    func testAMonochromeTMDBNetworkLogoIsKept() async throws {
+        let service = service()
+        let amc = channel("amc", "AMC")
+        let identity = LiveTVChannelLogoIdentity(channel: amc)
+        service.store.recordNetwork(TMDbNetworkLogo(networkID: 174, name: "AMC", originCountry: "US", filePath: "/amc.png", pixelWidth: 2_000, pixelHeight: 700))
+        service.store.recordMatches([identity: .network(id: 174, filePath: "/amc.png")])
+        service.store.recordWikidataMatches([identity: .logo(qid: "Q1", file: "AMC logo.svg")])
+
+        let published = PublishedURLs()
+        await service.preferColourLogos([LiveTVLogoRequest(channel: amc)]) { await published.add($0) }
+        XCTAssertEqual(service.displayedLogoURL(for: amc)?.host, "image.tmdb.org")
+        let urls = await published.urls
+        XCTAssertTrue(urls.isEmpty)
     }
 
     private actor PublishedURLs {

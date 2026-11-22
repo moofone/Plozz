@@ -277,6 +277,12 @@ public final class LiveTVChannelLogoStore: @unchecked Sendable {
         set { lock.withLock { changeHandler = newValue } }
     }
     private var changeHandler: (@Sendable () -> Void)?
+    private var choicesRevision = 0
+
+    /// In-memory version of channel logo choices, independent of disk writes and guide refreshes.
+    public var artworkChoicesRevision: Int { lock.withLock { choicesRevision } }
+
+    public static let didResolveArtworkChoices = Notification.Name("LiveTVChannelLogoStoreDidResolveArtworkChoices")
 
     /// Posted on the main thread after changes from another device are applied.
     public static let didApplyRemoteChangesNotification = Notification.Name("LiveTVChannelLogoStoreDidApplyRemoteChanges")
@@ -660,6 +666,7 @@ public final class LiveTVChannelLogoStore: @unchecked Sendable {
                 return nil
             }
             guard !changedKeys.isEmpty else { return nil }
+            choicesRevision &+= 1
             let stamp = Int64(now().timeIntervalSince1970 * 1_000)
             for key in changedKeys {
                 modified[key] = overrides[key] != nil || matches[key] != nil || wikidataMatches[key] != nil ? stamp : nil

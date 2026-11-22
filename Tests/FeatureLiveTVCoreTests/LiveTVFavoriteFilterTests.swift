@@ -18,7 +18,7 @@ final class LiveTVFavoriteFilterTests: XCTestCase {
             channel("3", "US EN: CNN 4K", ["US| NEWS ᴴᴰ/ᴿᴬᵂ ⁶⁰ᶠᵖˢ"]), channel("4", "CA EN: TSN 4K", ["CA| SPORT"]),
             channel("5", "CA FR: AHC", ["CA| DOCUMENTARY FR"]),
             channel("6", "#### SPORTSNET ####", ["CA| SPORT"]),
-            channel("7", "TSN+ 01 | Leafs vs. Bruins (2026-11-19 21:25:00)", ["CA| TSN+ PPV"])
+            channel("7", "TSN+ 01 | Leafs vs. Bruins (\(LiveTVEventStamp.upcoming().stamp))", ["CA| TSN+ PPV"])
         ], favoriteFilterStore: favoriteFilterStore)
     }
 

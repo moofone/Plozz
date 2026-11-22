@@ -261,7 +261,7 @@ struct LiveTVServerCatalog: Sendable {
                       && $0.startDate.timeIntervalSince1970.isFinite && $0.endDate.timeIntervalSince1970.isFinite
                       && $0.startDate < $0.endDate
               }),
-              programs.reduce(0, { $0 + $1.title.utf8.count + ($1.subtitle?.utf8.count ?? 0) })
+              programs.reduce(0, { $0 + $1.title.utf8.count + ($1.subtitle?.utf8.count ?? 0) + Self.details(of: $1).retainedTextBytes })
                 <= LiveTVXMLTVParser.maximumRetainedTextBytes
         else { throw LiveTVServerImportError.invalidGuide }
         let mapped = programs.map {
@@ -269,11 +269,26 @@ struct LiveTVServerCatalog: Sendable {
                 id: "server-program-\(Self.digest(source.id + "\u{1F}" + source.accountID + "\u{1F}" + $0.channelID + "\u{1F}" + $0.id))",
                 channelID: Self.channelID(source: source, nativeID: $0.channelID),
                 title: $0.title, subtitle: $0.subtitle ?? "",
-                start: $0.startDate, end: $0.endDate
+                start: $0.startDate, end: $0.endDate, details: Self.storedDetails(of: $0)
             )
         }
         guard Set(mapped.map(\.id)).count == mapped.count else { throw LiveTVServerImportError.invalidGuide }
         return mapped
+    }
+
+    /// The provider's synopsis, categories and artwork, kept so the guide hero and details show them.
+    private static func details(of programme: ServerLiveTVProgramme) -> LiveTVProgramDetails {
+        let overview = programme.overview?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return LiveTVProgramDetails(
+            description: overview?.isEmpty == false ? overview : nil,
+            categories: programme.categories, artworkURL: programme.imageURL
+        )
+    }
+
+    /// Nil when the provider gave none of them, so a bare listing stores no empty details.
+    private static func storedDetails(of programme: ServerLiveTVProgramme) -> LiveTVProgramDetails? {
+        let details = details(of: programme)
+        return details == LiveTVProgramDetails() ? nil : details
     }
 
     static func channelID(source: LiveTVServerSource, nativeID: String) -> String {

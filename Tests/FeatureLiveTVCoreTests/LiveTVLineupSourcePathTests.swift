@@ -106,7 +106,7 @@ final class LiveTVLineupSourcePathTests: XCTestCase {
 
     func testOnlyEventsThatAreOnAreKeptNotIdleSlotsOrNamesThatMentionEvents() {
         let rows = [
-            ServerLiveTVChannel(id: "e1", name: "DE: Live Event (2026-11-17 20:00:00)", groups: ["DE| PPV"]),
+            ServerLiveTVChannel(id: "e1", name: "DE: Live Event (\(LiveTVEventStamp.upcoming().stamp))", groups: ["DE| PPV"]),
             ServerLiveTVChannel(id: "e2", name: "- NO EVENT STREAMING - ESPN+ 14", groups: ["DE| PPV"]),
             ServerLiveTVChannel(id: "e3", name: "NO EVENT STREAMING", groups: ["DE| PPV"]),
             ServerLiveTVChannel(id: "e4", name: "DE: Event Horizon TV", groups: ["DE| Documentaries"])

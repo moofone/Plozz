@@ -208,6 +208,36 @@ final class LiveTVSyncArtworkWriterTests: XCTestCase {
         XCTAssertEqual(downloads.count, 40)
     }
 
+    func testMatchArrivingAfterEmptyBootstrapPublishesPreparedStationMark() async throws {
+        let fixture = try fixture()
+        let id = LiveTVServerCatalog.channelID(source: fixture.source, nativeID: "7")
+        let key = LiveTVChannelLogoKey(sourceID: fixture.source.id, channelID: id)
+        XCTAssertTrue(fixture.service.store.setOverride(nil, for: key))
+        let cache = ThemedChannelLogoArtworkCache(capacity: 10)
+        let marks = LiveTVGuideStationMarkIndex()
+        let downloads = Downloads()
+        let data = pngData()
+        let writer = LiveTVSyncArtworkWriter(cache: cache, logoService: fixture.service, logoData: { url in
+            downloads.record(url)
+            return data
+        }, stationMarks: marks)
+
+        _ = await writer.publish(LiveTVGuideRefreshResult(), scope: fixture.scope)
+        XCTAssertTrue(marks.hasCommitted(accountID: fixture.source.accountID))
+        XCTAssertNil(marks.presentation(forChannelID: id)?.identity)
+        XCTAssertEqual(downloads.count, 0)
+
+        let identity = LiveTVChannelLogoIdentity(key: key, nameKey: "syncchannel")
+        let file = "Synthetic \(UUID().uuidString).png"
+        XCTAssertTrue(fixture.service.store.recordWikidataMatches([identity: .logo(qid: "Q42", file: file)]))
+        let next = await writer.publish(LiveTVGuideRefreshResult(), scope: fixture.scope)
+        XCTAssertEqual(next.built, 1, "matching must not wait for a changed guide refresh")
+        let published = try XCTUnwrap(marks.presentation(forChannelID: id)?.identity)
+        XCTAssertTrue(cache.contains(published))
+        _ = await writer.publish(LiveTVGuideRefreshResult(), scope: fixture.scope)
+        XCTAssertEqual(downloads.count, 1, "unchanged artwork must not be downloaded again")
+    }
+
     func testBootstrapPreparesMoreThanFifteenHundredDistinctLogos() async throws {
         let fixture = try manyFixture(count: 1_600)
         let cache = ThemedChannelLogoArtworkCache(capacity: 4_000)

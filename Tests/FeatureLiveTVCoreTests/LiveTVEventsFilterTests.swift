@@ -127,26 +127,29 @@ final class LiveTVEventsFilterTests: XCTestCase {
         return formatter.date(from: stamp)!
     }
 
+    /// The stamps are upcoming (an ended event leaves the catalog); the title's `ET` clock agrees with the stamp in Eastern time.
     func testEachSourceReadsItsStampsInItsOwnInferredZone() throws {
-        var channels = (1...5).map {
-            sourceChannel("east-\($0)", $0, "(A 00\($0)) | Game \($0) 6:00PM ET (2026-11-17 18:00:15)", source: "east")
-        }
-        channels.append(sourceChannel("viewer", 6, "(B 001) | Local Game (2026-11-17 18:00:15)", source: "other"))
-        let model = LiveTVPrototypeModel(channels: channels)
         let eastern = TimeZone(identifier: "America/New_York")!
+        let game = LiveTVEventStamp.upcoming(in: eastern, seconds: 15)
+        var channels = (1...5).map {
+            sourceChannel("east-\($0)", $0, "(A 00\($0)) | Game \($0) \(game.clock) ET (\(game.stamp))", source: "east")
+        }
+        channels.append(sourceChannel("viewer", 6, "(B 001) | Local Game (\(game.stamp))", source: "other"))
+        let model = LiveTVPrototypeModel(channels: channels)
         XCTAssertEqual(
-            try XCTUnwrap(model.channel(id: "east-1")?.eventSlot?.start), wallClock("2026-11-17 18:00:15", in: eastern))
+            try XCTUnwrap(model.channel(id: "east-1")?.eventSlot?.start), wallClock(game.stamp, in: eastern))
         XCTAssertEqual(
-            try XCTUnwrap(model.channel(id: "viewer")?.eventSlot?.start), wallClock("2026-11-17 18:00:15", in: .current),
+            try XCTUnwrap(model.channel(id: "viewer")?.eventSlot?.start), wallClock(game.stamp, in: .current),
             "A source with no zone evidence uses the viewer's zone")
     }
 
     func testSourceWithTooFewZoneNamesUsesTheViewersZone() throws {
+        let game = LiveTVEventStamp.upcoming(in: TimeZone(identifier: "America/New_York")!, seconds: 15)
         let channels = (1...4).map {
-            sourceChannel("e\($0)", $0, "(A 00\($0)) | Game \($0) 6:00PM ET (2026-11-17 18:00:15)", source: "few")
+            sourceChannel("e\($0)", $0, "(A 00\($0)) | Game \($0) \(game.clock) ET (\(game.stamp))", source: "few")
         }
         let model = LiveTVPrototypeModel(channels: channels)
         XCTAssertEqual(
-            try XCTUnwrap(model.channel(id: "e1")?.eventSlot?.start), wallClock("2026-11-17 18:00:15", in: .current))
+            try XCTUnwrap(model.channel(id: "e1")?.eventSlot?.start), wallClock(game.stamp, in: .current))
     }
 }

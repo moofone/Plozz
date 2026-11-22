@@ -10,6 +10,50 @@ final class PrototypeGuideGlassTests: XCTestCase {
     override func setUp() { super.setUp(); LiveTVGlassLayout.override = .hd1080 }
     override func tearDown() { LiveTVGlassLayout.override = nil; super.tearDown() }
 
+    /// A programme that began before the scrolled-to edge shows its title at the edge, not at its off-screen start;
+    /// near its end the title keeps the minimum title width and leaves with the cell.
+    func testTitleOfAProgrammeStartingOffScreenStartsAtTheVisibleEdge() {
+        typealias M = PrototypeGuideCellMetrics
+        XCTAssertEqual(M.titleLead(offset: 0, cellX: 0, cellWidth: 1_200), 0)
+        XCTAssertEqual(M.titleLead(offset: 300, cellX: 500, cellWidth: 1_200), 0, "a cell on screen keeps its title")
+        XCTAssertEqual(M.titleLead(offset: 1_546, cellX: 1_000, cellWidth: 1_200), 546)
+        XCTAssertEqual(M.titleLead(offset: 2_150, cellX: 1_000, cellWidth: 1_200), 1_200 - M.minimumTitleWidth)
+        XCTAssertEqual(M.titleLead(offset: 5_000, cellX: 1_000, cellWidth: 80), 0, "too narrow for a title")
+        XCTAssertEqual(M.titleLead(offset: .nan, cellX: 0, cellWidth: 1_200), 0)
+    }
+
+    /// Mockup `appleHero`: one meta line (no time while on now; labels inline, category first, no country) and the
+    /// synopsis alone, so the description keeps its two lines in the fixed-height hero.
+    func testHeroMetaLineAndDescriptionFollowTheMockup() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let locale = Locale(identifier: "en_US")
+        let channel = LiveTVPrototypeChannel(
+            id: "c", number: 1, name: "CA EN: CITYTV TORONTO HD", category: "News", symbol: "tv", accent: 0,
+            source: .iptv, tagline: "", tags: [.country("CA"), .language("EN"), .hd])
+        let details = LiveTVProgramDetails(description: "  Debra gets her sanctuary.\n", categories: [" ", "Reality"])
+        func program(from: TimeInterval, to: TimeInterval, subtitle: String = "") -> LiveTVPrototypeProgram {
+            LiveTVPrototypeProgram(
+                id: "p", channelID: "c", title: "Home Town Takeover", subtitle: subtitle,
+                start: now.addingTimeInterval(from), end: now.addingTimeInterval(to), details: details)
+        }
+        XCTAssertNil(PrototypeGlassHero.metaWords(for: program(from: -600, to: 600), now: now, ended: false, locale: locale))
+        XCTAssertEqual(PrototypeGlassHero.metaWords(for: program(from: -600, to: 600, subtitle: "Bandshell"),
+                                                    now: now, ended: false, locale: locale), "Bandshell")
+        let later = PrototypeGlassHero.metaWords(for: program(from: 3_600, to: 7_200), now: now, ended: false, locale: locale)
+        XCTAssertNotNil(later)
+        XCTAssertTrue(later?.contains("\u{2013}") == true, "a later programme says when it is on")
+        XCTAssertTrue(PrototypeGlassHero.metaWords(for: program(from: -7_200, to: -3_600), now: now, ended: true,
+                                                   locale: locale)?.hasPrefix("Ended") == true)
+        let labels = PrototypeGlassHero.programmeLabels(for: program(from: -600, to: 600), channel: channel)
+        XCTAssertEqual(labels.first, "Reality")
+        XCTAssertFalse(labels.contains("CA"), "the country belongs to the channel row, not the programme")
+        XCTAssertEqual(labels, ["Reality", "EN", "HD"])
+        XCTAssertEqual(PrototypeGlassHero.description(of: program(from: -600, to: 600, subtitle: "Bandshell")),
+                       "Debra gets her sanctuary.", "the episode is on the meta line, not repeated in the synopsis")
+        XCTAssertNil(PrototypeGlassHero.description(of: LiveTVPrototypeProgram(
+            id: "q", channelID: "c", title: "Bare", subtitle: "", start: now, end: now.addingTimeInterval(60))))
+    }
+
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
     private func program(from: TimeInterval, to: TimeInterval) -> LiveTVPrototypeProgram {
@@ -103,12 +147,13 @@ final class PrototypeGuideGlassTests: XCTestCase {
     }
 
     #if os(tvOS)
-    /// The hero's glass panel: 24 px padding all round and the sheet's radius (cell radius + 20 px), at both layouts' pixel scale.
-    func testHeroGlassPanelFollowsThePlozzLikeDesignAtBothSizes() {
-        XCTAssertEqual(PrototypeGlassHero.backingPadding(.hd1080), 24)
-        XCTAssertEqual(PrototypeGlassHero.backingCornerRadius(.hd1080), 44)
-        XCTAssertEqual(PrototypeGlassHero.backingPadding(.uhd4K), 18, accuracy: 0.001)
-        XCTAssertEqual(PrototypeGlassHero.backingCornerRadius(.uhd4K), 31.5, accuracy: 0.001, "22 + 20 px, × 0.75")
+    /// The hero's free shade (mockup `.herofree`): no panel, a 50% black shape 70 × 90 px past the text, radius 120, blur 46, at the
+    /// hero's scale at both sizes.
+    func testHeroShadeFollowsThePlozzLikeDesignAtBothSizes() {
+        XCTAssertEqual(PrototypeGlassHero.shade(.hd1080), .init(vertical: 70, horizontal: 90, cornerRadius: 120, blur: 46))
+        let uhd = LiveTVGlassLayout.uhd4K
+        XCTAssertEqual(PrototypeGlassHero.shade(uhd), .init(vertical: uhd.ui(70), horizontal: uhd.ui(90), cornerRadius: uhd.ui(120), blur: uhd.ui(46)))
+        XCTAssertEqual(PrototypeGlassHero.Shade.opacity, 0.5)
         XCTAssertEqual(PrototypeGlassHero.headingDropPoints(.hd1080, onSheet: true), 24)
         XCTAssertEqual(PrototypeGlassHero.headingDropPoints(.hd1080, onSheet: false), 19.5)
     }

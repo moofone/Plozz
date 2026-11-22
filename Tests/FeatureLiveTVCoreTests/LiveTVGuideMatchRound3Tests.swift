@@ -184,4 +184,138 @@ final class LiveTVGuideMatchRound3Tests: XCTestCase {
         }
         if let out = value("PLOZZ_COVERAGE_REPORT") { try (["shifted\tbase\toffset\tagreement\tshare\tverdict"] + rows).joined(separator: "\n").write(toFile: out + ".timeshift", atomically: true, encoding: .utf8) }
     }
+
+    // MARK: Feed-qualified ids and bracketed qualifiers
+
+    func testAFeedQualifiedIDServesOnlyItsOwnCoast() {
+        let guide = ["CBS.us@East": ["CBS - Eastern"], "CBS.us@West": ["CBS - Pacific"], "NBC.us@West": ["NBC - Network Pacific"]]
+        XCTAssertEqual(station(for: channel("a", "CA: CBS WEST", group: "CA| CANADA"), in: guide), "CBS.us@West")
+        XCTAssertEqual(station(for: channel("b", "CA: NBC WEST", group: "CA| CANADA"), in: guide), "NBC.us@West")
+        XCTAssertEqual(station(for: channel("c", "CA: CBS EAST", group: "CA| CANADA"), in: guide), "CBS.us@East")
+        XCTAssertEqual(station(for: channel("d", "US: CBS", group: "US| NETWORKS"), in: guide), "CBS.us@East")
+    }
+
+    func testAPacificFeedNeverAnswersTheBaseName() {
+        let guide = ["CBS.us@West": ["CBS - Pacific"], "NBC.us@West": ["NBC - Network Pacific"]]
+        XCTAssertNil(station(for: channel("a", "US: CBS", group: "US| NETWORKS"), in: guide), "the Pacific schedule is three hours late")
+        XCTAssertNil(station(for: channel("b", "CA: CBS EAST", group: "CA| CANADA"), in: guide))
+        XCTAssertNil(station(for: channel("c", "US: NBC HD", group: "US| NETWORKS"), in: guide))
+        XCTAssertTrue(LiveTVGuideStationIndex.isTimeShiftedStation("CBS.us@West"))
+        XCTAssertFalse(LiveTVGuideStationIndex.isTimeShiftedStation("CBS.us@East"))
+        XCTAssertFalse(LiveTVGuideStationIndex.isTimeShiftedStation("CITVDT.ca@SD"))
+    }
+
+    func testAStationNameWithABracketedQualifierIsReadWithAndWithoutIt() {
+        let guide = ["CICADT.ca@SD": ["TVO (TV Ontario)"], "TVO.ch": ["CH: TVO 4K"], "CFCMDT.ca@SD": ["CFCM TVA (Quebec)"], "TVA.ca": ["TVA"]]
+        XCTAssertEqual(station(for: channel("a", "CA: TVO", group: "CA| CANADA"), in: guide), "CICADT.ca@SD")
+        XCTAssertEqual(station(for: channel("b", "CA FR: TVA QUEBEC HD", group: "CA| GENERAL FR"), in: guide), "CFCMDT.ca@SD",
+                       "the call sign before the network is the station's own id")
+        XCTAssertEqual(station(for: channel("c", "CA FR: TVA HD", group: "CA| GENERAL FR"), in: guide), "TVA.ca", "the network is not the Quebec station")
+    }
+
+    func testABracketedQualifierNeverOverrulesOrStretchesAName() {
+        XCTAssertNil(station(for: channel("a", "CA FR: TVA HD", group: "CA| GENERAL FR"), in: ["CFCMDT.ca@SD": ["CFCM TVA (Quebec)"]]),
+                     "a market's station is not the network")
+        XCTAssertNil(station(for: channel("b", "US: HBO", group: "US| MOVIES"), in: ["HBO2.us@SD": ["HBO (Pacific)"]]), "a qualifier naming a coast stays")
+        XCTAssertEqual(station(for: channel("c", "CA: GLOBAL TORONTO", group: "CA| CANADA"),
+                               in: ["globaltoronto.ca": ["Global Toronto"], "CIIIDT.ca@SD": ["Global Toronto (CIII)"]]), "globaltoronto.ca",
+                       "an exact name still decides; the qualified one does not make it ambiguous")
+        XCTAssertNil(station(for: channel("d", "CA: TVO", group: "CA| CANADA"), in: ["TVO.ch": ["CH: TVO 4K"], "CBCT.ca": ["CBC (Charlottetown)"]]))
+        XCTAssertEqual(LiveTVGuideStationIndex.qualifiedKeys(of: "CFCM TVA (Quebec)", stemKey: "cfcmdt"), ["cfcmtva", "tvaquebec"])
+        XCTAssertEqual(LiveTVGuideStationIndex.qualifiedKeys(of: "Global Edmonton", stemKey: "citvdt"), [])
+    }
+
+    // MARK: Global News
+
+    /// Global's 24-hour news channels (snapshot 2026-11-17 names, groups and ids) beside their parent stations: a news channel with no
+    /// guide of its own stays unmatched rather than reading its parent's schedule, which is news less than a third of the day. Global
+    /// News BC keeps its own guide, and Global Vancouver is still Global BC (the same station, the guide's own abbreviation).
+    func testAGlobalNewsChannelNeverReadsItsParentStation() {
+        let guide: [String: [String]] = [
+            "GlobalBC.ca": ["CA: GLOBAL BC"], "GlobalCalgary.ca": ["CA EN: GLOBAL CALAGRY SD"],
+            "globaltoronto.ca": ["CA EN: GLOBAL TORONTO HD"], "globalnewsbc1.ca": ["CA: GLOBAL NEWS"],
+            "GlobalNewsBC1.ca": ["CA EN: GLOBAL NEWS REGINA HD", "CA EN: GLOBAL NEWS PETERBOROUGH HD",
+                                 "CA EN: GLOBAL NEWS NATIONAL HD", "CA EN: GLOBAL NEWS BC HD"]
+        ]
+        let rows: [(name: String, group: String, id: String?, expected: String?)] = [
+            ("CA EN: GLOBAL NEWS TORONTO HD", "CA| NEWS EN", nil, nil),
+            ("CA EN: GLOBAL NEWS CALGARY HD", "CA| NEWS EN", nil, nil),
+            ("CA EN: GLOBAL NEWS VANCOUVER HD", "CA| NEWS EN", nil, nil),
+            ("PRIME: GLOBAL NEWS BC ᴿᴬᵂ", "CA| PRIME ᴿᴬᵂ ⁶⁰ᶠᵖˢ", nil, nil),
+            ("PRIME: GLOBAL NEWS CALGARY ᴿᴬᵂ", "CA| PRIME ᴿᴬᵂ ⁶⁰ᶠᵖˢ", nil, nil),
+            ("PRIME: GLOBAL NEWS TORONTO ᴿᴬᵂ", "CA| PRIME ᴿᴬᵂ ⁶⁰ᶠᵖˢ", nil, nil),
+            ("CA EN: GLOBAL NEWS BC HD", "CA| NEWS EN", "GlobalNewsBC1.ca", "GlobalNewsBC1.ca"),
+            ("CA EN: GLOBAL VANCOUVER", "CA| GENERAL EN", nil, "GlobalBC.ca"),
+            ("CA: GLOBAL BC", "CA| CANADA ᴴᴰ/ᴿᴬᵂ ⁶⁰ᶠᵖˢ", "GlobalBC.ca", "GlobalBC.ca"),
+            ("CA EN: GLOBAL TORONTO HD", "CA| CANADA ᴴᴰ/ᴿᴬᵂ ⁶⁰ᶠᵖˢ", "globaltoronto.ca", "globaltoronto.ca")
+        ]
+        let channels = rows.enumerated().map { channel("g\($0.offset)", $0.element.name, group: $0.element.group, guideID: $0.element.id) }
+        let result = LiveTVGuideMatcher().matching(channels: channels, guideChannels: guide, trustsGuideIDs: true)
+        for (offset, row) in rows.enumerated() {
+            XCTAssertEqual(result.assignments["g\(offset)"]?.guideChannelID, row.expected, row.name)
+        }
+    }
+
+    // MARK: Halifax
+
+    /// The provider's Halifax rows (snapshot 2026-11-17, names, groups and ids as exported) beside the other Atlantic and Global
+    /// stations of the same guide. Every row with an id of its own reads that station; the two Global rows with no id stay
+    /// unmatched rather than borrowing Global Halifax, whose schedule is a different channel's.
+    func testEveryHalifaxRowReadsItsOwnStation() {
+        let guide: [String: [String]] = [
+            "CBHT.ca": ["CA EN: CBC HALIFAX HD"], "ctvhalifax.ca": ["CA EN: CTV HALIFAX"],
+            "CJCH.ca": ["CA EN: CTV ATLENTIC (ATV MONCTON)"], "ASN.ca": ["CA EN: CTV2 ATLANTIC HD"],
+            "CIHF.ca": ["CA EN: GLOBAL HALIFAX SD"], "CBAT.ca": ["CA EN: CBC FREDERICTON (HD)"],
+            "CBCT.ca": ["CA EN: CBC CHARLOTTETOWN (HD)"], "CBNT.ca": ["CA EN: CBC ST JOHN'S (HD)"],
+            "CIII.ca": ["CA EN: GLOBAL TORONTO HD"], "globaltoronto.ca": ["CA EN: GLOBAL TORONTO HD"],
+            "GlobalBC.ca": ["CA: GLOBAL BC"], "globalnewsbc1.ca": ["CA: GLOBAL NEWS"], "CTVNC.ca": ["CA EN: CTV NEWS CHANNEL"]
+        ]
+        let rows: [(name: String, group: String, id: String?, expected: String?)] = [
+            ("CA EN: CBC HALIFAX HD", "CA| KIDS EN", "CBHT.ca", "CBHT.ca"),
+            ("CA EN: CTV HALIFAX", "CA| GENERAL EN", "ctvhalifax.ca", "ctvhalifax.ca"),
+            ("CA EN: CTV ATLENTIC (ATV MONCTON)", "CA| GENERAL EN", "CJCH.ca", "CJCH.ca"),
+            ("CA EN: CTV2 ATLANTIC HD", "CA| GENERAL EN", "ASN.ca", "ASN.ca"),
+            ("CA EN: GLOBAL HALIFAX SD", "CA| GENERAL EN", "CIHF.ca", "CIHF.ca"),
+            ("CA EN: GLOBAL MARITIMES HD", "CA| NEWS EN", nil, nil),
+            ("CA EN: GLOBAL NEWS HALIFAX HD", "CA| NEWS EN", nil, nil)
+        ]
+        let channels = rows.enumerated().map { channel("h\($0.offset)", $0.element.name, group: $0.element.group, guideID: $0.element.id) }
+        let result = LiveTVGuideMatcher().matching(channels: channels, guideChannels: guide, trustsGuideIDs: true)
+        for (offset, row) in rows.enumerated() {
+            XCTAssertEqual(result.assignments["h\(offset)"]?.guideChannelID, row.expected, row.name)
+        }
+        // The same rows when the provider omits its ids: the names alone still find the stations, and never another market's.
+        let unnamed = rows.enumerated().map { channel("n\($0.offset)", $0.element.name, group: $0.element.group) }
+        let byName = LiveTVGuideMatcher().matching(channels: unnamed, guideChannels: guide, trustsGuideIDs: true)
+        for (offset, row) in rows.enumerated() {
+            XCTAssertEqual(byName.assignments["n\(offset)"]?.guideChannelID, row.expected, "by name: \(row.name)")
+        }
+    }
+
+    /// A provider guide lists, as an id's names, every row it pointed at that id: an id with several names is never read by those
+    /// names (`TS` named after hundreds of channels, `HBO.us` also named `HBO WEST HD`), only an id with the one name.
+    func testOnlyAStationWithOneProviderNameIsReadByIt() {
+        let guide: [String: [String]] = [
+            "TS": ["NL: Een ᴿᴬᵂ ◉", "CA EN: CNN HD", "US: NBC NEWS NOW", "UK: LFC TV"],
+            "HBO.us": ["US: HBO HD", "US: HBO WEST HD", "US: HBO EAST"],
+            "skyaction.uk": ["UK: SKY CINEMA ACTION HEVC 4K"]
+        ]
+        XCTAssertNil(station(for: channel("a", "CA EN: CNN HD", group: "CA| NEWS EN"), in: guide), "a catch-all id")
+        XCTAssertNil(station(for: channel("b", "PRIME: NBC NEWS NOW ᴿᴬᵂ", group: "US| PRIME ᴿᴬᵂ"), in: guide))
+        XCTAssertNil(station(for: channel("c", "AT&T: HBO WEST ᴿᴬᵂ", group: "US| AT&T ᴿᴬᵂ"), in: guide), "the Pacific row is not HBO East")
+        XCTAssertEqual(station(for: channel("d", "UK: SKY CINEMA ACTION HD ◉", group: "UK| SKY CINEMA"), in: guide), "skyaction.uk")
+    }
+
+    /// The one name a provider gave an id is the row that carried it, so it passes the same checks as that row's id: a time-shifted
+    /// name on a base id, another number, or a sibling channel is the provider's mistake and is never read.
+    func testAProviderNameItsIDContradictsIsNotRead() {
+        let guide: [String: [String]] = [
+            "W.uk": ["UK: Quest Red +1 ◉"], "HistoryChannel.uk": ["UK: SKY HISTORY +1 ◉"],
+            "SpectrumNews13.us": ["US: SPECTRUM NEWS 1 HD"], "CBHT.ca": ["CA EN: CBC HALIFAX HD"]
+        ]
+        XCTAssertNil(station(for: channel("a", "UK: QUEST RED +1", group: "UK| ENTERTAINMENT"), in: guide))
+        XCTAssertNil(station(for: channel("b", "UK: SKY HISTORY +1", group: "UK| DOCUMENTARY"), in: guide), "the base schedule, an hour early")
+        XCTAssertNil(station(for: channel("c", "US: SPECTRUM NEWS 1", group: "US| NEWS"), in: guide), "News 13 is one market of many")
+        XCTAssertEqual(station(for: channel("d", "CA: CBC HALIFAX", group: "CA| GENERAL EN"), in: guide), "CBHT.ca", "a call-sign id agrees")
+    }
 }

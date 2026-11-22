@@ -12,6 +12,9 @@ extension IPTVChannelName {
     ///   `NNfps`, `NNNp`, brackets allowed, `HD/RAW` joined by `/`) become tags and leave the name.
     ///   `SD`, codecs (`HEVC H264 H265`) and unmapped `NNNp` sizes leave the name without a tag.
     ///   Bare numbers and `+1` stay, so `CHANNEL 4` is intact. The name is never emptied.
+    /// - **Malformed HD suffixes.** A separate `HD` can precede `(R)` or the name's own country code in parentheses.
+    ///   An attached uppercase `HD` is recognized only after a substantial word in a multiword, country-prefixed name.
+    ///   Short or uncorroborated endings and unrelated parentheticals stay in the name.
     /// - Tags are ordered country, language, then descriptors as written; duplicates are dropped.
     ///
     /// The tags do not depend on the clean-names setting: callers choose whether to show `name`.
@@ -32,15 +35,61 @@ extension IPTVChannelName {
             while end > 0, bytes[end - 1] == 0x20 { end -= 1 }
             var wordStart = end
             while wordStart > 0, bytes[wordStart - 1] != 0x20 { wordStart -= 1 }
-            guard wordStart > 0, wordStart < end,
-                  let found = descriptor(in: bytes, wordStart, end) else { break }
-            descriptors.append(contentsOf: found.reversed())
-            end = wordStart
+            guard wordStart > 0, wordStart < end else { break }
+            if let found = descriptor(in: bytes, wordStart, end) {
+                descriptors.append(contentsOf: found.reversed())
+                end = wordStart
+            } else if bytes[end - 1] == 0x29, let hdStart = annotatedHDStart(bytes, wordStart, end) {
+                descriptors.append(.hd)
+                end = hdStart
+            } else {
+                if bytes[end - 1] == 0x44, hasAttachedHD(bytes, wordStart, end) {
+                    descriptors.append(.hd)
+                    end -= 2
+                }
+                break
+            }
         }
         var start = 0
         var tags = parsePrefix(bytes, end: end, start: &start)
         for tag in descriptors.reversed() where !tags.contains(tag) { tags.append(tag) }
         return (String(decoding: UnsafeBufferPointer(rebasing: bytes[start..<end]), as: UTF8.self), tags)
+    }
+
+    /// A terminal `(R)` or redundant `(CC)` only qualifies immediately after a separate `HD`.
+    /// Leave any other annotation, and `HD` itself if it is the whole title, alone.
+    private static func annotatedHDStart(_ bytes: UnsafeBufferPointer<UInt8>, _ start: Int, _ end: Int) -> Int? {
+        let length = end - start
+        guard (length == 3 || length == 4), bytes[start] == 0x28, start > 4,
+              bytes[start - 2] & 0xDF == 0x44, bytes[start - 3] & 0xDF == 0x48,
+              bytes[start - 4] == 0x20 else { return nil }
+        let hdStart = start - 3
+        var nameStart = 0
+        let tags = parsePrefix(bytes, end: end, start: &nameStart)
+        guard nameStart < hdStart else { return nil }
+        if length == 3 { return bytes[start + 1] == 0x52 ? hdStart : nil }
+        guard let country = tags.first?.country,
+              country.utf8.elementsEqual(bytes[(start + 1)..<(start + 3)]) else { return nil }
+        return hdStart
+    }
+
+    /// Glued suffixes are inherently ambiguous. Require a tagged multiword name and a substantial
+    /// final word: do not split a short call sign, an untagged name, or an ambiguous FHD/UHD ending.
+    private static func hasAttachedHD(_ bytes: UnsafeBufferPointer<UInt8>, _ start: Int, _ end: Int) -> Bool {
+        let suffix = end - 2
+        guard suffix - start >= 5, suffix - start <= 64, bytes[suffix] == 0x48,
+              bytes[suffix - 1] != 0x46, bytes[suffix - 1] != 0x55 else { return false }
+        var nameStart = 0
+        guard !parsePrefix(bytes, end: end, start: &nameStart).isEmpty, nameStart < start else { return false }
+        let stem = bytes[start..<suffix]
+        for byte in stem {
+            if byte >= 0x80 {
+                let word = String(decoding: stem, as: UTF8.self)
+                return word.count >= 5 && word.allSatisfy(\.isLetter)
+            }
+            guard (0x41...0x5A).contains(byte & 0xDF) else { return false }
+        }
+        return true
     }
 
     // MARK: Superscripts

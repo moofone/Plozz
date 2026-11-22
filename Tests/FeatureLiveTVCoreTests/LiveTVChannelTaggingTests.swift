@@ -40,12 +40,12 @@ final class LiveTVChannelTaggingTests: XCTestCase {
     }
 
     func testLeagueEventRowsGetTheirSportAndLiveEvents() {
-        let result = tags("(Apple) (MLS) 004 |  Seattle vs. Salt Lake  (2026-11-19 21:25:00)", groups: ["US| MLS PPV ⁽ᴮᴷ⁾"])
+        let result = tags("(Apple) (MLS) 004 |  Seattle vs. Salt Lake  (\(LiveTVEventStamp.upcoming().stamp))", groups: ["US| MLS PPV ⁽ᴮᴷ⁾"])
         XCTAssertTrue(result.isSuperset(of: ["live-events", "football", "sports", "pay-per-view"]), "\(result)")
     }
 
     func testEventSportComesFromTheCompetitionInTheTitle() {
-        let result = tags("Peacock 012 | Premier League: Arsenal vs Chelsea (2026-11-19 21:25:00)", groups: ["US| PEACOCK PPV ⱽᴵᴾ"])
+        let result = tags("Peacock 012 | Premier League: Arsenal vs Chelsea (\(LiveTVEventStamp.upcoming().stamp))", groups: ["US| PEACOCK PPV ⱽᴵᴾ"])
         XCTAssertTrue(result.isSuperset(of: ["live-events", "football", "sports"]), "\(result)")
         XCTAssertFalse(tags("Premier League: Arsenal vs Chelsea").contains("live-events"))
     }

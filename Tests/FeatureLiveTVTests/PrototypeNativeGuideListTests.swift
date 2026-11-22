@@ -267,6 +267,71 @@ final class PrototypeNativeGuideListTests: XCTestCase {
         XCTAssertEqual(scroll.scrollCommandCount, 0)
     }
 
+    /// The guide loads listings around the row `scrolled` reports. A list opened at a saved position must report that position,
+    /// not the top of the list it had before placement, or the rows on screen are never asked for.
+    func testASavedViewportIsReportedAsTheScrolledRow() throws {
+        let rows = (0..<5_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+        let scroll = PrototypeGuideScrollController()
+        let controller = Guide.Controller()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1920, height: 720))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            Guide.dismantleUIViewController(controller, coordinator: ())
+        }
+        controller.view.frame = window.bounds
+        var scrolled: [LiveTVGuideRowID?] = []
+        let list = Guide(
+            rows: rows, scrollController: scroll, scrolled: { row, _ in scrolled.append(row) }, viewportChanged: nil,
+            initialViewport: PrototypeGuideListViewport(row: rows[3_000], relativeOffset: 0), revision: { _ in 0 },
+            timelineWidth: 5_000, pinnedWidth: 140,
+            stationaryContent: { Text($0.channelID) }, scrollingContent: { _ in Text("Programme") }
+        )
+        controller.update(list, environment: EnvironmentValues())
+        // Report before the native pass places the list, as a SwiftUI update can.
+        let early = expectation(description: "early report")
+        DispatchQueue.main.async { early.fulfill() }
+        wait(for: [early], timeout: 2)
+        controller.view.layoutIfNeeded()
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.async { DispatchQueue.main.async { settled.fulfill() } }
+        wait(for: [settled], timeout: 2)
+        XCTAssertEqual(scrolled.last ?? nil, rows[3_000], "the scrolled row is the placed anchor")
+        XCTAssertEqual(scroll.scrollCommandCount, 0)
+    }
+
+    /// After a programmatic scroll the reported row is the new top row, read from layout geometry. A cell kept alive
+    /// off screen (UIKit keeps the focused one) must not hold the report, and the listings, at the old position.
+    func testAScrollReportsTheNewTopRow() throws {
+        let rows = (0..<5_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+        let scroll = PrototypeGuideScrollController()
+        let controller = Guide.Controller()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1920, height: 720))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            Guide.dismantleUIViewController(controller, coordinator: ())
+        }
+        controller.view.frame = window.bounds
+        var scrolled: [LiveTVGuideRowID?] = []
+        let list = Guide(
+            rows: rows, scrollController: scroll, scrolled: { row, _ in scrolled.append(row) }, viewportChanged: nil,
+            initialViewport: PrototypeGuideListViewport(row: rows[135], relativeOffset: 0), revision: { _ in 0 },
+            timelineWidth: 5_000, pinnedWidth: 140,
+            stationaryContent: { Text($0.channelID) }, scrollingContent: { _ in Text("Programme") }
+        )
+        controller.update(list, environment: EnvironmentValues())
+        controller.view.layoutIfNeeded()
+        scroll.scrollTo(rows[2_258], anchor: .top)
+        // Report before the collection lays out at the new offset, as the async report can.
+        let settled = expectation(description: "settled")
+        DispatchQueue.main.async { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
+        XCTAssertEqual(scrolled.last ?? nil, rows[2_258])
+    }
+
     func testListWithoutASavedViewportOrWithAnUnknownAnchorStartsAtTheTop() {
         let rows = (0..<500).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
         for initial in [nil, PrototypeGuideListViewport(row: .init(channelID: "removed"), relativeOffset: 12)] {

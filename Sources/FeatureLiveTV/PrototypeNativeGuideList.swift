@@ -401,6 +401,8 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
             collectionView.dataSource = self
             collectionView.delegate = self
             positionedCollection.attached = { [weak self] in self?.attachScrollController() }
+            // A report skipped while the list was unattached or not yet placed is made once it is placed.
+            positionedCollection.placed = { [weak self] in self?.reportScroll() }
             positionedCollection.failedFocusMove = { [weak self] context in
                 guard let self else { return }
                 if !redirectVerticalFocus(in: context) { _ = redirectHorizontalFocus(in: context) }
@@ -532,6 +534,7 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
             scroll.indices = indices
             scroll.jump = { [weak self] offset in self?.jump(to: offset) }
             scroll.firstVisibleRow = { [weak self] in self?.currentViewport()?.row }
+            reportScroll()
         }
 
         #if DEBUG
@@ -851,8 +854,10 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
                 guard let parentView = self.parentView,
                       parentView.scrollController.collection === self.collectionView, self.collectionView.window != nil,
                       self.positionedCollection.pendingPlacement == nil else { return }
-                let first = self.collectionView.indexPathsForVisibleItems.map(\.item).min()
-                let row = first.flatMap { self.rowIDs.indices.contains($0) ? self.rowIDs[$0] : nil }
+                // The top row from layout geometry, not `indexPathsForVisibleItems`: the collection keeps the focused cell
+                // alive after it scrolls away, which pinned the reported row (and the guide listings loaded around it) to
+                // where focus had been.
+                let row = self.anchor(atOffset: self.collectionView.contentOffset.y)?.row
                 let y = self.collectionView.contentOffset.y + self.collectionView.adjustedContentInset.top
                 if self.lastVerticalReport?.0 != row || self.lastVerticalReport?.1 != y {
                     self.lastVerticalReport = (row, y)
@@ -931,6 +936,8 @@ private final class GuideCollectionView: UICollectionView {
     private var timelineDisplayLink: CADisplayLink?
     var pendingPlacement: (index: Int, relativeOffset: CGFloat)?
     var attached: (() -> Void)?
+    /// Called after layout installs a pending placement, so the placed position is reported even when the offset did not move.
+    var placed: (() -> Void)?
     var failedFocusMove: ((UIFocusUpdateContext) -> Void)?
     #if DEBUG
     var didLayout: (() -> Void)?
@@ -953,6 +960,8 @@ private final class GuideCollectionView: UICollectionView {
     }
 
     override func layoutSubviews() {
+        let placing = pendingPlacement != nil && !bounds.isEmpty
+        defer { if placing { placed?() } }
         if let placement = pendingPlacement, !bounds.isEmpty {
             pendingPlacement = nil
             // SwiftUI resizes the represented view before layout. UIScrollView clamps against
@@ -986,17 +995,22 @@ private final class GuideCollectionView: UICollectionView {
         }
     }
 
+    /// True while the guide itself moves the timeline. UIScrollView's `setContentOffset(_:animated:)` assigns
+    /// `contentOffset` internally, which reaches the override below; without this the guide's own horizontal
+    /// moves were discarded with UIKit's, and focus walked off the right edge with the view standing still.
+    private var isMovingTimeline = false
+
     override var contentOffset: CGPoint {
         get { super.contentOffset }
         set {
             let current = super.contentOffset
-            let proposed = CGPoint(x: current.x, y: newValue.y)
+            let proposed = CGPoint(x: isMovingTimeline ? newValue.x : current.x, y: newValue.y)
             if proposed != current { super.contentOffset = proposed }
         }
     }
 
     override func setContentOffset(_ contentOffset: CGPoint, animated: Bool) {
-        let proposed = CGPoint(x: super.contentOffset.x, y: contentOffset.y)
+        let proposed = CGPoint(x: isMovingTimeline ? contentOffset.x : super.contentOffset.x, y: contentOffset.y)
         if proposed != super.contentOffset { super.setContentOffset(proposed, animated: animated) }
     }
 
@@ -1026,6 +1040,8 @@ private final class GuideCollectionView: UICollectionView {
 
     private func setTimelineX(_ x: CGFloat) {
         guard super.contentOffset.x != x else { return }
+        isMovingTimeline = true
+        defer { isMovingTimeline = false }
         super.setContentOffset(CGPoint(x: x, y: super.contentOffset.y), animated: false)
     }
 

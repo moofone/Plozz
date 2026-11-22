@@ -224,17 +224,26 @@ final class LiveTVGuideCallSignTests: XCTestCase {
             guide[id] = object["displayNames"] as? [String] ?? []
         }
         var failures: [String] = [], report: [String] = [], checked = 0
-        for line in try String(contentsOfFile: fixturesPath, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: true).dropFirst() {
+        let lines = try String(contentsOfFile: fixturesPath, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: true)
+        // Columns are read by header name, so a file with other columns is never read at the wrong offsets.
+        let header = (lines.first ?? "").split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard let nameColumn = header.firstIndex(of: "row_name"), let expectedColumn = header.firstIndex(of: "expected_station_id"),
+              let confidenceColumn = header.firstIndex(of: "confidence"), let laneColumn = header.firstIndex(of: "lane") else {
+            return XCTFail("\((fixturesPath as NSString).lastPathComponent) is not a call-sign fixture: it needs row_name, "
+                + "expected_station_id, confidence and lane columns; found \(header)")
+        }
+        for line in lines.dropFirst() {
             let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-            guard fields.count >= 5, fields[3] == "callsign" else { continue }
-            let found = reads(fields[0], in: guide)
-            let agrees = fields[1] == "NONE" ? found == nil : found?.contains(fields[1]) == true
-            if Self.fixtureRowsWhereTheGuideIsRight.contains(fields[0]) { continue }
-            if fields[2] == "SURE" {
+            guard fields.count == header.count, fields[laneColumn] == "callsign" else { continue }
+            let (name, expected) = (fields[nameColumn], fields[expectedColumn])
+            let found = reads(name, in: guide)
+            let agrees = expected == "NONE" ? found == nil : found?.contains(expected) == true
+            if Self.fixtureRowsWhereTheGuideIsRight.contains(name) { continue }
+            if fields[confidenceColumn] == "SURE" {
                 checked += 1
-                if !agrees { failures.append("\(fields[0]) expected \(fields[1]) read \(found ?? [])") }
+                if !agrees { failures.append("\(name) expected \(expected) read \(found ?? [])") }
             } else {
-                report.append("unsure\t\(agrees ? "agrees" : "differs")\t\(fields[0])\t\(fields[1])\t\(found ?? [])")
+                report.append("unsure\t\(agrees ? "agrees" : "differs")\t\(name)\t\(expected)\t\(found ?? [])")
             }
         }
         if let out = value("PLOZZ_EXTRA_GUIDE_REPORT") {

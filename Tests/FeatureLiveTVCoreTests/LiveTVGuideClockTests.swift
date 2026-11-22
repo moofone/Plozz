@@ -213,9 +213,14 @@ final class LiveTVGuideClockTests: XCTestCase {
         XCTAssertTrue(endedActions.showsEndedLabel)
         XCTAssertEqual(LiveTVHeroActions(program: now, isPlayingChannel: false, now: clock).primary, .watch(resumes: false))
         XCTAssertEqual(LiveTVHeroActions(program: now, isPlayingChannel: true, now: clock).primary, .watch(resumes: true))
-        XCTAssertTrue(LiveTVHeroActions(program: now, isPlayingChannel: true, now: clock).showsMultiview)
+        // Mockup `heroButtons`: Multiview only for another channel's programme on now (or its channel without a guide).
+        XCTAssertTrue(LiveTVHeroActions(program: now, isPlayingChannel: false, now: clock).showsMultiview)
+        XCTAssertFalse(LiveTVHeroActions(program: now, isPlayingChannel: true, now: clock).showsMultiview)
         XCTAssertEqual(LiveTVHeroActions(program: future, isPlayingChannel: true, now: clock).primary, .upcoming)
+        XCTAssertFalse(LiveTVHeroActions(program: future, isPlayingChannel: false, now: clock).showsMultiview)
         XCTAssertEqual(LiveTVHeroActions(program: nil, isPlayingChannel: true, now: clock).primary, .watch(resumes: true))
+        XCTAssertFalse(LiveTVHeroActions(program: nil, isPlayingChannel: true, now: clock).showsMultiview)
+        XCTAssertTrue(LiveTVHeroActions(program: nil, isPlayingChannel: false, now: clock).showsMultiview)
     }
 
     func testAnEndedProgrammeNeverOffersResumeEvenOnThePlayingChannel() {

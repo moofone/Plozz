@@ -1179,6 +1179,10 @@ public final class LiveTVPrototypeModel {
                 await logoService.preferColourLogos(plan.pending) { urls in
                     await self?.applyLogos(urls, generation: generation)
                 }
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    NotificationCenter.default.post(name: LiveTVChannelLogoStore.didResolveArtworkChoices, object: logoService.store)
+                }
             }
             await self?.measureGuideIcons(of: plan.guideIcons, using: logoService, generation: generation)
             logoService.store.requestWrite()

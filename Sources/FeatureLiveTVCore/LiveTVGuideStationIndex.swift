@@ -35,6 +35,9 @@ public struct LiveTVGuideStationIndex: Sendable {
 
     private let exact: [String: [Station]]
     private let loose: [String: [Station]]
+    /// Keys of display names with a trailing qualifier in brackets (`TVO (TV Ontario)`, `CFCM TVA (Quebec)`): read without it and
+    /// with it unbracketed, after the exact, alias and loose keys, so they never make one of those ambiguous.
+    private let qualified: [String: [Station]]
     /// Stations whose id is a US call sign (`KPIX`, `WZTVDT2`, `abc11wtvd`), by call sign with and without the `DT` subchannel.
     private let callSigns: [String: Station]
     /// Stations that name their call sign and subchannel (`FOX (WTXF) …`, `WTXFTV291.us@HD`); see `LiveTVGuideCallSignTable`.
@@ -44,13 +47,20 @@ public struct LiveTVGuideStationIndex: Sendable {
         var exactTable: [String: [Station]] = [:]
         var looseTable: [String: [Station]] = [:]
         var callSignTable: [String: Station] = [:]
+        var qualifiedTable: [String: [Station]] = [:]
         for (id, names) in guideChannels {
             let stem = Self.stem(of: id)
-            let stemKey = Self.key(of: stem.name) ?? ""
+            let feed = Self.feedWord(of: id)
+            // `CBS.us@West` is the CBS Pacific schedule: its key is `cbswest`, and the bare `cbs` is the base feed's alone.
+            let shiftedFeed = feed.map(LiveTVGuideStationData.shiftedFeedWords.contains) == true
+            let baseKey = Self.key(of: stem.name) ?? ""
+            let stemKey = shiftedFeed && !baseKey.isEmpty ? baseKey + (feed ?? "") : baseKey
             let station = Station(id: id, country: stem.country, stemKey: stemKey)
             var keys = Set<String>()
             var looseKeys = Set<String>()
-            if !stemKey.isEmpty {
+            if shiftedFeed, !stemKey.isEmpty {
+                keys.insert(stemKey)
+            } else if !stemKey.isEmpty {
                 keys.insert(stemKey)
                 if let key = Self.looseKey(words: Self.camelWords(stem.name)) { looseKeys.insert(key) }
                 // An all-lower-case id cannot be split into words (`reelzchannel`): a trailing `channel` is dropped from its key.
@@ -62,6 +72,22 @@ public struct LiveTVGuideStationIndex: Sendable {
             for name in names {
                 if let key = Self.key(of: name) { keys.insert(key) }
                 if let key = Self.looseKey(words: Self.words(of: name)) { looseKeys.insert(key) }
+                if !shiftedFeed {
+                    for key in Self.qualifiedKeys(of: name, stemKey: stemKey) { qualifiedTable[key, default: []].append(station) }
+                    // A provider's own guide names its stations like its rows (`CA EN: CBC HALIFAX HD`): the name is also read the
+                    // way a row is, so a row without the provider's id still finds a station whose id is only a call sign (`CBHT.ca`).
+                    // Only a station with that one name: the provider lists every row it pointed at an id, so an id with several
+                    // names carries its mistakes (`HBO.us` named `HBO WEST`) or is a catch-all (`TS`, hundreds of channels). That one
+                    // name is the row that carried the id, so it must pass the checks the matcher puts on a row's id: a name the id
+                    // contradicts (`QUEST RED +1` on `W.uk`, `SPECTRUM NEWS 1` on `SpectrumNews13`) is the provider's mistake.
+                    if names.count == 1, name.utf8.contains(0x3A) {
+                        let facts = RowFacts(name: name)
+                        if let key = Self.key(of: facts.cleaned), key.count >= 3, key != Self.key(of: name),
+                           Self.providerNameAgreesWithID(id: id, facts: facts) {
+                            qualifiedTable[key, default: []].append(station)
+                        }
+                    }
+                }
             }
             if let sign = Self.callSign(ofStem: stemKey) {
                 // The whole call sign (`wztvdt2`) is exact; the base (`wztv`) serves a row that names no subchannel, unless a
@@ -81,6 +107,7 @@ public struct LiveTVGuideStationIndex: Sendable {
         func order(_ stations: [Station]) -> [Station] { stations.sorted { ($0.id.count, $0.id) < ($1.id.count, $1.id) } }
         exact = exactTable.mapValues(order)
         loose = looseTable.mapValues(order)
+        qualified = qualifiedTable.mapValues(order)
         callSigns = callSignTable
         stationSigns = LiveTVGuideCallSignTable(guideChannels: guideChannels)
     }
@@ -151,7 +178,7 @@ public struct LiveTVGuideStationIndex: Sendable {
     func hasAnyStation(named name: String, groups: [String] = []) -> Bool {
         Self.rowNames(RowFacts(name: name, groups: groups)).texts.contains { text in
             exact[text.exact] != nil || Self.aliasedKey(text.exact).flatMap { exact[$0] } != nil
-                || text.loose.flatMap { loose[$0] } != nil
+                || text.loose.flatMap { loose[$0] } != nil || qualified[text.exact] != nil
         }
     }
 
@@ -164,9 +191,10 @@ public struct LiveTVGuideStationIndex: Sendable {
             return Resolution(id: direct[0].id, method: .displayName)
         }
         let near = text.loose.flatMap { loose[$0] } ?? []
+        let bracketed = qualified[text.exact] ?? []
         // A country's own stations decide first; two of them claiming the name is an ambiguity, not a reason to look abroad.
         // The name as written first, then its alias (`NATIONAL GEOGRAPHIC` names stations of other countries but `NatGeo.us` is the US one).
-        for candidates in [named, aliased, near] {
+        for candidates in [named, aliased, near, bracketed] {
             switch Self.pick(candidates, country: country) {
             case .station(let station): return Resolution(id: station.id, method: .displayName)
             case .ambiguous: return nil
@@ -202,6 +230,30 @@ public struct LiveTVGuideStationIndex: Sendable {
     }
 
     private static func aliasedKey(_ key: String) -> String? { LiveTVGuideStationData.aliases[key] }
+
+    /// The lower-case feed word after an id's `@` (`west` for `CBS.us@West`); nil when there is none.
+    static func feedWord(of id: String) -> String? {
+        guard let at = id.lastIndex(of: "@") else { return nil }
+        let feed = id[id.index(after: at)...].lowercased()
+        return feed.isEmpty ? nil : feed
+    }
+
+    /// The keys of a display name that ends in a bracketed qualifier: the name without it (`TVO (TV Ontario)` is `tvo`) and with it
+    /// unbracketed (`CFCM TVA (Quebec)` is `tva quebec`), a leading word the station's own id starts with (its call sign `CFCM`) left
+    /// out of the second. Empty when the name has no trailing qualifier or a key would be the id's bare call sign.
+    static func qualifiedKeys(of name: String, stemKey: String) -> [String] {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasSuffix(")"), let open = trimmed.lastIndex(of: "("), open > trimmed.startIndex else { return [] }
+        let head = words(of: String(trimmed[..<open]))
+        let tail = words(of: String(trimmed[trimmed.index(after: open)..<trimmed.index(before: trimmed.endIndex)]))
+        guard !head.isEmpty, !tail.isEmpty else { return [] }
+        var unbracketed = head + tail
+        if head.count > 1, let first = head.first, first.count >= 3, stemKey.hasPrefix(first) { unbracketed.removeFirst() }
+        let leadingSign = head.count == 1 && head[0].count >= 3 && stemKey.hasPrefix(head[0]) && stemKey != head[0]
+        // `HBO (Pacific)` without its qualifier would read as the base feed.
+        let namesAFeed = tail.contains(where: LiveTVGuideStationData.shiftedFeedWords.contains)
+        return [leadingSign || namesAFeed ? nil : head.joined(), unbracketed.joined()].compactMap { $0 }.filter { $0.count >= 3 }
+    }
 
     // MARK: Names
 
@@ -311,6 +363,7 @@ public struct LiveTVGuideStationIndex: Sendable {
     /// Whether a station id is itself a time-shifted one (`E4plus1.uk`, `ITV2+1`, `HBOWest.us`).
     static func isTimeShiftedStation(_ id: String) -> Bool {
         let lower = id.lowercased()
+        if let feed = feedWord(of: id), LiveTVGuideStationData.shiftedFeedWords.contains(feed) { return true }
         if LiveTVGuideStationData.shiftedFeedWords.contains(where: { lower.contains("." ) ? stem(of: id).name.lowercased().hasSuffix($0) : lower.hasSuffix($0) }) { return true }
         var search = lower[...]
         while let range = search.range(of: "plus") {
@@ -453,6 +506,12 @@ public struct LiveTVGuideStationIndex: Sendable {
     }
 
     /// Whether the provider's id is the call sign of another station than the one the row names (a wrong market's affiliate).
+    /// Whether a provider's id may be read by the name of the row that carried it: the trust checks of `LiveTVGuideMatcher` on a row's id.
+    static func providerNameAgreesWithID(id: String, facts: RowFacts) -> Bool {
+        !isPlaceholderID(id) && !idContradictsName(id: id, facts: facts) && !idCallSignDiffers(id: id, facts: facts)
+            && !idIsSiblingOfName(id: id, facts: facts) && (!facts.shifted || isTimeShiftedStation(id))
+    }
+
     static func idCallSignDiffers(id: String, facts: RowFacts) -> Bool {
         guard let row = facts.callSign, let key = key(of: stem(of: id).name), let other = callSign(ofStem: key) else { return false }
         return row.base != other.base
@@ -737,11 +796,11 @@ enum LiveTVGuideStationData {
         "utv"
     ]
 
-    /// A row key that reads as another station key: abbreviations the guide's own ids use (`GlobalBC` for Global Vancouver).
+    /// A row key that reads as another station key: abbreviations the guide's own ids use (`GlobalBC` for Global Vancouver). Never a
+    /// 24-hour news channel onto its parent station (`Global News Toronto` is not `Global Toronto`): their schedules differ most of the day.
     static let aliases: [String: String] = [
         "skysportspl": "skysportspremiereleague", "nationalgeo": "natgeo", "nationalgeographic": "natgeo", "dmax": "discoverydmax",
-        "globalvancouver": "globalbc", "globalnewsbc": "globalbc", "globalnewscalgary": "globalcalgary",
-        "globalnewstoronto": "globaltoronto", "espnews": "espnnews", "e": "eentertainment", "ifc": "independentfilmchannel",
+        "globalvancouver": "globalbc", "espnews": "espnnews", "e": "eentertainment", "ifc": "independentfilmchannel",
         "btn": "bigtennetwork", "lmn": "lifetimemovienetwork", "ctvnewschannel": "ctvnc", "ctvnewsnetwork": "ctvnc", "ctvottawa": "ctvoh", "rds1": "rds", "icirdi": "rdinews"
     ]
 

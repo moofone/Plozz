@@ -94,12 +94,14 @@ public struct LiveTVHeroActions: Equatable, Sendable {
             showsEndedLabel = true
         case .upcoming:
             primary = .upcoming
-            showsMultiview = true
+            // Mockup `heroButtons`: a programme not on yet can only be remembered or its channel watched; nothing to add to Multiview.
+            showsMultiview = false
             showsEndedLabel = false
         case .onNow, nil:
             // Resume only while the playing channel's current programme is the focused one.
             primary = .watch(resumes: isPlayingChannel)
-            showsMultiview = true
+            // Mockup `heroButtons`: the channel already playing is not offered to Multiview again.
+            showsMultiview = !isPlayingChannel
             showsEndedLabel = false
         }
     }

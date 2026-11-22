@@ -34,6 +34,50 @@ final class IPTVChannelNameSplitTests: XCTestCase {
         XCTAssertEqual(split("Movies HD HD").1, [.hd])
     }
 
+    func testReadsHDAtTheEndOfTaggedFeeds() {
+        let fixtures = [
+            ("CA EN: CP24 HD (R)", "CP24", "CA", "EN"),
+            ("CA EN: APTN HD (CA)", "APTN", "CA", "EN"),
+            ("CA EN: CBC MONTREALHD", "CBC MONTREAL", "CA", "EN"),
+            ("DE DE: Example Regional HD (DE)", "Example Regional", "DE", "DE"),
+            ("FR FR: Example RégionalHD", "Example Régional", "FR", "FR")
+        ]
+        for (input, name, country, language) in fixtures {
+            let actual = split(input)
+            XCTAssertEqual(actual.0, name, input)
+            XCTAssertEqual(actual.1, [.country(country), .language(language), .hd], input)
+        }
+    }
+
+    func testKeepsUncorroboratedNameEndings() {
+        let fixtures = [
+            ("CA EN: Station HD (FR)", "Station HD (FR)"),
+            ("CA EN: Station HD (LIVE)", "Station HD (LIVE)"),
+            ("CA EN: Station (R)", "Station (R)"),
+            ("CA EN: Station HD(R)", "Station HD(R)"),
+            ("CA EN: Radio SHAHD", "Radio SHAHD"),
+            ("CA EN: RegionalHD", "RegionalHD"),
+            ("CA EN: Station RegionalFHD", "Station RegionalFHD"),
+            ("Station RegionalHD", "Station RegionalHD"),
+            ("CA EN: Station REGIONALhd", "Station REGIONALhd")
+        ]
+        for (input, expected) in fixtures {
+            let actual = split(input)
+            XCTAssertEqual(actual.0, expected, input)
+            XCTAssertFalse(actual.1.contains(.hd), input)
+        }
+    }
+
+    func testCanadianGlobalFeedsKeepDistinctNames() {
+        let fixtures = [
+            ("CA EN: GLOBAL NEWS TORONTO HD", "GLOBAL NEWS TORONTO"),
+            ("CA EN: GLOBAL NEWS VANCOUVER HD", "GLOBAL NEWS VANCOUVER"),
+            ("CA EN: GLOBAL VANCOUVER", "GLOBAL VANCOUVER"),
+            ("CA EN: GLOBAL NEWS NATIONAL HD", "GLOBAL NEWS NATIONAL")
+        ]
+        for (input, expected) in fixtures { XCTAssertEqual(split(input).0, expected, input) }
+    }
+
     func testRealDigitsAndPlainWordsStayIntact() {
         XCTAssertEqual(split("CHANNEL 4").0, "CHANNEL 4")
         XCTAssertEqual(split("CHANNEL 4").1, [])

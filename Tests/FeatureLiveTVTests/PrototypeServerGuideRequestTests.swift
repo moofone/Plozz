@@ -28,10 +28,20 @@ final class PrototypeServerGuideRequestTests: XCTestCase {
     func testFirstMiddleAndLastViewportsStayBounded() throws {
         let rows = rows(count: 100)
         let references = references(for: rows)
-        for (anchor, expected) in [(0, 0..<12), (50, 47..<59), (99, 88..<100)] {
+        for (anchor, expected) in [(0, 0..<16), (50, 47..<63), (99, 84..<100)] {
             let request = try XCTUnwrap(request(rows: rows, anchorIndex: anchor, references: references))
             XCTAssertEqual(request.channels.map(\.id), expected.map { "channel-\($0)" })
             XCTAssertLessThanOrEqual(request.channels.count, PrototypeServerGuideRequest.rowLimit)
+        }
+    }
+
+    /// The anchor is the top visible row; the request reaches every row of a full guide screen below it.
+    func testARequestCoversAFullScreenBelowTheTopVisibleRow() throws {
+        let rows = rows(count: 100)
+        let request = try XCTUnwrap(request(rows: rows, anchorIndex: 40, references: references(for: rows)))
+        let ids = Set(request.channels.map(\.id))
+        for row in 40..<(40 + PrototypeServerGuideRequest.rowsOnScreen) {
+            XCTAssertTrue(ids.contains("channel-\(row)"), "row \(row) is on screen and must be requested")
         }
     }
 
@@ -97,7 +107,7 @@ final class PrototypeServerGuideRequestTests: XCTestCase {
             sourceID: "disabled", accountID: "account", authorizationID: "authorization", channelID: "channel-1"
         )
         let value = try XCTUnwrap(request(rows: rows, references: references))
-        XCTAssertEqual(value.channels.map(\.id), ["channel-0"] + (2..<12).map { "channel-\($0)" })
+        XCTAssertEqual(value.channels.map(\.id), ["channel-0"] + (2..<PrototypeServerGuideRequest.rowLimit).map { "channel-\($0)" })
         XCTAssertNil(PrototypeServerGuideRequest(
             rows: rows, anchorIndex: nil, references: references, enabledSourceIDs: [],
             from: start, to: start.addingTimeInterval(21_600)

@@ -1358,6 +1358,13 @@ struct PrototypeGuideRow: View {
         .channel(channel.id, section: section)
     }
 
+    /// Where a slot starts on the full timeline (the `programmes` plane), leading-relative.
+    private func cellX(of slot: LiveTVGuideSlot) -> CGFloat {
+        let seconds = PrototypeLayout.viewportSeconds(for: width)
+        guard seconds > 0 else { return 0 }
+        return PrototypeLayout.timelineWidth(for: width) * slot.start.timeIntervalSince(start) / seconds
+    }
+
     /// Whether the time with no listing draws a "No guide information" cell. Not on an event slot's row: its one programme is
     /// all the row has, and the mockup draws nothing around it.
     static func drawsGapCell(isEventSlot: Bool) -> Bool { !isEventSlot }
@@ -1488,7 +1495,12 @@ struct PrototypeGuideRow: View {
             activate(program)
         } label: {
             #if os(tvOS)
-            PrototypeGuideCellTitle(program: program, now: now, cellWidth: cell, channelIsPlaying: playing)
+            // A programme that began before the visible edge keeps its title on screen: it starts at the edge.
+            PrototypeTimelineReader(timeline: timeline) { offset in
+                let lead = PrototypeGuideCellMetrics.titleLead(offset: offset, cellX: cellX(of: slot), cellWidth: cell)
+                PrototypeGuideCellTitle(program: program, now: now, cellWidth: cell - lead, channelIsPlaying: playing)
+                    .padding(.leading, lead)
+            }
                 .padding(.horizontal, PrototypeLayout.cellInset)
                 .frame(width: cell, height: PrototypeLayout.programHeight(in: rowHeight), alignment: .leading)
             #else

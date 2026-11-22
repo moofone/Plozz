@@ -45,7 +45,8 @@ final class LiveTVGuideMatchRound2Tests: XCTestCase {
         }
         XCTAssertEqual(index.resolve(name: "CA EN: WEATHER NETWORK", country: "CA"), "TheWeatherNetwork.ca", "camel-case id read as words")
         XCTAssertEqual(index.resolve(name: "CA FR: CASA", country: "CA"), "CasaTV.ca", "tv is a generic word")
-        XCTAssertEqual(index.resolve(name: "CA EN: GLOBAL NEWS CALGARY HD", country: "CA"), "GlobalCalgary.ca", "an alias from the guide's own ids")
+        XCTAssertNil(index.resolve(name: "CA EN: GLOBAL NEWS CALGARY HD", country: "CA"),
+                     "a 24-hour news channel is not its parent station (Global Calgary)")
         XCTAssertNil(index.resolve(name: "CA: ONE", country: "CA"), "a loose key of three letters is not read")
         XCTAssertNil(LiveTVGuideStationIndex(guideChannels: ["SkySportsNews.uk": [], "SkySports.us": []]).resolve(name: "UK: SKY SPORTS +", country: "GB"), "news is not a generic word")
         XCTAssertEqual(index.resolve(name: "CA EN: CBC NEWS NETWORK", country: "CA"), "CBCNews.ca", "the exact key wins over the loose one")
@@ -400,6 +401,20 @@ final class LiveTVGuideMatchRound2Tests: XCTestCase {
         }
         let kept = LiveTVLineupFilter.apply(.standard, to: rows).kept
         let coverage = LiveTVGuideCoverage.measure(channels: kept, stations: stations, stationsWithListings: listed)
+        // Optional extra guide (`PLOZZ_EXTRA_GUIDE_STATIONS`, `PLOZZ_EXTRA_GUIDE_LISTINGS`), as the app merges it: each row
+        // still unmatched after the extra guide is listed, so a run is comparable row by row with one that had it.
+        var extraStations: [String: [String]]?
+        var extraListed: Set<String>?
+        if let path = value("PLOZZ_EXTRA_GUIDE_STATIONS"), let listingsPath = value("PLOZZ_EXTRA_GUIDE_LISTINGS") {
+            var parsed: [String: [String]] = [:]
+            for line in try String(contentsOfFile: path, encoding: .utf8).split(separator: "\n") {
+                guard let object = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      object["type"] as? String == "channel", let id = object["id"] as? String else { continue }
+                parsed[id] = object["displayNames"] as? [String] ?? []
+            }
+            extraStations = parsed
+            extraListed = Set(try String(contentsOfFile: listingsPath, encoding: .utf8).split(separator: "\n").map(String.init))
+        }
         var report = [coverage.logLine]
         report.append("providerGaps\t\(coverage.providerGaps.count)\tmatcherMisses\t\(coverage.unmatched.count - coverage.providerGaps.count)")
         // The match pass alone, over the whole list and over the rows the lineup keeps: median of five.
@@ -418,6 +433,13 @@ final class LiveTVGuideMatchRound2Tests: XCTestCase {
             var classifier = LiveTVLineupClassifier()
             let own = kept.filter { if case .country(code) = classifier.placement(of: $0) { true } else { false } }
             let part = LiveTVGuideCoverage.measure(channels: own, stations: stations, stationsWithListings: listed)
+            if let extraStations {
+                let merged = LiveTVGuideCoverage.measure(
+                    channels: own, stations: stations, stationsWithListings: listed,
+                    extraStations: extraStations, extraStationsWithListings: extraListed)
+                report.append("countryWithExtra\t\(code)\tmatched=\(merged.matched)\tlinear=\(merged.linear)\tchannels=\(merged.channelsMatched)/\(merged.channelsTotal)")
+                for row in merged.unmatched { report.append("unmatchedWithExtra\t\(code)\t\(row.name)\t\(row.guideID ?? "-")") }
+            }
             report.append("country\t\(code)\tmatched=\(part.matched)\tlinear=\(part.linear)\tradio=\(part.radio)\tsources=\(part.sources.sorted { $0.key < $1.key })\tproviderGap=\(part.providerGaps.count)\tmatcherMiss=\(part.unmatched.count - part.providerGaps.count)\tchannels=\(part.channelsMatched)/\(part.channelsTotal)")
             // The gap by what the provider could still give: a row whose own id names a station with no listings in the window
             // (the provider could supply those listings), against a row for which the guide has no station at all.
