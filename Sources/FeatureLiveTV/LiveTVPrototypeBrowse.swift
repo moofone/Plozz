@@ -18,6 +18,21 @@ enum PrototypeGuidePlateRequest: Equatable {
 }
 #endif
 
+/// The guide rows whose content is on screen. A recycled native guide cell can show a row in its new cell before the
+/// old cell reports that row gone, so each row is counted: it stays mounted until every appearance has gone.
+struct PrototypeMountedRows: Equatable {
+    private var counts: [LiveTVGuideRowID: Int] = [:]
+
+    func contains(_ row: LiveTVGuideRowID) -> Bool { counts[row] != nil }
+
+    mutating func insert(_ row: LiveTVGuideRowID) { counts[row, default: 0] += 1 }
+
+    mutating func remove(_ row: LiveTVGuideRowID) {
+        guard let count = counts[row] else { return }
+        counts[row] = count > 1 ? count - 1 : nil
+    }
+}
+
 struct PrototypeBrowser: View {
     let model: LiveTVPrototypeModel
     let imports: LiveTVPrototypeImportModel
@@ -72,7 +87,7 @@ struct PrototypeBrowser: View {
     @State private var verticalFade = PrototypeScrollFade()
     @State private var lastFocused: PrototypeBrowseFocus?
     @State private var confirmedFocus: PrototypeBrowseFocus?
-    @State private var mountedRows = Set<LiveTVGuideRowID>()
+    @State private var mountedRows = PrototypeMountedRows()
     @State private var restrictDirectionalEntry = true
     @State private var guideHours = Self.initialGuideHours
     @State private var guideWidth: CGFloat = 0
