@@ -264,11 +264,14 @@ struct PrototypeBrowser: View {
                                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         }
                     }
-                    // On the glass sheet the list holds whole rows only: it ends where the sheet's last row does.
+                    // The list holds whole rows only: on the glass sheet it ends where the sheet's last row does, elsewhere
+                    // after the last row that fits. Settled scrolling rests on row edges, so no row is cut under the times.
                     .frame(height: sheetPlan?.listHeight)
-                    .verticalEdgeFadeMask(
-                        fadeHeight: PrototypeLayout.verticalFade,
-                        topStrength: verticalFade.leading, bottomStrength: 0)
+                    .modifier(PrototypeWholeGuideRows(
+                        isActive: sheetPlan == nil,
+                        pitch: PrototypeLayout.rowHeight(for: geometry.size.width, scaledHeight: nativeRowHeight)
+                            + PrototypeLayout.rowGap,
+                        gap: PrototypeLayout.rowGap))
                     .onChange(of: topRequest) { _, _ in
                         goToTop(scrollTo: nativeScroll.scrollTo, movesFocus: !railActive)
                     }
@@ -1063,6 +1066,11 @@ struct PrototypeTimeRuler: View {
                     Color.clear.frame(width: CGFloat(ticks.lowerBound) * tickWidth)
                     ForEach(ticks, id: \.self) { tick in
                         let time = start.addingTimeInterval(TimeInterval(tick * 1_800))
+                        // A time the timeline has scrolled past slides in to the visible edge, and goes once it
+                        // no longer fits before the next one, so no time reads cut off.
+                        let lead = PrototypeGuideCellMetrics.rulerLabelLead(
+                            offset: timelineOffset, tickX: CGFloat(tick) * tickWidth, tickWidth: tickWidth,
+                            labelWidth: PrototypeGuideCellMetrics.rulerLabelWidth(fontSize: PrototypeLayout.rulerFontSize))
                         // Midnight carries the new day's name.
                         Text(time, format: calendar.startOfDay(for: time) == time
                             ? .dateTime.weekday(.abbreviated).hour().minute()
@@ -1076,6 +1084,8 @@ struct PrototypeTimeRuler: View {
                             #else
                             .padding(.leading, PrototypeLayout.rowInset)
                             #endif
+                            .padding(.leading, lead ?? 0)
+                            .opacity(lead == nil ? 0 : 1)
                             .frame(width: tickWidth, alignment: .leading)
                     }
                 }
@@ -1919,6 +1929,28 @@ final class PrototypeTimelineScroll {
         moved = nil
     }
 }
+
+#if os(tvOS)
+/// Fits the native guide list to whole rows in the height it is offered, top-aligned.
+struct PrototypeWholeGuideRows: ViewModifier {
+    let isActive: Bool
+    let pitch: CGFloat
+    let gap: CGFloat
+
+    func body(content: Content) -> some View {
+        if isActive {
+            GeometryReader { geometry in
+                content
+                    .frame(height: PrototypeGuideCollectionLayout.wholeRowsHeight(
+                        available: geometry.size.height, pitch: pitch, gap: gap))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+        } else {
+            content
+        }
+    }
+}
+#endif
 
 /// Reads the live offset in its own view, keeping the dependency out of the
 /// caller's body.

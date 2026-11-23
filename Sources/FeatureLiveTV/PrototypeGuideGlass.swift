@@ -59,6 +59,19 @@ enum PrototypeGuideCellMetrics {
         return min(max(0, offset - cellX), max(0, cellWidth - minimumTitleWidth))
     }
 
+    /// How far a ruler time moves in from its half-hour so it starts at the visible timeline's leading edge, or nil when
+    /// it no longer fits whole before the next time (it is hidden rather than drawn cut). `offset` is the scrolled
+    /// timeline offset and `tickX` the half-hour's position, both leading-relative.
+    static func rulerLabelLead(offset: CGFloat, tickX: CGFloat, tickWidth: CGFloat, labelWidth: CGFloat) -> CGFloat? {
+        guard offset.isFinite, tickX.isFinite else { return 0 }
+        let past = offset - tickX
+        guard past > 0.5 else { return 0 }
+        return past <= tickWidth - labelWidth ? past : nil
+    }
+
+    /// Room a ruler time ("12:30 PM", or "Mon 12:00 AM" at midnight scaled to fit) takes, inset included.
+    static func rulerLabelWidth(fontSize: CGFloat) -> CGFloat { fontSize * 5.5 }
+
     /// Whether the programme began before the cell's visible start (the window start clips it), so the cell
     /// is drawn flat on its leading side to show it continues earlier.
     static func continuesBeforeWindow(programStart: Date, slotStart: Date) -> Bool {

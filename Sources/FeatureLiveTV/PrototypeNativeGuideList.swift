@@ -180,6 +180,29 @@ final class PrototypeGuideCollectionLayout: UICollectionViewLayout {
                 + CGFloat(sectionStarts.count) * sectionHeight)
     }
 
+    /// Where a settled vertical scroll should rest: on a row edge, with the top row where the first row sits (after the
+    /// lead-in), so no row shows cut under the ruler (mockup: scrolling stops on an edge). Of the two edges either side
+    /// of `y`, the nearer one that keeps `focus` whole in a `height`-tall list; nil when neither does.
+    func verticalStop(for y: CGFloat, height: CGFloat, keeping focus: CGRect) -> CGFloat? {
+        let lead = PrototypeLayout.smallGap
+        let maxY = max(0, collectionViewContentSize.height - height)
+        guard rowCount > 0, height > 0, y.isFinite else { return nil }
+        let probe = CGRect(x: 0, y: min(max(0, y), maxY) + lead, width: 1, height: 1)
+        guard let index = layoutAttributesForElements(in: probe)?.first?.indexPath.item else { return nil }
+        let lower = min(maxY, max(0, frame(at: index).minY - lead))
+        let upper = index + 1 < rowCount ? min(maxY, frame(at: index + 1).minY - lead) : maxY
+        return [lower, upper].sorted { abs($0 - y) < abs($1 - y) }
+            .first { focus.minY >= $0 - 0.5 && focus.maxY <= $0 + height + 0.5 }
+    }
+
+    /// A list height that holds whole rows: the lead-in, then as many rows (and the gaps between them) as fit.
+    static func wholeRowsHeight(available: CGFloat, pitch: CGFloat, gap: CGFloat) -> CGFloat {
+        let lead = PrototypeLayout.smallGap
+        guard pitch > 0, available.isFinite, available >= lead + pitch - gap else { return available }
+        let rows = ((available - lead + gap) / pitch).rounded(.down)
+        return lead + rows * pitch - gap
+    }
+
     override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
         guard indexPath.section == 0, (0..<rowCount).contains(indexPath.item) else { return nil }
         return attributes(at: indexPath, frame: frame(at: indexPath.item))
@@ -370,6 +393,8 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
         private var sectionStarts: [Int] = []
         private var indices: [LiveTVGuideRowID: Int] = [:]
         private var scrollReportScheduled = false
+        private var rowEdgeSettle: DispatchWorkItem?
+        private var settledY: CGFloat = .nan
         private var hasPlacedInitialViewport = false
         private var holdsAnchorOnReplacement = false
         private let guideLayout: PrototypeGuideCollectionLayout
@@ -559,7 +584,9 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
         /// The row at the top edge of the viewport and the distance below that row's top, from layout geometry alone.
         private func anchor(atOffset offset: CGFloat) -> PrototypeGuideListViewport? {
             guard !rowIDs.isEmpty else { return nil }
-            let probe = CGRect(x: 0, y: max(offset, PrototypeLayout.smallGap), width: 1, height: 1)
+            // Rows sit below a lead-in (the first at `smallGap`), and a list resting on a row edge starts that far above
+            // the row, inside the gap under the row before it: that row is off screen, so probe past the lead-in.
+            let probe = CGRect(x: 0, y: max(0, offset) + PrototypeLayout.smallGap, width: 1, height: 1)
             guard let first = guideLayout.layoutAttributesForElements(in: probe)?.first,
                   rowIDs.indices.contains(first.indexPath.item) else { return nil }
             return .init(row: rowIDs[first.indexPath.item], relativeOffset: offset - first.frame.minY)
@@ -649,6 +676,7 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
 
         override func scrollViewDidScroll(_ scrollView: UIScrollView) {
             reportScroll()
+            if scrollView.contentOffset.y != settledY { scheduleRowEdgeSettle() }
             guard !ignoreHorizontalReports, pendingJump == nil, !horizontalReportScheduled,
                   guideLayout.horizontal.logical(scrollView.contentOffset.x) != lastOffset else { return }
             horizontalReportScheduled = true
@@ -687,6 +715,9 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
             #if DEBUG
             GuideNavigationProfileHook.verticalRoute?("proposal heading=\(context.focusHeading.rawValue) handler=\(parentView?.focusAdjacentCurrent != nil) row=\(rowIndex(of: context.previouslyFocusedItem).map(String.init) ?? "nil")")
             #endif
+            // On the channel column, Up/Down stays there: native focus moves to the plate above or below. Only a
+            // programme goes on to the adjacent row's current programme.
+            guard !isLeadingColumnFocused else { return false }
             guard parentView?.focusAdjacentCurrent != nil,
                   let epoch = DetailTransitionNavigation.navigationInputEpoch(in: collectionView),
                   let previous = context.previouslyFocusedItem, previous === focusedItem,
@@ -843,6 +874,29 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
             host.view.isOpaque = false
             container.addSubview(host.view)
             return host
+        }
+
+        /// Once vertical scrolling has been still for a moment with focus in the guide, ease onto a row edge so no row
+        /// rests cut under the ruler. This runs after the fact and never alters a scroll request (focus scrolling, focus
+        /// restoration and the guide's own jumps all land exactly where they asked), so it cannot steer focus.
+        private func scheduleRowEdgeSettle() {
+            rowEdgeSettle?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.settleOnRowEdge() }
+            rowEdgeSettle = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        }
+
+        private func settleOnRowEdge() {
+            let y = collectionView.contentOffset.y
+            settledY = y
+            guard collectionView.window != nil, positionedCollection.pendingPlacement == nil,
+                  !collectionView.isTracking, !collectionView.isDecelerating,
+                  let focus = NativeFocusRegion.frame(of: focusedItem, in: collectionView),
+                  let stop = guideLayout.verticalStop(for: y, height: collectionView.bounds.height, keeping: focus),
+                  abs(stop - y) > 0.5 else { return }
+            settledY = stop
+            let reduceMotion = swiftUIEnvironment?.accessibilityReduceMotion == true || UIAccessibility.isReduceMotionEnabled
+            collectionView.setContentOffset(CGPoint(x: collectionView.contentOffset.x, y: stop), animated: !reduceMotion)
         }
 
         private func reportScroll() {
