@@ -172,6 +172,78 @@ final class PrototypeNativeGuideListTests: XCTestCase {
         }
     }
 
+    /// Regression: an earlier row-edge snap rewrote the guide's own scroll requests (focus restoration, the heading's
+    /// Down), so the row they scrolled to was not where focus was sent and Down/Right stopped working. Requests must
+    /// land exactly where they ask, and resting on a row edge must never move the list while focus is elsewhere.
+    func testScrollRequestsLandExactlyAndRowEdgeSettlingLeavesThemAlone() throws {
+        let rows = (0..<5_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+        let scroll = PrototypeGuideScrollController()
+        let list = list(rows: rows, scroll: scroll) { Text($0.channelID) }
+        let controller = Guide.Controller()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1920, height: 723))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            Guide.dismantleUIViewController(controller, coordinator: ())
+        }
+        controller.view.frame = window.bounds
+        controller.update(list, environment: EnvironmentValues())
+        controller.view.layoutIfNeeded()
+        let collection: UICollectionView = try XCTUnwrap(controller.collectionView)
+        for (index, anchor) in [(2_258, UnitPoint.center), (1_000, .top), (37, .center)] {
+            scroll.scrollTo(rows[index], anchor: anchor)
+            controller.view.layoutIfNeeded()
+            let frame = try XCTUnwrap(collection.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame)
+            let asked = anchor == .top ? frame.minY : frame.midY - collection.bounds.height / 2
+            XCTAssertEqual(collection.contentOffset.y, asked, accuracy: 0.01, "row \(index) must land where it was asked")
+            RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+            XCTAssertEqual(collection.contentOffset.y, asked, accuracy: 0.01,
+                           "settling must not move the list without focus in it")
+        }
+        // Resting on a row edge, the first visible row (Down from the heading goes there) is that row, not the one
+        // above it whose trailing gap the offset falls in.
+        let edge = try XCTUnwrap(collection.layoutAttributesForItem(at: IndexPath(item: 1_500, section: 0))?.frame)
+        collection.contentOffset.y = edge.minY - PrototypeLayout.smallGap
+        controller.view.layoutIfNeeded()
+        XCTAssertEqual(scroll.firstVisibleRow?(), rows[1_500])
+    }
+
+    /// Settled vertical scrolling rests on a row edge that keeps the focused row whole, and the list holds whole rows.
+    func testRowEdgeStopKeepsTheFocusedRowWholeAndTheListHoldsWholeRows() {
+        let layout = PrototypeGuideCollectionLayout()
+        let collection = UICollectionView(frame: CGRect(x: 0, y: 0, width: 1_400, height: 720), collectionViewLayout: layout)
+        layout.update(rowCount: 200, rowHeight: 100, sectionHeight: 0, sectionStarts: [])
+        XCTAssertEqual(layout.collectionViewContentSize.width, collection.bounds.width)
+        let lead = PrototypeLayout.smallGap
+        let height = PrototypeGuideCollectionLayout.wholeRowsHeight(available: 720, pitch: 100, gap: 10)
+        XCTAssertEqual(height, lead + 7 * 100 - 10)
+        XCTAssertEqual(PrototypeGuideCollectionLayout.wholeRowsHeight(available: 50, pitch: 100, gap: 10), 50)
+        let row13 = CGRect(x: 0, y: lead + 1_300, width: 300, height: 90)
+        // Nearer edge either side.
+        XCTAssertEqual(layout.verticalStop(for: 1_230, height: height, keeping: row13), 1_200)
+        XCTAssertEqual(layout.verticalStop(for: 1_270, height: height, keeping: row13), 1_300)
+        // The nearer edge would cut the focused row at the bottom (row 19), or the top (row 12): the other one.
+        let row19 = CGRect(x: 0, y: lead + 1_900, width: 300, height: 90)
+        XCTAssertEqual(layout.verticalStop(for: 1_230, height: height, keeping: row19), 1_300)
+        let row12 = CGRect(x: 0, y: lead + 1_200, width: 300, height: 90)
+        XCTAssertEqual(layout.verticalStop(for: 1_270, height: height, keeping: row12), 1_200)
+        // Already on an edge; focus nowhere near: no stop.
+        XCTAssertEqual(layout.verticalStop(for: 0, height: height, keeping: CGRect(x: 0, y: lead, width: 1, height: 90)), 0)
+        XCTAssertNil(layout.verticalStop(for: 1_230, height: height, keeping: CGRect(x: 0, y: 5_000, width: 1, height: 90)))
+    }
+
+    /// A ruler time the timeline scrolled past slides to the visible edge, and is hidden rather than drawn cut.
+    func testRulerTimeIsNeverDrawnCutAtTheLeadingEdge() {
+        typealias M = PrototypeGuideCellMetrics
+        XCTAssertEqual(M.rulerLabelLead(offset: 0, tickX: 250, tickWidth: 250, labelWidth: 130), 0)
+        XCTAssertEqual(M.rulerLabelLead(offset: 250, tickX: 250, tickWidth: 250, labelWidth: 130), 0)
+        XCTAssertEqual(M.rulerLabelLead(offset: 270, tickX: 250, tickWidth: 250, labelWidth: 130), 20)
+        XCTAssertEqual(M.rulerLabelLead(offset: 370, tickX: 250, tickWidth: 250, labelWidth: 130), 120)
+        XCTAssertNil(M.rulerLabelLead(offset: 371, tickX: 250, tickWidth: 250, labelWidth: 130))
+        XCTAssertGreaterThan(M.rulerLabelWidth(fontSize: 22), 100)
+    }
+
     func testThousandsOfChannelsOnlyCreateVisibleRowHostsAndReuseUnchangedContent() {
         let rows = (0..<5_000).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
         let scroll = PrototypeGuideScrollController()

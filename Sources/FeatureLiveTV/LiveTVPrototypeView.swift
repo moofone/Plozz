@@ -177,6 +177,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     @Environment(\.plozzNavigationContentInset) private var navigationInset
     #if os(tvOS)
     @FocusState private var horizontalHeadingFocused: Bool
+    @FocusState private var glassHeroFocused: Bool
     @State private var horizontalPlateRequest: PrototypeGuidePlateRequest?
     @Environment(\.plozzPinnedSidebarInteraction) private var pinnedSidebarInteraction
     #endif
@@ -2374,7 +2375,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             navigation: .init(
                 focus: $horizontalHeadingFocused,
                 openSidebar: pinnedSidebarInteraction.map { interaction in { interaction.requestOpen() } },
-                requestPlate: requestPlateFromHeading
+                requestPlate: requestPlateFromHeading,
+                focusHero: { glassHeroFocused = true }
             ),
             isPlaying: channelID != nil && channelID == model.playingChannelID,
             now: model.now,
@@ -2384,7 +2386,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             info: {
                 if let channelID { glassTransition(.openRightPanel(channelID: channelID)) }
             },
-            glassBacking: usesGuideSheet
+            glassBacking: usesGuideSheet,
+            heroFocus: $glassHeroFocused
         )
     }
 
@@ -2594,7 +2597,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         }
     }
 
-    /// The heading pill's centre, above the hero block's bottom (1080p): the pill is 60 tall and hangs `headingDrop` below it.
+    /// The heading pill's centre, above the hero block's bottom (1080p): the pill is 60 tall, on the buttons' line (`headingDrop`).
     private static var glassHeadingCenterAboveHeroBottom: CGFloat { PrototypeGlassHero.buttonHeight / 2 - PrototypeGlassHero.headingDrop }
 
     private var glassQuickMenuHeadingWidth: CGFloat {

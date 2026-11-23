@@ -28,6 +28,8 @@ struct PrototypeGlassHeroInputs {
     var info: () -> Void
     /// A picture plays under the guide on its glass sheet: the text column sits on a soft shade (mockup Plozz-like `.herofree`).
     var glassBacking = false
+    /// Focus for the hero's first button (Watch): Up from the heading moves here (mockup: filter ↑ → hero, first button).
+    var heroFocus: FocusState<Bool>.Binding?
 }
 
 /// The tvOS hero: text and buttons only, on the right half, with the guide's
@@ -45,8 +47,12 @@ struct PrototypeGlassHero: View {
     /// The 1080p sizes; the layout tokens scale them (`LiveTVGlassLayout.ui`).
     static let columnWidth: CGFloat = 680
     static let buttonHeight: CGFloat = 60
-    /// The heading's capsule hangs below the button line so its letters sit on it.
-    static let headingDrop: CGFloat = 19.5
+    /// The action buttons' type (Watch and its time left), shared by the guide's heading pill on the same line.
+    static let buttonFontSize: CGFloat = 27
+    /// The secondary words' ink beside a button's title ("7m left", the heading's count).
+    static let buttonSecondaryOpacity = 0.62
+    /// The heading's capsule sits on the button line: the same height and centre as Watch.
+    static let headingDrop: CGFloat = 0
     /// The mockup's hero block ends above the guide's top (`heroBottomGap`, and the sheet's drop while it is shown); the browse layout
     /// adds the section gap.
     static func bottomInset(_ glass: LiveTVGlassLayout) -> CGFloat { glass.guideTop - glass.heroBlockBottom - PrototypeLayout.sectionGap }
@@ -199,7 +205,7 @@ struct PrototypeGlassHero: View {
     private var buttons: some View {
         HStack(spacing: glass.ui(16)) {
             if channel != nil {
-                if actions.primary != .none { watchButton(now: inputs.now) }
+                if actions.primary != .none { watchButton(now: inputs.now).heroFocus(inputs.heroFocus) }
                 if actions.showsMultiview, let multiview = inputs.multiview {
                     PrototypeGlassIconButton(
                         symbol: "rectangle.split.2x2", label: "Add to Multiview", action: multiview)
@@ -208,6 +214,8 @@ struct PrototypeGlassHero: View {
                     symbol: inputs.isFavorite ? "star.fill" : "star",
                     label: inputs.isFavorite ? "Remove from Favorites" : "Add to Favorites",
                     action: inputs.toggleFavorite)
+                    // Without Watch, the favourite star is the first button Up from the heading reaches.
+                    .heroFocus(actions.primary == .none ? inputs.heroFocus : nil)
                 PrototypeGlassIconButton(symbol: "info.circle", label: "Channel Details", action: inputs.info)
             }
         }
@@ -229,11 +237,11 @@ struct PrototypeGlassHero: View {
                 } else if !isFuture {
                     Text(actions.primary == .watch(resumes: true) ? "Resume" : "Watch")
                     if let left {
-                        Text(left).opacity(0.62)
+                        Text(left).opacity(Self.buttonSecondaryOpacity)
                     }
                 }
             }
-            .font(.system(size: glass.ui(27), weight: .semibold))
+            .font(.system(size: glass.ui(Self.buttonFontSize), weight: .semibold))
             .lineLimit(1)
             .padding(.horizontal, glass.ui(isFuture && watchTitle == nil ? 20 : 28))
             .frame(minWidth: glass.ui(Self.buttonHeight), minHeight: glass.ui(Self.buttonHeight))
@@ -300,6 +308,10 @@ private struct PrototypeGlassIconButton: View {
 /// Text only at rest; focus turns it into a white capsule whose padding reaches
 /// left so the name lines up with the channel numbers below.
 struct PrototypeGlassHeading: View {
+    static let chevronGap: CGFloat = 6
+    static let chevronSize: CGFloat = 22
+    /// The capsule's padding either side of its text.
+    static let horizontalPadding: CGFloat = 22
     let inputs: PrototypeGlassHeroInputs
     @Environment(\.liveTVGlassLayout) private var glass
 
@@ -316,21 +328,21 @@ struct PrototypeGlassHeading: View {
 
     private var button: some View {
         Button(action: inputs.openHeading) {
+            // Watch's type: the name, then the count and chevron in the ink of its time left.
             HStack(spacing: glass.ui(10)) {
                 Text(verbatim: inputs.headingTitle)
-                    .font(.system(size: glass.ui(28), weight: .bold))
                     .lineLimit(1)
-                HStack(spacing: glass.ui(4)) {
+                HStack(spacing: glass.ui(Self.chevronGap)) {
                     Text(verbatim: inputs.headingCount)
-                        .font(.system(size: glass.ui(22), weight: .medium))
                         .monospacedDigit()
                     Image(systemName: "chevron.right")
-                        .font(.system(size: glass.ui(21), weight: .semibold))
+                        .font(.system(size: glass.ui(Self.chevronSize), weight: .semibold))
                         .rotationEffect(.degrees(inputs.isHeadingOpen ? 90 : 0))
                 }
-                .opacity(0.55)
+                .opacity(PrototypeGlassHero.buttonSecondaryOpacity)
             }
-            .padding(.horizontal, glass.ui(22))
+            .font(.system(size: glass.ui(PrototypeGlassHero.buttonFontSize), weight: .semibold))
+            .padding(.horizontal, glass.ui(Self.horizontalPadding))
             .frame(height: glass.ui(PrototypeGlassHero.buttonHeight))
         }
         .buttonStyle(PrototypeGlassHeadingStyle(glassBacking: inputs.glassBacking))
@@ -343,6 +355,14 @@ struct PrototypeGuideHeadingNavigation {
     let focus: FocusState<Bool>.Binding
     let openSidebar: (() -> Void)?
     let requestPlate: (PrototypeGuidePlateRequest) -> Void
+    /// Up: the hero's first button. Nil leaves Up to the focus engine.
+    var focusHero: (() -> Void)? = nil
+}
+
+private extension View {
+    @ViewBuilder func heroFocus(_ binding: FocusState<Bool>.Binding?) -> some View {
+        if let binding { focused(binding) } else { self }
+    }
 }
 
 /// Scope directional vetoes to the heading alone. SwiftUI's move command can
@@ -411,6 +431,10 @@ private struct PrototypeGuideHeadingFocusHost<Content: View>: UIViewControllerRe
                 action = openSidebar
             case trailing: action = { navigation.requestPlate(.rememberedRow) }
             case .down: action = { navigation.requestPlate(.firstVisibleRow) }
+            case .up:
+                // The hero's buttons are up and to the right, out of the focus engine's reach from the heading.
+                guard let focusHero = navigation.focusHero else { return false }
+                action = focusHero
             default: return false
             }
             guard !pendingMove else { return true }

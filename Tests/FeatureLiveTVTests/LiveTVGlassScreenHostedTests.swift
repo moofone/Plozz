@@ -23,7 +23,7 @@ final class LiveTVGlassScreenHostedTests: XCTestCase {
     // MARK: Mockup geometry (1920 pt space)
 
     private struct Mockup {
-        var headingLeft, headingCenterY: CGFloat
+        var headingLeft: CGFloat
         var titleLeft, titleCenterY: CGFloat
         var watchX, watchY, watchHeight: CGFloat
         var panelX, panelWidth: CGFloat
@@ -31,10 +31,10 @@ final class LiveTVGlassScreenHostedTests: XCTestCase {
 
     /// From the mockup's DOM: `.ahead`, `.atitle`, the first `.abtn.pill`, `.lg.panel`.
     private static let mockup1080 = Mockup(
-        headingLeft: 130 + 22, headingCenterY: 291 + 30, titleLeft: 1160, titleCenterY: 101.31 + 57.19 / 2,
+        headingLeft: 130 + 22, titleLeft: 1160, titleCenterY: 101.31 + 57.19 / 2,
         watchX: 1160, watchY: 270, watchHeight: 60, panelX: 1280, panelWidth: 600)
     private static let mockup4K = Mockup(
-        headingLeft: 116.25 + 19.5, headingCenterY: 261.82 + 27, titleLeft: 1236, titleCenterY: 93.61 + 51.14 / 2,
+        headingLeft: 116.25 + 19.5, titleLeft: 1236, titleCenterY: 93.61 + 51.14 / 2,
         watchX: 1236, watchY: 243, watchHeight: 54, panelX: 1320, panelWidth: 570)
 
     // MARK: Fixtures
@@ -159,7 +159,8 @@ final class LiveTVGlassScreenHostedTests: XCTestCase {
         _ = titleLine
         let heading = try XCTUnwrap(pixels.ink(in: CGRect(x: 100, y: 200, width: 400, height: 140)), "heading")
         row("\(name) heading name left", mockup: mockup.headingLeft, app: heading.minX)
-        row("\(name) heading centre y", mockup: mockup.headingCenterY, app: heading.midY)
+        // Owner's call over the mockup's lower pill: the heading sits on Watch's line, centred with it.
+        row("\(name) heading centre y (Watch's)", mockup: watch.midY, app: heading.midY)
         writeTable("hero-\(name)")
         table = []
     }
