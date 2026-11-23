@@ -3,6 +3,9 @@ import CoreText
 import CoreUI
 import FeatureLiveTVCore
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // Pure layout and entry logic for the Live TV glass panels. No SwiftUI, so it
 // compiles and is tested on every platform; the views that use it are tvOS-only.
@@ -193,6 +196,15 @@ enum LiveTVGlassTextMeasure {
             string: text, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]) as CFAttributedString)
         return CTLineGetTypographicBounds(line, nil, nil, nil).rounded(.up)
     }
+
+    #if canImport(UIKit)
+    static func width(_ text: String, size: CGFloat, weight: UIFont.Weight) -> CGFloat {
+        let font = UIFont.systemFont(ofSize: size, weight: weight) as CTFont
+        let line = CTLineCreateWithAttributedString(NSAttributedString(
+            string: text, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]) as CFAttributedString)
+        return CTLineGetTypographicBounds(line, nil, nil, nil).rounded(.up)
+    }
+    #endif
 }
 
 /// Frames, in menu-local coordinates, of the quick menu: one list on one sheet of glass (the mockup's `listPanel`, native):
@@ -319,8 +331,15 @@ struct LiveTVGlassQuickMenuLayout: Equatable {
 
     /// The heading pill's width as the guide draws it (title, count, chevron, padding), for sizing the sheet over it.
     static func headingWidth(title: String, count: String) -> CGFloat {
+        #if os(tvOS)
+        let size = PrototypeGlassHero.buttonFontSize
+        return (2 * PrototypeGlassHeading.horizontalPadding + LiveTVGlassTextMeasure.width(title, size: size, weight: .semibold) + 10
+            + LiveTVGlassTextMeasure.width(count, size: size, weight: .semibold) + PrototypeGlassHeading.chevronGap
+            + PrototypeGlassHeading.chevronSize).rounded(.up)
+        #else
         (2 * 22 + LiveTVGlassTextMeasure.width(title, size: 28, bold: true) + 10
             + LiveTVGlassTextMeasure.width(count, size: 22, bold: false) + 4 + 21).rounded(.up)
+        #endif
     }
 }
 

@@ -154,8 +154,9 @@ final class PrototypeGuideGlassTests: XCTestCase {
         let uhd = LiveTVGlassLayout.uhd4K
         XCTAssertEqual(PrototypeGlassHero.shade(uhd), .init(vertical: uhd.ui(70), horizontal: uhd.ui(90), cornerRadius: uhd.ui(120), blur: uhd.ui(46)))
         XCTAssertEqual(PrototypeGlassHero.Shade.opacity, 0.5)
-        XCTAssertEqual(PrototypeGlassHero.headingDropPoints(.hd1080, onSheet: true), 24)
-        XCTAssertEqual(PrototypeGlassHero.headingDropPoints(.hd1080, onSheet: false), 19.5)
+        // The heading pill sits on Watch's line, on the sheet and off it.
+        XCTAssertEqual(PrototypeGlassHero.headingDropPoints(.hd1080, onSheet: true), 0)
+        XCTAssertEqual(PrototypeGlassHero.headingDropPoints(.uhd4K, onSheet: false), 0)
     }
     #endif
 

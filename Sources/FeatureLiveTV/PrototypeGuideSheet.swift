@@ -19,8 +19,8 @@ enum PrototypePlayingGlass {
     static let rulerShortening: CGFloat = 14
     /// The sheet ends this far above the screen's bottom edge, as `ui(n)`, or at the last row that fits (mockup `H - z(28) - sheetGapB`).
     static let bottomMargin: CGFloat = 28
-    /// The heading pill's bottom edge below the hero block's bottom, in px (mockup `hb + 24`).
-    static let headingDrop: CGFloat = 24
+    /// The heading pill's bottom edge below the hero block's bottom, in px: none, so it sits on Watch's line.
+    static let headingDrop: CGFloat = 0
 
     /// The fills and ink tiers of `ThemePalette.dark` that Plozz's player chrome draws over video (fill 11%, fillSubtle 6%, secondary 60%,
     /// tertiary 36%), and the focus card.
