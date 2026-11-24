@@ -15,12 +15,13 @@ final class LiveTVBrowseMotionHostedTests: XCTestCase {
         let previous = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 1920, height: 1080)
-        typealias Guide = PrototypeNativeGuideList<Int, Button<Text>>
+        typealias Guide = PrototypeNativeGuideList<Int, Button<Text>, Text>
         let controller = Guide.Controller()
         controller.parentView = Guide(
             rows: [.init(channelID: "channel")], scrollController: PrototypeGuideScrollController(),
-            scrolled: { _, _ in }, revision: { _ in 0 }, leadingExit: {}
-        ) { _ in Button("Channel") {} }
+            scrolled: { _, _ in }, revision: { _ in 0 }, leadingExit: {}, timelineWidth: 5_000, pinnedWidth: 140,
+            stationaryContent: { _ in Button("Channel") {} }, scrollingContent: { _ in Text("Programme") }
+        )
         controller.swiftUIEnvironment = EnvironmentValues()
         window.rootViewController = controller
         window.makeKeyAndVisible()
