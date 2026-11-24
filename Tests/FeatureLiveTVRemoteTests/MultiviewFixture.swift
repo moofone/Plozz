@@ -1176,7 +1176,9 @@ private struct GuideNavigationRecorder: UIViewRepresentable {
                 let hClip = scroll.map { $0.convert($0.bounds, to: window).intersection(clip) } ?? clip
                 let visible = !(inside ? hClip : window.bounds).intersection(bounds).isEmpty && !bounds.isEmpty
                 let same = ObjectIdentifier(item) == lastNativeObject
-                eventLine("frame", "\(link.timestamp)\t\(link.targetTimestamp)\t\(inputSequence)\t\(nativeSequence)\t\(inside ? target : "other")\t\(visible && same ? 1 : 0)\t\(x)\t\(y)\t\(first)")
+                // The last field is the guide's own horizontal (timeline) offset.
+                let timeline = (list.layer.presentation() ?? list.layer).bounds.minX
+                eventLine("frame", "\(link.timestamp)\t\(link.targetTimestamp)\t\(inputSequence)\t\(nativeSequence)\t\(inside ? target : "other")\t\(visible && same ? 1 : 0)\t\(x)\t\(y)\t\(first)\t\(timeline)")
                 if markTrace, visible, same, observedFrame != nativeSequence {
                     observedFrame = nativeSequence
                     os_signpost(.event, log: signposts, name: "GuideVisibleFrame", "%{public}d %{public}d", inputSequence, nativeSequence)

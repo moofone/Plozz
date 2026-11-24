@@ -236,6 +236,7 @@ struct PrototypeBrowser: View {
                         },
                         leadingExit: !gatesFocus && !voiceOver ? leadingExit : nil,
                         focusNow: plateRequest != nil && !gatesFocus && !voiceOver ? focusNowOnRow : nil,
+                        nowTimelineX: plateRequest != nil && !gatesFocus && !voiceOver ? nowTimelineX : nil,
                         isAtNowBoundary: plateRequest != nil && !gatesFocus && !voiceOver ? isAtNowBoundary : nil,
                         focusChannel: focusChannelPlate,
                         focusEarlierSlot: plateRequest != nil && !gatesFocus && !voiceOver ? focusEarlierSlot : nil,
@@ -555,6 +556,15 @@ struct PrototypeBrowser: View {
         revealCurrentTime(width: guideWidth)
         browsesTimeline = false
         requestRowFocus(horizontalNowTarget(on: row))
+    }
+
+    /// Where `focusNowOnRow` lands when all it does is focus the programme on now: nil while the timeline is being
+    /// browsed (it ends that) or when now is outside the guide (it goes to now).
+    private func nowTimelineX() -> CGFloat? {
+        guard !browsesTimeline, model.now >= guideStart, model.now < guideStart.addingTimeInterval(guideSpan) else {
+            return nil
+        }
+        return PrototypeLayout.timelineX(model.now.timeIntervalSince(guideStart), for: guideWidth)
     }
 
     private func isAtNowBoundary(_ row: LiveTVGuideRowID, offset: CGFloat) -> Bool {

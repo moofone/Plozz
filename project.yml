@@ -693,6 +693,7 @@ targets:
       - path: Tests/HomePresentationSupport/DetailSelectionInteractionTests.swift
       - path: Tests/HomePresentationSupport/ContentRefreshReturnInteractionTests.swift
       - path: Tests/FeatureLiveTVRemoteTests/LiveTVMultiviewRemoteTests.swift
+      - path: Tests/FeatureLiveTVRemoteTests/LiveTVGuidePlateRightRemoteTests.swift
       - path: Tests/PlaybackPresentationSupport/PlaybackFailureInteractionTests.swift
       - path: Tests/PlaybackPresentationSupport/DiscReviewScreenshotTests.swift
       - path: Tests/LiveTVPresentationSupport/IPTVOrganizationInteractionTests.swift
