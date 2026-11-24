@@ -280,6 +280,9 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
     let revision: (LiveTVGuideRowID) -> Revision
     var leadingExit: (() -> Void)?
     var focusNow: ((LiveTVGuideRowID) -> Void)?
+    /// Where `focusNow` lands on the timeline (now, leading-relative), when native focus may make that move itself:
+    /// nil when `focusNow` has more to do than focus the programme on now.
+    var nowTimelineX: (() -> CGFloat?)?
     var isAtNowBoundary: ((LiveTVGuideRowID, CGFloat) -> Bool)?
     var focusChannel: ((LiveTVGuideRowID) -> Void)?
     var focusEarlierSlot: ((LiveTVGuideRowID, CGFloat, CGFloat) -> Bool)?
@@ -463,7 +466,10 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
                     let row = rowIDs[index]
                     if isLeadingColumnFocused {
                         if forward, parentView?.focusNow != nil {
-                            return .onRelease { [weak self, weak item] in
+                            // With now in view, native focus takes the move in the press's own focus update, as it does
+                            // between programmes; `shouldUpdateFocus` checks that it lands on the programme on now.
+                            if visibleNowX != nil { return nil }
+                            return .onPress { [weak self, weak item] in
                                 guard let self, let item, focusedItem === item else { return }
                                 parentView?.focusNow?(row)
                             }
@@ -506,13 +512,37 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
             return nil
         }
 
-        private var isLeadingColumnFocused: Bool {
-            guard let frame = NativeFocusRegion.frame(of: focusedItem, in: collectionView) else { return false }
+        private var isLeadingColumnFocused: Bool { isInLeadingColumn(focusedItem) }
+
+        private func isInLeadingColumn(_ item: (any UIFocusItem)?) -> Bool {
+            guard let frame = NativeFocusRegion.frame(of: item, in: collectionView) else { return false }
             let distance = guideLayout.isRTL
                 ? collectionView.bounds.maxX - frame.midX : frame.midX - collectionView.bounds.minX
             return distance >= 0 && distance < PrototypeLayout.stationWidth(for: collectionView.bounds.width)
-                && timelineRange(of: focusedItem) == nil
+                && timelineRange(of: item) == nil
         }
+
+        /// Now's timeline point while it is in view, so `focusNow` would not move the timeline.
+        private var visibleNowX: CGFloat? {
+            guard parentView?.focusNow != nil, let now = parentView?.nowTimelineX?() else { return nil }
+            let geometry = guideLayout.horizontal
+            let offset = geometry.logical(collectionView.contentOffset.x)
+            return now >= offset && now < offset + geometry.viewport ? now : nil
+        }
+
+        /// Whether native focus's Right from the plate goes where `focusNow` would: the same row's programme on now,
+        /// or, on a row without programmes, its one content cell.
+        private func landsOnNow(_ item: (any UIFocusItem)?, row index: Int) -> Bool {
+            guard let now = visibleNowX, let item, rowIndex(of: item) == index else { return false }
+            guard let range = timelineRange(of: item) else {
+                return parentView?.hasProgrammePlane(rowIDs[index]) == false && !isInLeadingColumn(item)
+            }
+            // A cell ends a gap before its slot does; the next slot starts where this one ends.
+            return range.lowerBound <= now + 0.5 && now < range.upperBound + PrototypeLayout.cellGap
+        }
+
+        /// The cell native focus is entering from the plate in place of `focusNow`: it lands without a reveal.
+        private weak var nativeNowEntry: AnyObject?
 
         func update(_ parent: PrototypeNativeGuideList, environment: EnvironmentValues) {
             parentView = parent
@@ -755,7 +785,12 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
                   let index = rowIndex(of: previous) else { return false }
             let forward = context.focusHeading == trailing
             let plate = isLeadingColumnFocused
+            nativeNowEntry = nil
             if oversizedStep(forward: forward) != nil { return true }
+            if plate, forward, landsOnNow(context.nextFocusedItem, row: index) {
+                nativeNowEntry = context.nextFocusedItem
+                return false
+            }
             let geometry = guideLayout.horizontal
             let offset = geometry.logical(collectionView.contentOffset.x)
             let atNow = !plate && !forward && parentView?.isAtNowBoundary?(rowIDs[index], offset) == true
@@ -812,6 +847,10 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
 
         override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
             super.didUpdateFocus(in: context, with: coordinator)
+            let entersNow = nativeNowEntry != nil && nativeNowEntry === context.nextFocusedItem
+            nativeNowEntry = nil
+            // Like `focusNow`'s move: the timeline stays, and the guide is not being browsed.
+            guard !entersNow else { return }
             guard context.focusHeading == .left || context.focusHeading == .right,
                   NativeFocusRegion.frame(of: context.previouslyFocusedItem, in: collectionView) != nil else { return }
             guard let range = timelineRange(of: context.nextFocusedItem) else { return }
