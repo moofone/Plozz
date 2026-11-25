@@ -159,6 +159,35 @@ final class IPTVPlaybackDiagnosticsTests: XCTestCase {
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(evidence), as: UTF8.self).contains("fixture-secret"))
     }
 
+    /// Refusals outside the typed set (404, 410, 5xx) and failures with no response at all reach the timeout
+    /// screen from the relay's evidence: the proxy needs no extra classification for them.
+    func testRootRefusalsAndDroppedRequestsExplainAStartupTimeout() async throws {
+        let cases: [(handler: @Sendable (URLRequest) throws -> (Int, [String: String], Data), expected: String)] = [
+            ({ _ in (404, [:], Data()) }, "The provider could not find the requested playlist or stream (HTTP 404)."),
+            ({ _ in (410, [:], Data()) }, "The provider reported that this playlist or stream is no longer available (HTTP 410)."),
+            ({ _ in (500, [:], Data()) }, "The provider returned a server error (HTTP 500)."),
+            ({ _ in (502, ["Content-Type": "text/plain"], Data("bad gateway".utf8)) }, "The provider returned a server error (HTTP 502)."),
+            ({ _ in throw URLError(.timedOut) }, "The request to the provider did not respond in time."),
+            ({ _ in throw URLError(.networkConnectionLost) }, "The provider did not respond to the request for this channel."),
+        ]
+        for (handler, expected) in cases {
+            IPTVFixture.state.handler = handler
+            let proxy = try IPTVPlaybackProxy(
+                origin: XCTUnwrap(URL(string: "https://provider.test/live/channel.m3u8")),
+                headers: [:], configuration: IPTVFixture.configuration()
+            )
+            let url = try await proxy.start()
+            let session = URLSession(configuration: .ephemeral)
+            _ = try? await session.data(from: url)
+            session.invalidateAndCancel()
+            let evidence = try XCTUnwrap(PlaybackDeliveryFailure.state(for: url)?.evidence)
+            let report = LiveChannelFailureReport(failure: .startupTimedOut, delivery: evidence)
+            XCTAssertEqual(String(localized: report.message), expected)
+            XCTAssertFalse(PlaybackDiagnosticReport.playback(report).supportText.contains("provider.test"))
+            await proxy.stop()
+        }
+    }
+
     func testProxyNetworkFailurePreservesCodeWithoutInventingHTTPResponse() async throws {
         IPTVFixture.state.handler = { _ in throw URLError(.timedOut) }
         let diagnostics = PlaybackFailureDiagnostics()
