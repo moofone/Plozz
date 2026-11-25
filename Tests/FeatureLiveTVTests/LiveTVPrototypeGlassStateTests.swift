@@ -203,6 +203,29 @@ final class LiveTVPrototypeGlassStateTests: XCTestCase {
 
     private typealias BackAction = LiveTVPrototypeBackAction
 
+    // MARK: - Back inside the guide browser (owner: Back steps to the filter heading, Back again opens the main menu)
+
+    private func browseBack(
+        watch: Bool = false, restoring: Bool = false, searching: Bool = false, multiview: Bool = false, heading: Bool = true
+    ) -> LiveTVPrototypeGuideBrowseBack {
+        .resolve(hasPendingWatch: watch, isRestoringFocus: restoring, isSearching: searching,
+                 isSelectingMultiview: multiview, headingAvailable: heading)
+    }
+
+    /// Guards the glass screen: Back on a programme used to request focus for a toolbar the glass screen never shows,
+    /// so the press did nothing.
+    func testBackInTheGuideStepsToTheHeadingWhenTheGlassScreenHasOne() {
+        XCTAssertEqual(browseBack(), .focusHeading)
+        XCTAssertEqual(browseBack(heading: false), .focusToolbar)
+    }
+
+    func testBackInTheGuideClosesWhatIsOpenBeforeLeavingForTheHeading() {
+        XCTAssertEqual(browseBack(watch: true, searching: true, multiview: true), .cancelWatch)
+        XCTAssertEqual(browseBack(restoring: true, searching: true), .ignore)
+        XCTAssertEqual(browseBack(searching: true, multiview: true), .closeSearch)
+        XCTAssertEqual(browseBack(multiview: true), .finishMultiviewSelection)
+    }
+
     func testBackWhilePlayingWithTheGuideOverTheVideoShowsTheVideoFullScreen() {
         XCTAssertEqual(BackAction.resolve(presentation: .none, isPlaying: true, isFullScreen: false), .showVideoFullScreen)
     }

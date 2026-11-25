@@ -178,6 +178,9 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     #if os(tvOS)
     @FocusState private var horizontalHeadingFocused: Bool
     @FocusState private var glassHeroFocused: Bool
+    /// Opening the guide lands on the filter heading (owner's design): set when the first guide focus is requested,
+    /// honoured once the guide has placed itself on its starting row.
+    @State private var initialFocusGoesToHeading = false
     @State private var horizontalPlateRequest: PrototypeGuidePlateRequest?
     @Environment(\.plozzPinnedSidebarInteraction) private var pinnedSidebarInteraction
     #endif
@@ -1369,6 +1372,15 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         .onChange(of: model.guideChannels.first?.id, initial: true) { _, _ in
             focusInitialChannelIfNeeded()
         }
+        #if os(tvOS)
+        .onChange(of: preview.isRestoringGuideFocus) { _, restoring in
+            guard !restoring, initialFocusGoesToHeading else { return }
+            initialFocusGoesToHeading = false
+            guard isActive, glassPresentation == .none, !preview.isExpanded, !isSearching, sheet == nil else { return }
+            horizontalHeadingFocused = true
+        }
+        .onChange(of: isActive) { _, active in if !active { initialFocusGoesToHeading = false } }
+        #endif
     }
 
     private var lifecycleContent: some View {
@@ -2057,22 +2069,28 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             openSources: { sheet = .sources }, openGuideTime: { sheet = .guideTime },
             openToolbar: usesNativeFullscreen && !isSearching && multiviewSelection == nil
                 && playback.pendingWatchChannelID == nil ? nil : {
-                if playback.pendingWatchChannelID != nil {
-                    playback.cancelWatch()
-                    return
+                #if os(tvOS)
+                let toHeading = guideLeadingExit(fallback: nil)
+                #else
+                let toHeading: (() -> Void)? = nil
+                #endif
+                switch LiveTVPrototypeGuideBrowseBack.resolve(
+                    hasPendingWatch: playback.pendingWatchChannelID != nil,
+                    isRestoringFocus: preview.isRestoringGuideFocus, isSearching: isSearching,
+                    isSelectingMultiview: multiviewSelection != nil, headingAvailable: toHeading != nil
+                ) {
+                case .cancelWatch: playback.cancelWatch()
+                case .ignore: break
+                case .closeSearch: closeSearch()
+                case .finishMultiviewSelection: finishMultiviewSelection()
+                case .focusHeading:
+                    TVBackDiagnostics.notice("guide back: guide -> heading")
+                    toHeading?()
+                case .focusToolbar:
+                    controlsActive = true
+                    sidebarRestoresCategoryFocus = false
+                    toolbarFocusRequest &+= 1
                 }
-                guard !preview.isRestoringGuideFocus else { return }
-                if isSearching {
-                    closeSearch()
-                    return
-                }
-                if multiviewSelection != nil {
-                    finishMultiviewSelection()
-                    return
-                }
-                controlsActive = true
-                sidebarRestoresCategoryFocus = false
-                toolbarFocusRequest &+= 1
             },
             isLoading: isInitialCatalogLoading,
             loadFailed: imports.catalogPhase == .failed || libraryIssue != nil || libraryGuideIssue != nil,
@@ -2308,6 +2326,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         selectedChannelID = row.channelID
         focusedProgram = nil
         controlsActive = false
+        initialFocusGoesToHeading = true
         #endif
     }
 
@@ -2376,7 +2395,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 focus: $horizontalHeadingFocused,
                 openSidebar: pinnedSidebarInteraction.map { interaction in { interaction.requestOpen() } },
                 requestPlate: requestPlateFromHeading,
-                focusHero: { glassHeroFocused = true }
+                // No channel, no hero buttons: Right from the heading then returns to the guide.
+                focusHero: channelID == nil ? nil : { glassHeroFocused = true }
             ),
             isPlaying: channelID != nil && channelID == model.playingChannelID,
             now: model.now,
