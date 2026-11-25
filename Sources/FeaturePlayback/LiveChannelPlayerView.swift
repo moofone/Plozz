@@ -2703,12 +2703,13 @@ final class LiveChannelPlayerModel {
         trackState.refreshStyle(engine: engine)
     }
 
-    /// The relay's root request: milliseconds from relay start to its first upstream body byte.
-    private var relayFirstByteMilliseconds: Int? {
-        guard case .stream(let url, _) = source.input,
-              let root = PlaybackDeliveryFailure.state(for: url)?.evidence.root,
-              let firstByte = root.firstByteMilliseconds else { return nil }
-        return root.startedMilliseconds + firstByte
+    /// The relay's root request: milliseconds from that request's start to its first upstream body byte.
+    /// Its start offset is relative to the relay's creation, so it must not be added in.
+    private var relayRequestFirstByteMilliseconds: Int? {
+        guard case .stream(let url, _) = source.input else { return nil }
+        return LiveStartTiming.requestFirstByteMilliseconds(
+            of: PlaybackDeliveryFailure.state(for: url)?.evidence.root
+        )
     }
 
     static let firstFrameMonitorInterval = Duration.milliseconds(40)
@@ -2818,7 +2819,7 @@ final class LiveChannelPlayerModel {
         if !hadPresentedFrame, hasPresentedFrame {
             recordPlaybackDiagnostic(.firstFrame)
             tuneToFirstFrameSeconds = max(0, uptime() - firstFrameTimingStartedAt)
-            if let line = startTiming.markFirstFrame(at: uptime(), relayFirstByteMilliseconds: relayFirstByteMilliseconds) {
+            if let line = startTiming.markFirstFrame(at: uptime(), relayRequestFirstByteMilliseconds: relayRequestFirstByteMilliseconds) {
                 PlozzLog.playback.info(line)
             }
             // The first moment a subtitle selection is sure to be honoured.

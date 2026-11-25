@@ -8,24 +8,44 @@ final class LiveStartTimingTests: XCTestCase {
         var timing = LiveStartTiming(selectedAt: 10, id: "abc")
         timing.markAddressResolved(at: 10.2)
         timing.markAddressResolved(at: 11)
-        let line = try XCTUnwrap(timing.markFirstFrame(at: 12, relayFirstByteMilliseconds: 600))
+        let line = try XCTUnwrap(timing.markFirstFrame(at: 12, relayRequestFirstByteMilliseconds: 600))
         XCTAssertEqual(
             line,
             "LIVE_START id=abc select→address=200ms address→firstUpstreamByte=600ms"
                 + " firstByte→firstFrame=1200ms address→firstFrame=1800ms total=2000ms rebuffers=0"
         )
-        XCTAssertNil(timing.markFirstFrame(at: 13, relayFirstByteMilliseconds: 600))
+        XCTAssertNil(timing.markFirstFrame(at: 13, relayRequestFirstByteMilliseconds: 600))
+    }
+
+    func testRelayStartedLongBeforeTheTuneDoesNotSwallowTheFirstByteSplit() throws {
+        var request = PlaybackDeliveryEvidence.Request(
+            sequence: 1, resource: .root, method: .get, startedMilliseconds: 60_000
+        )
+        request.firstByteMilliseconds = 300
+        var timing = LiveStartTiming(selectedAt: 100, id: "w")
+        timing.markAddressResolved(at: 100.1)
+        let line = try XCTUnwrap(timing.markFirstFrame(
+            at: 101, relayRequestFirstByteMilliseconds: LiveStartTiming.requestFirstByteMilliseconds(of: request)
+        ))
+        XCTAssertTrue(line.contains("address→firstUpstreamByte=300ms firstByte→firstFrame=600ms"), line)
+    }
+
+    func testStallAtOrAboveTheAdaptationThresholdIsCounted() throws {
+        var timing = LiveStartTiming(selectedAt: 0, id: "t")
+        _ = timing.markFirstFrame(at: 1, relayRequestFirstByteMilliseconds: nil)
+        _ = timing.observeBuffering(true, at: 2)
+        XCTAssertEqual(try XCTUnwrap(timing.observeBuffering(false, at: 3.5)), "LIVE_STALL id=t n=1 duration=1500ms counted=true")
     }
 
     func testMissingRelayByteIsReportedAsUnknownAndOversizedByteIsClamped() throws {
         var unknown = LiveStartTiming(selectedAt: 0, id: "u")
         unknown.markAddressResolved(at: 0.1)
-        let line = try XCTUnwrap(unknown.markFirstFrame(at: 1, relayFirstByteMilliseconds: nil))
+        let line = try XCTUnwrap(unknown.markFirstFrame(at: 1, relayRequestFirstByteMilliseconds: nil))
         XCTAssertTrue(line.contains("address→firstUpstreamByte=unknown firstByte→firstFrame=unknown"))
 
         var clamped = LiveStartTiming(selectedAt: 0, id: "c")
         clamped.markAddressResolved(at: 0)
-        let clampedLine = try XCTUnwrap(clamped.markFirstFrame(at: 1, relayFirstByteMilliseconds: 5_000))
+        let clampedLine = try XCTUnwrap(clamped.markFirstFrame(at: 1, relayRequestFirstByteMilliseconds: 5_000))
         XCTAssertTrue(clampedLine.contains("address→firstUpstreamByte=1000ms firstByte→firstFrame=0ms"))
     }
 
@@ -33,13 +53,13 @@ final class LiveStartTimingTests: XCTestCase {
         var timing = LiveStartTiming(selectedAt: 0, id: "r")
         XCTAssertNil(timing.observeBuffering(true, at: 0.5))
         XCTAssertEqual(timing.rebuffers, 0)
-        _ = timing.markFirstFrame(at: 1, relayFirstByteMilliseconds: nil)
+        _ = timing.markFirstFrame(at: 1, relayRequestFirstByteMilliseconds: nil)
         XCTAssertNil(timing.observeBuffering(true, at: 2))
         XCTAssertNil(timing.observeBuffering(true, at: 2.5))
-        XCTAssertEqual(try XCTUnwrap(timing.observeBuffering(false, at: 3.25)), "LIVE_STALL id=r n=1 duration=1250ms")
+        XCTAssertEqual(try XCTUnwrap(timing.observeBuffering(false, at: 3.25)), "LIVE_STALL id=r n=1 duration=1250ms counted=false")
         XCTAssertNil(timing.observeBuffering(false, at: 4))
         XCTAssertNil(timing.observeBuffering(true, at: 5))
-        XCTAssertEqual(try XCTUnwrap(timing.observeBuffering(false, at: 5.1)), "LIVE_STALL id=r n=2 duration=100ms")
+        XCTAssertEqual(try XCTUnwrap(timing.observeBuffering(false, at: 5.1)), "LIVE_STALL id=r n=2 duration=100ms counted=false")
         XCTAssertEqual(timing.rebuffers, 2)
     }
 
