@@ -1,4 +1,5 @@
 #if DEBUG && canImport(UIKit)
+import CoreModels
 import XCTest
 @testable import FeaturePlayback
 
@@ -58,6 +59,67 @@ final class LiveStartTimingTests: XCTestCase {
         engine.liveSnapshot.phase = .playing
         try await Task.sleep(for: .milliseconds(150))
         XCTAssertTrue(model.hasPresentedFrame, "a 250 ms poll would not have observed the frame yet")
+    }
+
+    func testSignalsReportOneStallPerEpisodeOnlyAfterTheMinimumDuration() {
+        var signals = LiveBufferAdaptationSignals()
+        XCTAssertFalse(signals.observe(isStalling: true, isStablePlaying: false, at: 0).stalled)
+        XCTAssertFalse(signals.observe(isStalling: true, isStablePlaying: false, at: 1.4).stalled)
+        XCTAssertTrue(signals.observe(isStalling: true, isStablePlaying: false, at: 1.5).stalled)
+        XCTAssertFalse(signals.observe(isStalling: true, isStablePlaying: false, at: 9).stalled)
+        _ = signals.observe(isStalling: false, isStablePlaying: true, at: 10)
+        XCTAssertFalse(signals.observe(isStalling: true, isStablePlaying: false, at: 11).stalled)
+        XCTAssertTrue(signals.observe(isStalling: true, isStablePlaying: false, at: 12.6).stalled)
+    }
+
+    func testSignalsBatchStablePlaybackIgnoreGapsAndFlushTheRemainder() {
+        var signals = LiveBufferAdaptationSignals()
+        var reported: TimeInterval = 0
+        var time: TimeInterval = 0
+        for _ in 0..<130 {   // 130 half-second ticks = 65 s
+            time += 0.5
+            reported += signals.observe(isStalling: false, isStablePlaying: true, at: time).stableSeconds
+        }
+        XCTAssertEqual(reported, 60.5, accuracy: 0.6)
+        // A suspend gap counts for at most one tick's allowance; a pause counts for nothing.
+        _ = signals.observe(isStalling: false, isStablePlaying: true, at: time + 3_600)
+        _ = signals.observe(isStalling: false, isStablePlaying: false, at: time + 3_601)
+        _ = signals.observe(isStalling: false, isStablePlaying: true, at: time + 3_700)
+        let flushed = signals.flush()
+        XCTAssertEqual(flushed, 6.5, accuracy: 0.6, "4.5 s carried + one 2 s capped gap; the pause adds nothing")
+        XCTAssertEqual(signals.flush(), 0)
+    }
+
+    @MainActor
+    func testRebufferAfterTheFirstFrameRaisesTheSourcesNextTuneAndStartupWaitsDoNot() async throws {
+        let suite = "LiveStartTimingTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let scope = LiveBufferAdaptationScope(
+            namespace: "profile", sourceID: "source", store: LiveBufferAdaptationStore(defaults: defaults)
+        )
+        var clock: TimeInterval = 100
+        let engine = LiveEngineSpy()
+        engine.liveSnapshot.firstFrameReady = false
+        engine.liveSnapshot.phase = .loading
+        let model = LiveChannelPlayerModel(
+            engine: engine, streamURL: URL(string: "https://example.invalid/channel.m3u8")!,
+            uptime: { clock }, bufferAdaptation: scope
+        )
+        defer { model.stop() }
+        await model.start()
+        clock += 10   // a long startup wait is not a stall
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(scope.targetSeconds())
+
+        engine.liveSnapshot.firstFrameReady = true
+        engine.liveSnapshot.phase = .playing
+        try await Task.sleep(for: .milliseconds(200))
+        engine.liveSnapshot.phase = .rebuffering
+        try await Task.sleep(for: .milliseconds(200))
+        clock += 3
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(scope.targetSeconds(), 4)
     }
 }
 #endif

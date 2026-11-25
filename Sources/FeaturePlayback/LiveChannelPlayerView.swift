@@ -100,6 +100,7 @@ public struct LiveChannelPlayerView: View {
     private let isAudible: Bool
     private let countsAsWatching: Bool
     private let isMultiview: Bool
+    private let bufferAdaptation: LiveBufferAdaptationScope?
     private let trackPreferences: LiveChannelTrackPreferences?
     private let displayTransitionSettings: @MainActor () -> PlaybackSettings
     private let touchSkipIntervals: @MainActor () -> (backward: SkipInterval, forward: SkipInterval)
@@ -238,6 +239,7 @@ public struct LiveChannelPlayerView: View {
         isAudible: Bool = true,
         countsAsWatching: Bool = false,
         isMultiview: Bool = false,
+        bufferAdaptation: LiveBufferAdaptationScope? = nil,
         trackPreferences: LiveChannelTrackPreferences? = nil,
         displayTransitionSettings: @escaping @MainActor () -> PlaybackSettings = { .default },
         touchSkipIntervals: @escaping @MainActor () -> (backward: SkipInterval, forward: SkipInterval) = {
@@ -291,6 +293,7 @@ public struct LiveChannelPlayerView: View {
         self.isAudible = isAudible
         self.countsAsWatching = countsAsWatching
         self.isMultiview = isMultiview
+        self.bufferAdaptation = bufferAdaptation
         self.trackPreferences = trackPreferences
         self.displayTransitionSettings = displayTransitionSettings
         self.touchSkipIntervals = touchSkipIntervals
@@ -338,6 +341,7 @@ public struct LiveChannelPlayerView: View {
         isAudible: Bool = true,
         countsAsWatching: Bool = false,
         isMultiview: Bool = false,
+        bufferAdaptation: LiveBufferAdaptationScope? = nil,
         trackPreferences: LiveChannelTrackPreferences? = nil,
         displayTransitionSettings: @escaping @MainActor () -> PlaybackSettings = { .default },
         touchSkipIntervals: @escaping @MainActor () -> (backward: SkipInterval, forward: SkipInterval) = {
@@ -368,7 +372,8 @@ public struct LiveChannelPlayerView: View {
             onVideoAspectRatioChange: onVideoAspectRatioChange, onMeasuredResolution: onMeasuredResolution,
             onMultiview: onMultiview,
             outputGroup: outputGroup, outputID: outputID, isAudible: isAudible,
-            countsAsWatching: countsAsWatching, isMultiview: isMultiview, trackPreferences: trackPreferences,
+            countsAsWatching: countsAsWatching, isMultiview: isMultiview, bufferAdaptation: bufferAdaptation,
+            trackPreferences: trackPreferences,
             displayTransitionSettings: displayTransitionSettings,
             touchSkipIntervals: touchSkipIntervals,
             touchLevelsEnabled: touchLevelsEnabled,
@@ -1032,7 +1037,8 @@ public struct LiveChannelPlayerView: View {
             engine: engine, channelID: channelID, input: input,
             outputGroup: outputGroup, outputID: outputID ?? UUID(), isAudible: isAudible,
             allowsDisplayMatching: allowsDisplayMatching,
-            trackPreferences: trackPreferences
+            trackPreferences: trackPreferences,
+            bufferAdaptation: isMultiview ? nil : bufferAdaptation
         )
         model = playerModel
         playerModel.onExternalContinuationChanged = onExternalContinuationChanged
@@ -1975,6 +1981,9 @@ final class LiveChannelPlayerModel {
     private var attemptStartedAt: TimeInterval = 0
     private var firstFrameTimingStartedAt: TimeInterval = 0
     @ObservationIgnored private var startTiming: LiveStartTiming
+    /// Nil for multiview panes and previews, which keep a fixed buffer.
+    @ObservationIgnored private let bufferAdaptation: LiveBufferAdaptationScope?
+    @ObservationIgnored private var adaptationSignals = LiveBufferAdaptationSignals()
     private var bufferingStartedAt: TimeInterval?
     @ObservationIgnored private var diagnostics = LiveChannelDiagnostics()
     @ObservationIgnored private var retuneBudget = LiveChannelRetuneBudget()
@@ -2019,9 +2028,11 @@ final class LiveChannelPlayerModel {
         isAudible: Bool = true,
         allowsDisplayMatching: Bool = true,
         trackPreferences: LiveChannelTrackPreferences? = nil,
+        bufferAdaptation: LiveBufferAdaptationScope? = nil,
         playbackJournal: PlaybackDiagnosticJournal = .shared
     ) {
         self.engine = engine
+        self.bufferAdaptation = bufferAdaptation
         videoZoom.supportsActivePicture = engine.supportsActivePictureAnalysis
         self.playbackJournal = playbackJournal
         self.outputGroup = outputGroup
@@ -2055,13 +2066,14 @@ final class LiveChannelPlayerModel {
         outputID: UUID = UUID(),
         isAudible: Bool = true,
         allowsDisplayMatching: Bool = true,
-        trackPreferences: LiveChannelTrackPreferences? = nil
+        trackPreferences: LiveChannelTrackPreferences? = nil,
+        bufferAdaptation: LiveBufferAdaptationScope? = nil
     ) {
         self.init(
             engine: engine, channelID: channelID, input: .stream(url: streamURL, httpHeaders: httpHeaders),
             uptime: uptime, outputGroup: outputGroup, outputID: outputID, isAudible: isAudible,
             allowsDisplayMatching: allowsDisplayMatching,
-            trackPreferences: trackPreferences
+            trackPreferences: trackPreferences, bufferAdaptation: bufferAdaptation
         )
     }
 
@@ -2417,6 +2429,7 @@ final class LiveChannelPlayerModel {
         cancelPendingSeek()
         attemptStartedAt = uptime()
         startTiming = LiveStartTiming(selectedAt: attemptStartedAt)
+        flushBufferAdaptation()
         bufferingStartedAt = nil
         needsForegroundLoad = isSuspended
         idleSleepGuard.allowSleep()
@@ -2542,8 +2555,28 @@ final class LiveChannelPlayerModel {
         }
     }
 
+    /// Reports a qualifying rebuffer and stable viewing so the next tune's Automatic cushion adapts.
+    private func feedBufferAdaptation() {
+        guard let bufferAdaptation else { return }
+        let stalling = (phase == .buffering || phase == .reconnecting) && pendingSeekTarget == nil && !userPaused
+        let output = adaptationSignals.observe(
+            isStalling: stalling, isStablePlaying: phase == .playing, at: uptime()
+        )
+        if output.stalled {
+            bufferAdaptation.recordStall()
+            PlozzLog.playback.info("LIVE_BUFFER_ADAPT id=\(startTiming.id) event=stall")
+        }
+        if output.stableSeconds > 0 { bufferAdaptation.recordStablePlayback(seconds: output.stableSeconds) }
+    }
+
+    private func flushBufferAdaptation() {
+        let seconds = adaptationSignals.flush()
+        if seconds > 0 { bufferAdaptation?.recordStablePlayback(seconds: seconds) }
+    }
+
     func stop() {
         guard !stopped else { return }
+        flushBufferAdaptation()
         recordPlaybackDiagnostic(.stopped)
         stopped = true
         isRecoveringProgramme = false
@@ -2765,7 +2798,7 @@ final class LiveChannelPlayerModel {
         } else {
             seekableWindow.map { $0.upperBound - snapshot.position }
         }
-        if pendingSeekTarget == nil, engine.liveStartupBuffer != .automatic,
+        if pendingSeekTarget == nil, (engine.liveStartupCushionSeconds ?? 0) > 0,
            let atLiveEdge = snapshot.isAtLiveEdge, let behind, behind.isFinite {
             // The intentional cushion is part of the engine's safe live edge, not a user rewind.
             isAtLiveEdge = atLiveEdge
@@ -2822,6 +2855,7 @@ final class LiveChannelPlayerModel {
         if hasPresentedFrame, let line = startTiming.observeBuffering(showsActivityIndicator, at: uptime()) {
             PlozzLog.playback.info(line)
         }
+        if hasPresentedFrame { feedBufferAdaptation() }
         if !userPaused, phase != .paused, !isScheduledSource {
             if hasPresentedFrame {
                 enforceBufferingTimeout()
@@ -2997,7 +3031,7 @@ final class LiveChannelPlayerModel {
     }
 
     private func enforceStartupTimeout() {
-        let timeout = Self.startupTimeout + (engine.liveStartupBuffer.seconds ?? 0)
+        let timeout = Self.startupTimeout + (engine.liveStartupCushionSeconds ?? 0)
         guard uptime() - attemptStartedAt >= timeout else { return }
         fail(.startupTimedOut)
     }

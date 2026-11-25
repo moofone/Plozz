@@ -195,7 +195,10 @@ struct LiveTVShellDestination: View {
                     library.makeEngine(
                         engine: try PlozzigenVideoEngine(
                             authenticatedHTTPResolver: playback.authenticatedHTTPResolver,
-                            liveBufferPreference: { LivePlaybackBufferStore().load() }
+                            liveBufferPreference: { LivePlaybackBufferStore().load() },
+                            liveAdaptiveCushion: playback.isMultiview ? { nil } : { [scope = playback.channel.bufferAdaptationScope(namespace: preferencesNamespace)] in
+                                scope.targetSeconds()
+                            }
                         ),
                         onCompleted: completeLibraryChannelPlayback
                     )
@@ -225,6 +228,7 @@ struct LiveTVShellDestination: View {
                 isAudible: playback.isAudible,
                 countsAsWatching: playback.countsAsWatching,
                 isMultiview: playback.isMultiview,
+                bufferAdaptation: playback.isMultiview ? nil : playback.channel.bufferAdaptationScope(namespace: preferencesNamespace),
                 trackPreferences: library.trackPreferences,
                 displayTransitionSettings: {
                     PlaybackSettingsStore(namespace: preferencesNamespace).load()

@@ -194,6 +194,8 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
     }
     public var bufferedPosition: TimeInterval { engine.clock.bufferedPosition }
     public private(set) var liveStartupBuffer: LivePlaybackBuffer = .default
+    /// The cushion requested for this load: an explicit choice, else the adaptive step for Automatic.
+    public private(set) var liveStartupCushionSeconds: TimeInterval?
 
     public var liveSnapshot: LiveChannelEngineSnapshot {
         let phase: LiveChannelEnginePhase
@@ -449,6 +451,8 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
     private let authenticatedHTTPResolver: (any AuthenticatedHTTPResourceResolving)?
     private let readAheadPreference: @MainActor () -> PlaybackReadAhead
     private let liveBufferPreference: @MainActor () -> LivePlaybackBuffer
+    /// Cushion learned from earlier stalls; consulted only while the preference is Automatic.
+    private let liveAdaptiveCushion: @MainActor () -> TimeInterval?
     private let losslessAudioPreference: @MainActor () -> Bool
     private var liveOutputPolicy = LiveChannelOutputPolicy()
     private var outputPolicyReload: Task<Void, Never>?
@@ -500,6 +504,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         authenticatedHTTPResolver: (any AuthenticatedHTTPResourceResolving)? = nil,
         readAheadPreference: @escaping @MainActor () -> PlaybackReadAhead = { .default },
         liveBufferPreference: @escaping @MainActor () -> LivePlaybackBuffer = { .default },
+        liveAdaptiveCushion: @escaping @MainActor () -> TimeInterval? = { nil },
         losslessAudioPreference: @escaping @MainActor () -> Bool = { LosslessAudioSettingsStore().load() }
     ) throws {
         self.engine = try AEEngine()
@@ -512,6 +517,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         self.authenticatedHTTPResolver = authenticatedHTTPResolver
         self.readAheadPreference = readAheadPreference
         self.liveBufferPreference = liveBufferPreference
+        self.liveAdaptiveCushion = liveAdaptiveCushion
         self.losslessAudioPreference = losslessAudioPreference
         #if canImport(UIKit)
         let surface = AetherPlayerView()
@@ -1173,9 +1179,11 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
     ) -> LoadOptions {
         let buffer = liveBufferPreference()
         liveStartupBuffer = buffer
+        let adaptive = buffer == .automatic ? liveAdaptiveCushion() : nil
+        liveStartupCushionSeconds = buffer.seconds ?? adaptive
         return Self.liveLoadOptions(
             httpHeaders: httpHeaders, url: url, sourceFormat: sourceFormat,
-            buffer: buffer, losslessAudioEnabled: losslessAudioPreference(),
+            buffer: buffer, adaptiveCushionSeconds: adaptive, losslessAudioEnabled: losslessAudioPreference(),
             decodeHint: liveDecodeHint
         )
     }
@@ -1188,6 +1196,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         httpHeaders: [String: String], url: URL? = nil,
         sourceFormat: PlozzigenLiveSourceProbe.Format? = nil,
         buffer: LivePlaybackBuffer = .default,
+        adaptiveCushionSeconds: TimeInterval? = nil,
         losslessAudioEnabled: Bool = LosslessAudioSettingsStore.defaultEnabled,
         decodeHint: LiveChannelDecodeHint = .automatic
     ) -> LoadOptions {
@@ -1205,7 +1214,8 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
             // Raw live sources have no existing HLS window to fill the initial
             // holdback; long GOPs can otherwise outlast AVPlayer's playlist timeout.
             liveJoinProfile: format == .transportStream ? .fastZap : .standard,
-            liveEdgeCushionSeconds: buffer.seconds,
+            // An explicit choice always wins; the adaptive step only fills in for Automatic.
+            liveEdgeCushionSeconds: buffer.seconds ?? adaptiveCushionSeconds,
             nativeRemoteHLS: format == .hls,
             nativeRemoteHLSIngestFallback: true
         )
@@ -1302,6 +1312,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
 
     private func beginLiveAttempt() -> UInt64 {
         liveStartupBuffer = .default
+        liveStartupCushionSeconds = nil
         liveSourceProbe?.cancel()
         liveSourceProbe = nil
         liveFailureCaptureTask?.cancel()
@@ -1325,6 +1336,7 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
 
     private func endLiveAttempt() {
         liveStartupBuffer = .default
+        liveStartupCushionSeconds = nil
         liveSourceProbe?.cancel()
         liveSourceProbe = nil
         liveFailureCaptureTask?.cancel()

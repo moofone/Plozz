@@ -27,7 +27,9 @@ language every other module speaks.
   background-mode migration, not a new numeric zero.
 - `PlaybackReadAhead` and `LivePlaybackBuffer` are independent device-local
   network/storage preferences, not profile settings. Both default to Automatic
-  and are excluded from profile transfer. `EngineSessionCache` carries active
+  and are excluded from profile transfer. Automatic live buffering also learns
+  a per-source step in `LiveBufferAdaptationStore` (hashed keys, 64 sources).
+  `EngineSessionCache` carries active
   temporary-cache usage and the engine's effective playback-safe budget.
 - `PlaybackSettings.identifySongs` (#351) is a profile preference, on by
   default; payloads written before it existed decode as on.

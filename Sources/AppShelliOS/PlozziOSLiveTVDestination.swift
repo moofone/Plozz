@@ -128,7 +128,10 @@ struct PlozziOSLiveTVDestination: View {
                     runtime.makeEngine(
                         engine: try PlozzigenVideoEngine(
                             authenticatedHTTPResolver: playback.authenticatedHTTPResolver,
-                            liveBufferPreference: { LivePlaybackBufferStore().load() }
+                            liveBufferPreference: { LivePlaybackBufferStore().load() },
+                            liveAdaptiveCushion: playback.isMultiview ? { nil } : { [scope = playback.channel.bufferAdaptationScope(namespace: preferencesNamespace)] in
+                                scope.targetSeconds()
+                            }
                         ),
                         onCompleted: { [profiles, profileID, preferencesNamespace,
                                         completeLibraryChannelPlayback, weak runtime] item, token in
@@ -175,6 +178,7 @@ struct PlozziOSLiveTVDestination: View {
                 isAudible: playback.isAudible,
                 countsAsWatching: playback.countsAsWatching,
                 isMultiview: playback.isMultiview,
+                bufferAdaptation: playback.isMultiview ? nil : playback.channel.bufferAdaptationScope(namespace: preferencesNamespace),
                 trackPreferences: runtime.trackPreferences,
                 touchSkipIntervals: {
                     let settings = PlaybackSettingsStore(namespace: preferencesNamespace).load()

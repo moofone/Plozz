@@ -53,6 +53,35 @@ final class PlozzigenLiveOutputTests: XCTestCase {
     }
 
     @MainActor
+    func testAdaptiveCushionAppliesToAutomaticOnlyAndFollowsRecordedStalls() throws {
+        let suite = "PlozzigenLiveOutputTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let scope = LiveBufferAdaptationScope(
+            namespace: nil, sourceID: "source", store: LiveBufferAdaptationStore(defaults: defaults)
+        )
+        var preference = LivePlaybackBuffer.automatic
+        let engine = try PlozzigenVideoEngine(
+            liveBufferPreference: { preference }, liveAdaptiveCushion: { scope.targetSeconds() }
+        )
+        defer { engine.stop() }
+        XCTAssertNil(engine.liveLoadOptions(httpHeaders: [:]).liveEdgeCushionSeconds)
+        XCTAssertNil(engine.liveStartupCushionSeconds)
+
+        scope.recordStall()
+        let adapted = engine.liveLoadOptions(httpHeaders: [:])
+        XCTAssertEqual(adapted.liveEdgeCushionSeconds, 4, "a stall must raise the next tune's cushion")
+        XCTAssertEqual(engine.liveStartupCushionSeconds, 4)
+        XCTAssertEqual(engine.liveStartupBuffer, .automatic)
+
+        preference = .tenSeconds
+        XCTAssertEqual(engine.liveLoadOptions(httpHeaders: [:]).liveEdgeCushionSeconds, 10)
+        XCTAssertEqual(engine.liveStartupCushionSeconds, 10)
+        engine.stop()
+        XCTAssertNil(engine.liveStartupCushionSeconds)
+    }
+
+    @MainActor
     func testCushionAndStartupAllowanceAreSampledTogetherForEachLoadAndResetOnStop() throws {
         var preference = LivePlaybackBuffer.automatic
         let engine = try PlozzigenVideoEngine(liveBufferPreference: { preference })
