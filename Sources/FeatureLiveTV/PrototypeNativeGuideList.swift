@@ -195,6 +195,23 @@ final class PrototypeGuideCollectionLayout: UICollectionViewLayout {
             .first { focus.minY >= $0 - 0.5 && focus.maxY <= $0 + height + 0.5 }
     }
 
+    /// Where a focus-driven vertical scroll aimed at `y` should land instead: the row edge at or beyond `y` in the
+    /// direction of travel. The focus engine aims just far enough to reveal the newly focused row on the side it scrolls
+    /// towards, so going on to that side's next edge keeps the row whole while no row rests cut under the ruler. nil
+    /// when there are no rows.
+    func verticalStop(for y: CGFloat, height: CGFloat, movingDown: Bool) -> CGFloat? {
+        let lead = PrototypeLayout.smallGap
+        let maxY = max(0, collectionViewContentSize.height - height)
+        guard rowCount > 0, height > 0, y.isFinite else { return nil }
+        let clamped = min(max(0, y), maxY)
+        let probe = CGRect(x: 0, y: clamped + lead, width: 1, height: 1)
+        guard let index = layoutAttributesForElements(in: probe)?.first?.indexPath.item else { return nil }
+        let lower = min(maxY, max(0, frame(at: index).minY - lead))
+        let upper = index + 1 < rowCount ? min(maxY, frame(at: index + 1).minY - lead) : maxY
+        if abs(lower - clamped) <= 0.5 { return lower }
+        return movingDown ? upper : lower
+    }
+
     /// A list height that holds whole rows: the lead-in, then as many rows (and the gaps between them) as fit.
     static func wholeRowsHeight(available: CGFloat, pitch: CGFloat, gap: CGFloat) -> CGFloat {
         let lead = PrototypeLayout.smallGap
@@ -672,6 +689,22 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
             defer { ignoreHorizontalReports = false }
             (collectionView as? GuideCollectionView)?.moveTimeline(toX: horizontal.physical(offset),
                 animated: animated && swiftUIEnvironment?.accessibilityReduceMotion != true && !UIAccessibility.isReduceMotionEnabled)
+        }
+
+        /// tvOS reports focus-driven scrolling here before animating it. Aiming that one system animation at a row edge
+        /// lands the list whole, so the settle after it has nothing left to correct (a second movement read as judder).
+        override func scrollViewWillEndDragging(
+            _ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>
+        ) {
+            let y = scrollView.contentOffset.y
+            let target = targetContentOffset.pointee.y
+            guard abs(target - y) > 0.5, positionedCollection.pendingPlacement == nil,
+                  let stop = guideLayout.verticalStop(for: target, height: scrollView.bounds.height, movingDown: target > y)
+            else { return }
+            #if DEBUG
+            GuideNavigationProfileHook.verticalRoute?("focusScroll from=\(Int(y)) proposed=\(Int(target)) stop=\(Int(stop))")
+            #endif
+            targetContentOffset.pointee.y = stop
         }
 
         override func scrollViewDidScroll(_ scrollView: UIScrollView) {

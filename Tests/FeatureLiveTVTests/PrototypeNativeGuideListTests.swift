@@ -233,6 +233,28 @@ final class PrototypeNativeGuideListTests: XCTestCase {
         XCTAssertNil(layout.verticalStop(for: 1_230, height: height, keeping: CGRect(x: 0, y: 5_000, width: 1, height: 90)))
     }
 
+    /// A focus-driven scroll is aimed at the row edge beyond the system's target in its direction of travel, so its one
+    /// animation lands whole and the settle afterwards has nothing to correct (the second movement read as judder).
+    func testFocusScrollTargetGoesOnToTheNextRowEdgeInItsDirection() {
+        let layout = PrototypeGuideCollectionLayout()
+        let collection = UICollectionView(frame: CGRect(x: 0, y: 0, width: 1_400, height: 720), collectionViewLayout: layout)
+        layout.update(rowCount: 200, rowHeight: 100, sectionHeight: 0, sectionStarts: [])
+        XCTAssertIdentical(collection.collectionViewLayout, layout)
+        let height = PrototypeGuideCollectionLayout.wholeRowsHeight(available: 720, pitch: 100, gap: 10)
+        // Down reveals the next row at the bottom: go on to the following edge, never back to a cut row.
+        XCTAssertEqual(layout.verticalStop(for: 1_230, height: height, movingDown: true), 1_300)
+        XCTAssertEqual(layout.verticalStop(for: 1_270, height: height, movingDown: true), 1_300)
+        // Up reveals the row above at the top: its own edge.
+        XCTAssertEqual(layout.verticalStop(for: 1_270, height: height, movingDown: false), 1_200)
+        XCTAssertEqual(layout.verticalStop(for: 1_230, height: height, movingDown: false), 1_200)
+        // A target already on an edge is left alone, as are the ends of the list.
+        XCTAssertEqual(layout.verticalStop(for: 1_300, height: height, movingDown: true), 1_300)
+        XCTAssertEqual(layout.verticalStop(for: 0, height: height, movingDown: false), 0)
+        let maxY = layout.collectionViewContentSize.height - height
+        XCTAssertEqual(layout.verticalStop(for: maxY - 5, height: height, movingDown: true), maxY)
+        XCTAssertEqual(layout.verticalStop(for: 1_000_000, height: height, movingDown: true), maxY)
+    }
+
     /// A ruler time the timeline scrolled past slides to the visible edge, and is hidden rather than drawn cut.
     func testRulerTimeIsNeverDrawnCutAtTheLeadingEdge() {
         typealias M = PrototypeGuideCellMetrics
