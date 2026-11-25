@@ -82,6 +82,35 @@ public enum PlaybackDiagnosticReport: Equatable, Sendable {
             number("skipped_entries", diagnostic.skippedEntries)
         case .playback(let report):
             fields[0] = "format=plozz-live-tv-2"
+            func request(_ prefix: String, _ value: PlaybackDeliveryEvidence.Request) {
+                number("\(prefix).sequence", value.sequence)
+                field("\(prefix).resource", value.resource.rawValue)
+                field("\(prefix).method", value.method.rawValue)
+                field("\(prefix).outcome", value.outcome.rawValue)
+                number("\(prefix).started_ms", value.startedMilliseconds)
+                number("\(prefix).elapsed_ms", value.elapsedMilliseconds)
+                number("\(prefix).http_status", value.status)
+                field("\(prefix).format", value.format.rawValue)
+                field("\(prefix).redirected", value.redirected.map { $0 ? "true" : "false" })
+                field("\(prefix).cross_origin", value.crossOrigin.map { $0 ? "true" : "false" })
+                field("\(prefix).range_requested", value.rangeRequested ? "true" : "false")
+                field("\(prefix).content_range", value.rangeResponse.rawValue)
+                number("\(prefix).expected_bytes", value.expectedBytes)
+                number("\(prefix).received_bytes", value.receivedBytes)
+                number("\(prefix).network_code", value.networkCode)
+                if let playlist = value.playlist {
+                    field("\(prefix).hls_header", playlist.hasHeader ? "true" : "false")
+                    field("\(prefix).hls_master", playlist.isMaster ? "true" : "false")
+                    number("\(prefix).hls_target_ms", playlist.targetDurationMilliseconds)
+                    number("\(prefix).hls_max_segment_ms", playlist.maximumSegmentMilliseconds)
+                    number("\(prefix).hls_media_sequence", playlist.mediaSequence)
+                    number("\(prefix).hls_segments", playlist.segments)
+                    field("\(prefix).hls_endlist", playlist.hasEndList ? "true" : "false")
+                    field("\(prefix).hls_byte_ranges", playlist.hasByteRanges ? "true" : "false")
+                    field("\(prefix).hls_map", playlist.hasMap ? "true" : "false")
+                    field("\(prefix).hls_encrypted", playlist.hasEncryption ? "true" : "false")
+                }
+            }
             field("operation", "playback")
             field("failure", report.failure.diagnosticCode)
             if let codec = report.failure.videoNotDecodedCodecField {
@@ -108,42 +137,13 @@ public enum PlaybackDiagnosticReport: Equatable, Sendable {
                     for (index, error) in evidence.nativeLogErrors.enumerated() {
                         field("native_log_\(index)", "\(error.domain.rawValue):\(error.code)")
                     }
-                    func request(_ prefix: String, _ value: PlaybackDeliveryEvidence.Request) {
-                        number("\(prefix).sequence", value.sequence)
-                        field("\(prefix).resource", value.resource.rawValue)
-                        field("\(prefix).method", value.method.rawValue)
-                        field("\(prefix).outcome", value.outcome.rawValue)
-                        number("\(prefix).started_ms", value.startedMilliseconds)
-                        number("\(prefix).elapsed_ms", value.elapsedMilliseconds)
-                        number("\(prefix).http_status", value.status)
-                        field("\(prefix).format", value.format.rawValue)
-                        field("\(prefix).redirected", value.redirected.map { $0 ? "true" : "false" })
-                        field("\(prefix).cross_origin", value.crossOrigin.map { $0 ? "true" : "false" })
-                        field("\(prefix).range_requested", value.rangeRequested ? "true" : "false")
-                        field("\(prefix).content_range", value.rangeResponse.rawValue)
-                        number("\(prefix).expected_bytes", value.expectedBytes)
-                        number("\(prefix).received_bytes", value.receivedBytes)
-                        number("\(prefix).network_code", value.networkCode)
-                        if let playlist = value.playlist {
-                            field("\(prefix).hls_header", playlist.hasHeader ? "true" : "false")
-                            field("\(prefix).hls_master", playlist.isMaster ? "true" : "false")
-                            number("\(prefix).hls_target_ms", playlist.targetDurationMilliseconds)
-                            number("\(prefix).hls_max_segment_ms", playlist.maximumSegmentMilliseconds)
-                            number("\(prefix).hls_media_sequence", playlist.mediaSequence)
-                            number("\(prefix).hls_segments", playlist.segments)
-                            field("\(prefix).hls_endlist", playlist.hasEndList ? "true" : "false")
-                            field("\(prefix).hls_byte_ranges", playlist.hasByteRanges ? "true" : "false")
-                            field("\(prefix).hls_map", playlist.hasMap ? "true" : "false")
-                            field("\(prefix).hls_encrypted", playlist.hasEncryption ? "true" : "false")
-                        }
-                    }
-                    if let delivery = evidence.delivery {
-                        if let root = delivery.root { request("upstream_root", root) }
-                        if let failure = delivery.firstFailure { request("upstream_first_failure", failure) }
-                        for (index, value) in delivery.recent.enumerated() {
-                            request("upstream_\(index)", value)
-                        }
-                    }
+                }
+            }
+            if let delivery = report.deliveryEvidence {
+                if let root = delivery.root { request("upstream_root", root) }
+                if let failure = delivery.firstFailure { request("upstream_first_failure", failure) }
+                for (index, value) in delivery.recent.enumerated() {
+                    request("upstream_\(index)", value)
                 }
             }
         }

@@ -26,6 +26,9 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
     public var livePlaybackFailureDiagnostic: PlaybackFailureDiagnostic? {
         hasSource && decoderGeneration == generation ? underlyingEngine.livePlaybackFailureDiagnostic : nil
     }
+    public var liveDeliveryEvidence: PlaybackDeliveryEvidence? {
+        hasSource && decoderGeneration == generation ? underlyingEngine.liveDeliveryEvidence : nil
+    }
     public var isCapturingLiveFailureDiagnostic: Bool {
         hasSource && decoderGeneration == generation && underlyingEngine.isCapturingLiveFailureDiagnostic
     }

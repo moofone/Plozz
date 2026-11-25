@@ -138,4 +138,113 @@ final class PlaybackDiagnosticReportTests: XCTestCase {
         XCTAssertEqual(StreamingPlaybackFailure(kind: .unknown, engineFailure: .audioTrackSwitchFailed).userMessage,
                        PlaybackFailureDiagnostic.EngineFailure.audioTrackSwitchFailed.message)
     }
+
+    // MARK: - What the relay saw when no typed error was recorded
+
+    private func request(
+        _ sequence: Int, _ resource: PlaybackDeliveryEvidence.Resource = .child,
+        outcome: PlaybackDeliveryEvidence.Outcome, status: Int? = nil, bytes: Int = 0, networkCode: Int? = nil,
+        playlist: PlaybackDeliveryEvidence.Playlist? = nil
+    ) -> PlaybackDeliveryEvidence.Request {
+        var value = PlaybackDeliveryEvidence.Request(
+            sequence: sequence, resource: resource, method: .get, startedMilliseconds: sequence * 100
+        )
+        value.outcome = outcome
+        value.status = status
+        value.receivedBytes = bytes
+        value.networkCode = networkCode
+        value.playlist = playlist
+        return value
+    }
+
+    private func message(_ failure: LiveChannelPlaybackFailure, _ delivery: PlaybackDeliveryEvidence?) -> String {
+        String(localized: LiveChannelFailureReport(failure: failure, delivery: delivery).message)
+    }
+
+    private let mediaPlaylist = PlaybackDeliveryEvidence.Playlist(
+        hasHeader: true, isMaster: false, targetDurationMilliseconds: 6_000, maximumSegmentMilliseconds: 6_000,
+        mediaSequence: 10, segments: 5, hasEndList: false, hasByteRanges: false, hasMap: false, hasEncryption: false
+    )
+
+    func testStartupTimeoutNamesTheProviderStepThatNeverDelivered() {
+        let generic = String(localized: LiveChannelPlaybackFailure.startupTimedOut.message)
+        // The channel request was never answered (still waiting, or given up on by the player).
+        for outcome in [PlaybackDeliveryEvidence.Outcome.pending, .consumerClosed] {
+            let root = request(1, .root, outcome: outcome)
+            XCTAssertEqual(message(.startupTimedOut, .init(root: root, recent: [root])),
+                           "The provider did not respond to the request for this channel.")
+        }
+        // Answered 200, no bytes.
+        let silent = request(1, .root, outcome: .receiving, status: 200)
+        XCTAssertEqual(message(.startupTimedOut, .init(root: silent, recent: [silent])),
+                       "The provider accepted the request but sent no data for this channel.")
+        // A playlist, then segments that never delivered a byte.
+        let playlist = request(1, .root, outcome: .complete, status: 200, bytes: 864, playlist: mediaPlaylist)
+        let segments = [request(2, outcome: .pending), request(3, outcome: .consumerClosed, status: 200)]
+        XCTAssertEqual(message(.startupTimedOut, .init(root: playlist, recent: [playlist] + segments)),
+                       "The provider sent the channel’s playlist but no video.")
+        // A refusal or network failure anywhere before video is the cause.
+        let refused = request(2, outcome: .upstreamFailure, status: 503)
+        XCTAssertEqual(message(.startupTimedOut, .init(root: playlist, firstFailure: refused, recent: [playlist, refused])),
+                       "The provider returned a server error (HTTP 503).")
+        let teapot = request(2, outcome: .upstreamFailure, status: 418)
+        XCTAssertEqual(message(.startupTimedOut, .init(root: playlist, firstFailure: teapot, recent: [playlist, teapot])),
+                       "The provider refused the stream (HTTP 418).")
+        let timedOut = request(2, outcome: .upstreamFailure, networkCode: URLError.timedOut.rawValue)
+        XCTAssertEqual(message(.startupTimedOut, .init(root: playlist, firstFailure: timedOut, recent: [playlist, timedOut])),
+                       "The request to the provider did not respond in time.")
+        // Nothing conclusive: segments arrived (a decode problem, not the provider), a master playlist, or no relay.
+        let delivered = [request(2, outcome: .complete, status: 200, bytes: 400_000)]
+        XCTAssertEqual(message(.startupTimedOut, .init(root: playlist, recent: [playlist] + delivered)), generic)
+        var master = playlist
+        master.playlist?.isMaster = true
+        XCTAssertEqual(message(.startupTimedOut, .init(root: master, recent: [master] + segments)), generic)
+        XCTAssertEqual(message(.startupTimedOut, nil), generic)
+        XCTAssertEqual(message(.startupTimedOut, .init()), generic)
+    }
+
+    func testATimeoutWithARecordedRefusalShowsTheRefusal() throws {
+        for (status, expected) in [(429, "The provider is limiting requests."), (403, "The provider refused access (HTTP 403).")] {
+            let attempt = try XCTUnwrap(PlaybackFailureDiagnostics().begin(
+                layer: .iptvProxy, content: .live, captureForPresentation: true
+            ))
+            let diagnostic = attempt.fail(stage: .response, httpStatus: status)
+            for failure in [LiveChannelPlaybackFailure.startupTimedOut, .bufferingTimedOut, .ended] {
+                XCTAssertEqual(String(localized: LiveChannelFailureReport(failure: failure, diagnostic: diagnostic).message),
+                               expected, "\(failure) \(status)")
+            }
+        }
+    }
+
+    func testAStallOrEndBlamesOnlyRecentProviderFailures() {
+        let playlist = request(1, .root, outcome: .complete, status: 200, bytes: 864, playlist: mediaPlaylist)
+        let old404 = request(2, outcome: .upstreamFailure, status: 404)
+        let later = (3...10).map { request($0, outcome: .complete, status: 200, bytes: 200_000) }
+        // A segment error the stream recovered from long ago is not why it ended.
+        let recovered = PlaybackDeliveryEvidence(root: playlist, firstFailure: old404, recent: later)
+        XCTAssertEqual(message(.ended, recovered), String(localized: LiveChannelPlaybackFailure.ended.message))
+        XCTAssertEqual(message(.bufferingTimedOut, recovered),
+                       String(localized: LiveChannelPlaybackFailure.bufferingTimedOut.message))
+        // The provider cutting the stream off is.
+        let cut = request(11, outcome: .upstreamFailure, status: 403)
+        let ended = PlaybackDeliveryEvidence(root: playlist, firstFailure: old404, recent: Array(later.dropFirst()) + [cut])
+        XCTAssertEqual(message(.ended, ended), "The provider refused access (HTTP 403).")
+        let reset = request(11, outcome: .upstreamFailure, networkCode: URLError.timedOut.rawValue)
+        XCTAssertEqual(message(.bufferingTimedOut, .init(root: playlist, recent: [reset])),
+                       "The request to the provider did not respond in time.")
+        // Startup-only causes never explain a stream that already showed video.
+        let silent = request(12, .root, outcome: .pending)
+        XCTAssertEqual(message(.ended, .init(root: silent, recent: [silent])),
+                       String(localized: LiveChannelPlaybackFailure.ended.message))
+    }
+
+    func testTimeoutDetailsCarryTheRelayEvidenceWithoutURLs() {
+        let root = request(1, .root, outcome: .pending)
+        let report = LiveChannelFailureReport(failure: .startupTimedOut, delivery: .init(root: root, recent: [root]))
+        let text = PlaybackDiagnosticReport.playback(report).supportText
+        XCTAssertTrue(text.contains("failure=startupTimedOut"))
+        XCTAssertTrue(text.contains("upstream_root.outcome=pending"))
+        XCTAssertTrue(text.contains("upstream_0.resource=root"))
+        XCTAssertFalse(text.contains("://"))
+    }
 }
