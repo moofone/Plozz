@@ -12,11 +12,18 @@ final class LiveChannelDisplayTransition {
     private var generation = UUID()
     private var acceptsDisplayEvents = false
     private var pendingRange: EffectiveDynamicRange?
+    /// Whether the TV can change mode for this content. Without Match Content no switch
+    /// happens, so the veil would only hold black until its safety timeout.
+    private let displayCanSwitchMode: @MainActor () -> Bool
 
     var hidesControls: Bool { !isExiting && veil.isVeiled }
 
-    init(veil: HDRTransitionModel? = nil) {
+    init(
+        veil: HDRTransitionModel? = nil,
+        displayCanSwitchMode: @escaping @MainActor () -> Bool = { true }
+    ) {
         self.veil = veil ?? HDRTransitionModel()
+        self.displayCanSwitchMode = displayCanSwitchMode
     }
 
     func beginPlayback(
@@ -26,7 +33,7 @@ final class LiveChannelDisplayTransition {
         reset()
         veil.isDynamicRangeFadeEnabled = settings.fadeOnDynamicRangeChange
         veil.isFrameRateFadeEnabled = settings.fadeOnFrameRateChange
-        if isFullscreen {
+        if isFullscreen, displayCanSwitchMode() {
             // A replaced player's range describes the old source, not the incoming channel.
             let hint = changesSource ? nil : range
             pendingRange = .awaitingEngineProbe(hint: hint)

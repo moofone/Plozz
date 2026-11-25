@@ -208,6 +208,19 @@ enum LiveTVPrototypeBackAction: Equatable {
     var handledByGuide: Bool { self == .closePresentation || self == .showVideoFullScreen }
 }
 
+/// Whether Watch from the guide still shows the guide: the player has been asked for (`isExpanded`) but this channel's
+/// first frame is not on screen yet, and the full-screen player has not been shown since. Once it has, channel changes
+/// in it are the player's own. Multiview keeps its own presentation.
+enum LiveTVFirstFrameHold {
+    static func holdsGuide(
+        isExpanded: Bool, isMultiview: Bool, playerRevealed: Bool, preparationID: UUID?, framedPreparationID: UUID?
+    ) -> Bool {
+        guard isExpanded, !isMultiview, !playerRevealed else { return false }
+        guard let preparationID else { return true }
+        return preparationID != framedPreparationID
+    }
+}
+
 /// Back inside the guide browser (a programme or channel focused), after any presentation has had the press.
 /// A pending Watch, search or multiview selection is closed first. On the glass screen, which has no toolbar, Back then
 /// steps to the filter heading, as Left at the guide's leading edge does; Back on the heading goes on to the main menu.

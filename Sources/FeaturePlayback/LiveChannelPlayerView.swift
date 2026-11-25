@@ -91,6 +91,9 @@ public struct LiveChannelPlayerView: View {
     private let onPlaybackUpdate: @MainActor (LiveTVPlaybackUpdate) -> Void
     private let onPlaybackFailed: @MainActor (LiveChannelFailureReport) -> Void
     private let onVideoAspectRatioChange: @MainActor (Double?) -> Void
+    /// Whether this channel's picture is on screen yet (true once its first frame is presented, false again on a
+    /// change of channel). Live TV keeps its guide up until then instead of showing an empty black player.
+    private let onPresentedFrameChange: @MainActor (Bool) -> Void
     /// Receives the resolution one play held longest (steady state), when the play ends. Playback only; nothing is requested to measure it.
     private let onMeasuredResolution: @MainActor (Int) -> Void
     private let onMultiview: (() -> Bool)?
@@ -159,7 +162,9 @@ public struct LiveChannelPlayerView: View {
     /// surface, as a demanding VOD title does (`PlayerView`).
     @State private var suspendedGlass = false
     @State private var suspendedGlassWasHDR = false
-    @State private var displayTransition = LiveChannelDisplayTransition()
+    @State private var displayTransition = LiveChannelDisplayTransition(
+        displayCanSwitchMode: LiveDisplayModeMatching.isEnabled
+    )
     @State private var displayTask: Task<Void, Never>?
     @State private var sourceLoadNeeded = false
     @State private var exitTask: Task<Void, Never>?
@@ -230,6 +235,7 @@ public struct LiveChannelPlayerView: View {
         onPlaybackUpdate: @escaping @MainActor (LiveTVPlaybackUpdate) -> Void = { _ in },
         onPlaybackFailed: @escaping @MainActor (LiveChannelFailureReport) -> Void = { _ in },
         onVideoAspectRatioChange: @escaping @MainActor (Double?) -> Void = { _ in },
+        onPresentedFrameChange: @escaping @MainActor (Bool) -> Void = { _ in },
         onMeasuredResolution: @escaping @MainActor (Int) -> Void = { _ in },
         onMultiview: (() -> Bool)? = nil,
         outputGroup: LiveChannelOutputGroup? = nil,
@@ -283,6 +289,7 @@ public struct LiveChannelPlayerView: View {
         self.onPlaybackUpdate = onPlaybackUpdate
         self.onPlaybackFailed = onPlaybackFailed
         self.onVideoAspectRatioChange = onVideoAspectRatioChange
+        self.onPresentedFrameChange = onPresentedFrameChange
         self.onMeasuredResolution = onMeasuredResolution
         self.onMultiview = onMultiview
         self.outputGroup = outputGroup
@@ -807,6 +814,9 @@ public struct LiveChannelPlayerView: View {
         })
         .onChange(of: model?.videoAspectRatio, initial: true) { _, ratio in
             onVideoAspectRatioChange(ratio)
+        }
+        .onChange(of: sourceMatchesCurrentModel && model?.hasPresentedFrame == true, initial: true) { _, shown in
+            onPresentedFrameChange(shown)
         }
         .task(id: ResolutionSamplingKey(channelID: channelID, isPresenting: sourceMatchesCurrentModel && (model?.hasPresentedFrame ?? false))) {
             await sampleDecodedResolution()

@@ -165,6 +165,7 @@ struct PlozziOSLiveTVDestination: View {
                 onPlaybackUpdate: playback.playbackUpdate,
                 onPlaybackFailed: playback.playbackFailed,
                 onVideoAspectRatioChange: playback.videoAspectRatioChanged,
+                onPresentedFrameChange: playback.presentedFrameChanged,
                 onMeasuredResolution: { height in
                     let key = playback.channel.qualityKey
                     LiveChannelMeasuredQualityStore.shared.record(height: height, sourceID: key.sourceID, channelID: key.channelID)

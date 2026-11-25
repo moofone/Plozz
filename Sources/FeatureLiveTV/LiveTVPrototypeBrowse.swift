@@ -1942,21 +1942,22 @@ final class PrototypeTimelineScroll {
 
 #if os(tvOS)
 /// Fits the native guide list to whole rows in the height it is offered, top-aligned.
+///
+/// One structure whether or not it is fitting: the guide moves on and off the glass sheet when a picture mounts
+/// under it (Watch), and a branch here would rebuild the list, dropping its scroll position and focus.
 struct PrototypeWholeGuideRows: ViewModifier {
     let isActive: Bool
     let pitch: CGFloat
     let gap: CGFloat
 
     func body(content: Content) -> some View {
-        if isActive {
-            GeometryReader { geometry in
-                content
-                    .frame(height: PrototypeGuideCollectionLayout.wholeRowsHeight(
-                        available: geometry.size.height, pitch: pitch, gap: gap))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-        } else {
+        GeometryReader { geometry in
             content
+                .frame(height: isActive
+                    ? PrototypeGuideCollectionLayout.wholeRowsHeight(
+                        available: geometry.size.height, pitch: pitch, gap: gap)
+                    : nil)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
     }
 }

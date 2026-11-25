@@ -415,4 +415,29 @@ final class LiveTVPrototypeGlassStateTests: XCTestCase {
         XCTAssertFalse(Presentation.none.hidesAppSidebar(isPlaying: true))
         XCTAssertFalse(Presentation.rail.hidesAppSidebar(isPlaying: true))
     }
+
+    /// Watch from the guide keeps the guide up until the channel's first frame is on screen, so the full-screen
+    /// player never stands empty and black while a stream starts; after that the player's own channel changes
+    /// do not bring the guide back.
+    func testWatchShowsTheGuideUntilTheChannelsFirstFrame() {
+        let channel = UUID(), next = UUID()
+        func holds(expanded: Bool = true, multiview: Bool = false, revealed: Bool = false,
+                   current: UUID? = channel, framed: UUID? = nil) -> Bool {
+            LiveTVFirstFrameHold.holdsGuide(
+                isExpanded: expanded, isMultiview: multiview, playerRevealed: revealed,
+                preparationID: current, framedPreparationID: framed)
+        }
+        // Watch pressed, stream connecting: the guide stays.
+        XCTAssertTrue(holds())
+        XCTAssertTrue(holds(current: nil))
+        // The previous channel's picture does not count for the new one.
+        XCTAssertTrue(holds(current: next, framed: channel))
+        // First frame on screen: the player takes over.
+        XCTAssertFalse(holds(framed: channel))
+        // Already shown full screen: a channel change there waits in the player, not the guide.
+        XCTAssertFalse(holds(revealed: true, current: next, framed: channel))
+        // Nothing asked for full screen, or multiview owns the picture.
+        XCTAssertFalse(holds(expanded: false))
+        XCTAssertFalse(holds(multiview: true))
+    }
 }

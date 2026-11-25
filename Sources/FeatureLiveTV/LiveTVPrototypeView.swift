@@ -36,6 +36,8 @@ public struct LiveTVPrototypePlayback {
     public let playbackUpdate: @MainActor (LiveTVPlaybackUpdate) -> Void
     public let playbackFailed: @MainActor (LiveChannelFailureReport) -> Void
     public let videoAspectRatioChanged: @MainActor (Double?) -> Void
+    /// The player's picture is on screen (its first frame presented) or is not yet.
+    public let presentedFrameChanged: @MainActor (Bool) -> Void
     public let isMultiview: Bool
     public let isAudible: Bool
     public let openMultiview: () -> Bool
@@ -175,6 +177,10 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
     @State private var previewAfterWatching = true
     @Environment(\.themePalette) private var palette
     @Environment(\.plozzNavigationContentInset) private var navigationInset
+    /// The preparation whose picture is on screen, as the player last reported it.
+    @State private var framedPreparationID: UUID?
+    /// The full-screen player has been shown since Watch; channel changes in it no longer wait on the guide.
+    @State private var revealedExpandedPlayer = false
     #if os(tvOS)
     @FocusState private var horizontalHeadingFocused: Bool
     @FocusState private var glassHeroFocused: Bool
@@ -437,7 +443,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
                 toolbarControlsBottom: toolbarControlsBottom.map { $0 - geometry.frame(in: .global).minY },
                 glass: guideGlassLayout
             )
-            let expanded = multiviewSelection == nil && (preview.isExpanded || multiview.isEnabled)
+            let expanded = multiviewSelection == nil && (presentsExpandedPlayer || multiview.isEnabled)
             #if os(iOS)
             let playerTransition: Animation? = reduceMotion ? nil : .smooth(duration: 0.35)
             #else
@@ -796,7 +802,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             isFavorite: model.favoriteIDs.contains(prepared.channel.id),
             canToggleFavorite: model.preferencesIssue != .loadFailed,
             onToggleFavorite: { model.toggleFavoriteWithFeedback(prepared.channel.id) },
-            isExpanded: preview.isExpanded && !multiview.isEnabled,
+            isExpanded: presentsExpandedPlayer && !multiview.isEnabled,
             isPreviewVisible: isPreviewVisible && !multiview.isEnabled,
             expandPreview: {
                 guard activity.acceptsInteraction, !multiview.isEnabled else { return }
@@ -829,6 +835,13 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             },
             videoAspectRatioChanged: {
                 multiview.updateVideoAspectRatio($0, paneID: pane.id, preparedID: prepared.id)
+            },
+            presentedFrameChanged: { shown in
+                if shown {
+                    framedPreparationID = prepared.id
+                } else if framedPreparationID == prepared.id {
+                    framedPreparationID = nil
+                }
             },
             isMultiview: multiview.isEnabled,
             isAudible: pane.id == multiview.audiblePaneID,
@@ -1442,6 +1455,10 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         }
         .onChange(of: preview.isExpanded) { _, expanded in
             markBackPresented(expanded ? .guideToPlayer : .playerToGuide)
+            if !expanded { revealedExpandedPlayer = false }
+        }
+        .onChange(of: presentsExpandedPlayer) { _, presented in
+            if presented { revealedExpandedPlayer = true }
         }
         .onChange(of: multiview.panes.count) { previous, current in
             if previous > 1, current == 1 { finishSinglePictureMultiview() }
@@ -2068,18 +2085,18 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             details: { sheet = .program($0) }, openControls: openSearch,
             openSources: { sheet = .sources }, openGuideTime: { sheet = .guideTime },
             openToolbar: usesNativeFullscreen && !isSearching && multiviewSelection == nil
-                && playback.pendingWatchChannelID == nil ? nil : {
+                && !hasPendingWatch ? nil : {
                 #if os(tvOS)
                 let toHeading = guideLeadingExit(fallback: nil)
                 #else
                 let toHeading: (() -> Void)? = nil
                 #endif
                 switch LiveTVPrototypeGuideBrowseBack.resolve(
-                    hasPendingWatch: playback.pendingWatchChannelID != nil,
+                    hasPendingWatch: hasPendingWatch,
                     isRestoringFocus: preview.isRestoringGuideFocus, isSearching: isSearching,
                     isSelectingMultiview: multiviewSelection != nil, headingAvailable: toHeading != nil
                 ) {
-                case .cancelWatch: playback.cancelWatch()
+                case .cancelWatch: cancelPendingWatch()
                 case .ignore: break
                 case .closeSearch: closeSearch()
                 case .finishMultiviewSelection: finishMultiviewSelection()
@@ -2255,7 +2272,36 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         false
         #endif
     }
-    private var isGuidePresented: Bool { !showingMultiview && !preview.isExpanded }
+    private var isGuidePresented: Bool { !showingMultiview && !presentsExpandedPlayer }
+
+    /// Watch from the guide leaves the guide up, with the channel starting under it, until the channel's first frame
+    /// is on screen; the full-screen player then takes over. Otherwise the player stood empty and black for the
+    /// seconds a stream takes to start. Back meanwhile cancels the channel. Channel changes inside the full-screen
+    /// player, multiview and other platforms are unchanged.
+    private var holdsGuideForFirstFrame: Bool {
+        #if os(tvOS)
+        LiveTVFirstFrameHold.holdsGuide(
+            isExpanded: preview.isExpanded, isMultiview: multiview.isEnabled,
+            playerRevealed: revealedExpandedPlayer,
+            preparationID: playback.preparation.current?.id, framedPreparationID: framedPreparationID)
+        #else
+        false
+        #endif
+    }
+
+    /// The full-screen player is what the viewer sees (`preview.isExpanded` once the first frame allows it).
+    private var presentsExpandedPlayer: Bool { preview.isExpanded && !holdsGuideForFirstFrame }
+
+    /// Back while a channel is starting from the guide: a Watch still being prepared, or one held for its first frame.
+    private var hasPendingWatch: Bool { playback.pendingWatchChannelID != nil || holdsGuideForFirstFrame }
+
+    private func cancelPendingWatch() {
+        if holdsGuideForFirstFrame {
+            leavePlaybackForGuide()
+        } else {
+            playback.cancelWatch()
+        }
+    }
 
     private func beginMultiviewSelection(_ selection: LiveTVMultiviewSelection) {
         guard activity.acceptsInteraction, multiview.isEnabled else { return }
@@ -2980,8 +3026,8 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
 
     private var guideBackAction: LiveTVPrototypeBackAction {
         .resolve(
-            presentation: glassPresentation, isPlaying: isPlayingBehindGuide,
-            isFullScreen: preview.isExpanded || multiview.isEnabled)
+            presentation: glassPresentation, isPlaying: isPlayingBehindGuide || holdsGuideForFirstFrame,
+            isFullScreen: presentsExpandedPlayer || multiview.isEnabled)
     }
 
     /// Back on the guide: a presentation closes first, then the playing picture goes full-screen
@@ -2997,6 +3043,11 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         case .closePresentation:
             glassTransition(.back)
         case .showVideoFullScreen:
+            if holdsGuideForFirstFrame {
+                TVBackDiagnostics.notice("guide back: cancel the channel starting under the guide")
+                leavePlaybackForGuide()
+                return
+            }
             guard let prepared = playback.preparation.current else { return }
             BackLatencyProbe.shared.pressed(.guideToPlayer)
             playback.expandPreview(presentationID: playback.presentationID, preparedID: prepared.id)
@@ -3380,7 +3431,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             finishMultiviewSelection()
             return
         }
-        if !preview.isExpanded {
+        if !presentsExpandedPlayer {
             let channels: [LiveTVPrototypeChannel]
             #if os(tvOS)
             if isSearching && searchScope == .programs {
@@ -3394,7 +3445,7 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             #endif
             channelSequence = LiveTVChannelSequence(channels: channels)
         }
-        let selectedOrigin = !preview.isExpanded && selectedRowID?.channelID == id ? selectedRowID : nil
+        let selectedOrigin = !presentsExpandedPlayer && selectedRowID?.channelID == id ? selectedRowID : nil
         playback.watch(id, origin: origin ?? selectedOrigin, expandsPlayer: expandsPlayer)
     }
 
