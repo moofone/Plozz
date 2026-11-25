@@ -355,7 +355,7 @@ struct PrototypeGuideHeadingNavigation {
     let focus: FocusState<Bool>.Binding
     let openSidebar: (() -> Void)?
     let requestPlate: (PrototypeGuidePlateRequest) -> Void
-    /// Up: the hero's first button. Nil leaves Up to the focus engine.
+    /// Up and Right: the hero's first button. Nil: Up is left to the focus engine and Right returns to the guide.
     var focusHero: (() -> Void)? = nil
 }
 
@@ -429,7 +429,12 @@ private struct PrototypeGuideHeadingFocusHost<Content: View>: UIViewControllerRe
             case leading:
                 guard let openSidebar = navigation.openSidebar else { return false }
                 action = openSidebar
-            case trailing: action = { navigation.requestPlate(.rememberedRow) }
+            case trailing:
+                // The owner's route to the hero: the heading, then Right along Watch, Multiview, Favourite, Info.
+                // Without a hero (no channel), Right keeps returning to the guide's remembered row.
+                if let focusHero = navigation.focusHero { action = focusHero } else {
+                    action = { navigation.requestPlate(.rememberedRow) }
+                }
             case .down: action = { navigation.requestPlate(.firstVisibleRow) }
             case .up:
                 // The hero's buttons are up and to the right, out of the focus engine's reach from the heading.
