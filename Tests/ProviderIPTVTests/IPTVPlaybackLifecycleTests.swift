@@ -30,6 +30,53 @@ final class IPTVPlaybackLifecycleTests: XCTestCase {
         }
     }
 
+    func testLiveBodyReachesTheClientBeforeA64KiBChunkAccumulates() async throws {
+        let source = try IPTVTestHTTPServer { _ in
+            .init(
+                data: Data(repeating: 0x47, count: 262_144),
+                delay: .milliseconds(150),
+                chunkSize: 4_096
+            )
+        }
+        let origin = try await source.start()
+        addTeardownBlock { await source.stop() }
+        let proxy = try IPTVPlaybackProxy(origin: origin.appendingPathComponent("live.ts"), headers: [:])
+        addTeardownBlock { await proxy.stop() }
+        let url = try await proxy.start()
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+
+        let (bytes, _) = try await session.bytes(from: url)
+        var iterator = bytes.makeAsyncIterator()
+        let first = try await iterator.next()
+        let sentWhenFirstByteArrived = await source.bodyBytesSent
+
+        XCTAssertNotNil(first)
+        XCTAssertLessThan(sentWhenFirstByteArrived, 65_536)
+        await proxy.stop()
+    }
+
+    func testRootEvidenceRecordsTheFirstUpstreamByteTime() async throws {
+        let source = try IPTVTestHTTPServer { _ in
+            .init(data: Data(repeating: 0x47, count: 8_192), delay: .milliseconds(100), chunkSize: 4_096)
+        }
+        let origin = try await source.start()
+        addTeardownBlock { await source.stop() }
+        let proxy = try IPTVPlaybackProxy(origin: origin.appendingPathComponent("live.ts"), headers: [:])
+        addTeardownBlock { await proxy.stop() }
+        let url = try await proxy.start()
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        _ = try await session.data(from: url)
+
+        let root = try XCTUnwrap(PlaybackDeliveryFailure.state(for: url)?.evidence.root)
+        let firstByte = try XCTUnwrap(root.firstByteMilliseconds)
+        XCTAssertGreaterThanOrEqual(firstByte, 50)
+        XCTAssertLessThanOrEqual(firstByte, root.elapsedMilliseconds)
+        XCTAssertTrue(root.isValid)
+        await proxy.stop()
+    }
+
     func testLiveRootProbesNeverOpenTwoUpstreamStreamsAtOnce() async throws {
         let source = try IPTVTestHTTPServer { _ in
             .init(data: Data(repeating: 0x47, count: 131_072), delay: .seconds(30))

@@ -1,6 +1,7 @@
 #if canImport(SwiftUI) && canImport(AVFoundation) && canImport(UIKit)
 import AVFoundation
 import CoreModels
+import CoreNetworking
 import CoreUI
 import Observation
 import SwiftUI
@@ -1973,6 +1974,7 @@ final class LiveChannelPlayerModel {
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     private var attemptStartedAt: TimeInterval = 0
     private var firstFrameTimingStartedAt: TimeInterval = 0
+    @ObservationIgnored private var startTiming: LiveStartTiming
     private var bufferingStartedAt: TimeInterval?
     @ObservationIgnored private var diagnostics = LiveChannelDiagnostics()
     @ObservationIgnored private var retuneBudget = LiveChannelRetuneBudget()
@@ -2033,6 +2035,7 @@ final class LiveChannelPlayerModel {
             input: input
         )
         self.uptime = uptime
+        startTiming = LiveStartTiming(selectedAt: uptime())
         if let outputGroup {
             outputGroup.register(
                 engine, id: outputID, audible: isAudible, allowsDisplayMatching: allowsDisplayMatching
@@ -2413,6 +2416,7 @@ final class LiveChannelPlayerModel {
         timeShifted = false
         cancelPendingSeek()
         attemptStartedAt = uptime()
+        startTiming = LiveStartTiming(selectedAt: attemptStartedAt)
         bufferingStartedAt = nil
         needsForegroundLoad = isSuspended
         idleSleepGuard.allowSleep()
@@ -2600,6 +2604,7 @@ final class LiveChannelPlayerModel {
         recordedAttemptFailure = false
         recordPlaybackDiagnostic(.loading)
         firstFrameTimingStartedAt = attemptStartedAt
+        startTiming.markAddressResolved(at: attemptStartedAt)
         tuneToFirstFrameSeconds = nil
         bufferingStartedAt = nil
         needsForegroundLoad = false
@@ -2665,11 +2670,25 @@ final class LiveChannelPlayerModel {
         trackState.refreshStyle(engine: engine)
     }
 
+    /// The relay's root request: milliseconds from relay start to its first upstream body byte.
+    private var relayFirstByteMilliseconds: Int? {
+        guard case .stream(let url, _) = source.input,
+              let root = PlaybackDeliveryFailure.state(for: url)?.evidence.root,
+              let firstByte = root.firstByteMilliseconds else { return nil }
+        return root.startedMilliseconds + firstByte
+    }
+
+    static let firstFrameMonitorInterval = Duration.milliseconds(40)
+    static let steadyMonitorInterval = Duration.milliseconds(250)
+
     private func startMonitor() {
         monitorTask?.cancel()
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(250))
+                // Poll quickly until the first frame so a tune shows it promptly, then settle.
+                let interval = (self?.hasPresentedFrame ?? true)
+                    ? Self.steadyMonitorInterval : Self.firstFrameMonitorInterval
+                try? await Task.sleep(for: interval)
                 guard !Task.isCancelled, let self else { return }
                 self.refreshFromEngine()
             }
@@ -2766,6 +2785,9 @@ final class LiveChannelPlayerModel {
         if !hadPresentedFrame, hasPresentedFrame {
             recordPlaybackDiagnostic(.firstFrame)
             tuneToFirstFrameSeconds = max(0, uptime() - firstFrameTimingStartedAt)
+            if let line = startTiming.markFirstFrame(at: uptime(), relayFirstByteMilliseconds: relayFirstByteMilliseconds) {
+                PlozzLog.playback.info(line)
+            }
             // The first moment a subtitle selection is sure to be honoured.
             refreshTracks()
             diagnostics.tuneToFirstFrame(
@@ -2796,6 +2818,9 @@ final class LiveChannelPlayerModel {
             if bufferingStartedAt == nil { bufferingStartedAt = uptime() }
         } else {
             bufferingStartedAt = nil
+        }
+        if hasPresentedFrame, let line = startTiming.observeBuffering(showsActivityIndicator, at: uptime()) {
+            PlozzLog.playback.info(line)
         }
         if !userPaused, phase != .paused, !isScheduledSource {
             if hasPresentedFrame {
