@@ -7,6 +7,14 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
         case playlist, xtream, file
     }
 
+    /// Preferred delivery format for Xtream live channels when the provider permits both.
+    public enum LiveStreamFormat: String, Codable, Sendable, Hashable, CaseIterable {
+        /// Prefer HLS (.m3u8) when supported; enables server-side live rewind when the playlist spans at least 1 minute.
+        case hls
+        /// Prefer raw MPEG-TS (.ts) when supported; enables fast startup and immediate TCP-close slot release on single-stream accounts.
+        case transportStream
+    }
+
     public let mode: Mode
     public let address: URL
     public let username: String
@@ -16,6 +24,8 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
     private let additionalGuideURLs: [URL]?
     private let configuredGuideHeaders: [String: String]?
     private let discoversPlaylistGuides: Bool?
+    /// Preferred Xtream live format; absent in credentials saved before this option existed (defaults to `.hls`).
+    private var configuredLiveStreamFormat: LiveStreamFormat?
     public let identity: UUID
     public let catalogKey: Data
 
@@ -24,6 +34,7 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
         headers: [String: String] = [:], guideURL: URL? = nil,
         additionalGuideURLs: [URL] = [], guideHeaders: [String: String] = [:],
         discoversPlaylistGuides: Bool = true,
+        liveStreamFormat: LiveStreamFormat = .hls,
         identity: UUID = UUID()
     ) throws {
         guard let parts = URLComponents(url: address, resolvingAgainstBaseURL: false),
@@ -68,6 +79,7 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
         self.additionalGuideURLs = additionalGuideURLs
         configuredGuideHeaders = guideHeaders
         self.discoversPlaylistGuides = discoversPlaylistGuides
+        configuredLiveStreamFormat = liveStreamFormat == .hls ? nil : liveStreamFormat
         self.identity = identity
         catalogKey = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
     }
@@ -114,6 +126,16 @@ public struct IPTVCredential: Codable, Sendable, Equatable, CustomStringConverti
 
     public func headers(for url: URL) -> [String: String] {
         Self.sameOrigin(address, url) ? headers : [:]
+    }
+
+    /// Preferred live format for Xtream accounts (defaults to `.hls` when omitted in older credentials).
+    public var liveStreamFormat: LiveStreamFormat { configuredLiveStreamFormat ?? .hls }
+
+    /// The same credential, identity and catalogue key included, with another Xtream live stream format preference.
+    public func replacingLiveStreamFormat(_ format: LiveStreamFormat) -> IPTVCredential {
+        var copy = self
+        copy.configuredLiveStreamFormat = format == .hls ? nil : format
+        return copy
     }
 
     public var explicitGuideURLs: [URL] { (guideURL.map { [$0] } ?? []) + (additionalGuideURLs ?? []) }

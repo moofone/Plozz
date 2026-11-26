@@ -153,8 +153,23 @@ actor IPTVClient: ApplicationStorageParticipant {
             throw IPTVError.expired
         }
         let formats = user.array("allowed_output_formats").compactMap(\.text)
-        liveExtension = formats.contains("m3u8") ? "m3u8" : "ts"
+        liveExtension = Self.preferredLiveExtension(
+            allowedFormats: formats, preference: credential.liveStreamFormat
+        )
         authenticatedAt = Date()
+    }
+
+    static func preferredLiveExtension(
+        allowedFormats: [String], preference: IPTVCredential.LiveStreamFormat
+    ) -> String {
+        let normalized = Set(allowedFormats.map { $0.lowercased() })
+        switch preference {
+        case .hls:
+            return normalized.contains("m3u8") ? "m3u8" : "ts"
+        case .transportStream:
+            if normalized.contains("ts") { return "ts" }
+            return normalized.contains("m3u8") ? "m3u8" : "ts"
+        }
     }
 
     func ensureCatalog(_ library: String, force: Bool = false) async throws {
@@ -919,11 +934,22 @@ actor IPTVClient: ApplicationStorageParticipant {
     }
 
     func delivery(_ id: String) async throws -> (url: URL, headers: [String: String], formatHint: MediaFormatHint) {
-        let record = try await record(id)
+        try await delivery(for: try await record(id))
+    }
+
+    func delivery(for record: IPTVRecord) async throws -> (url: URL, headers: [String: String], formatHint: MediaFormatHint) {
         let url: URL
         if let address = record.streamURL { url = address }
         else if let nativeID = record.streamID {
-            if authenticatedAt.map({ Date().timeIntervalSince($0) > 300 }) != false { try await authenticate() }
+            if let authenticatedAt {
+                if Date().timeIntervalSince(authenticatedAt) > 300 {
+                    // Refresh account status/output formats in the background after 5 min so channel zaps never stall.
+                    self.authenticatedAt = Date()
+                    Task { [weak self] in try? await self?.authenticate() }
+                }
+            } else {
+                try await authenticate()
+            }
             let group = record.isLive ? "live" : record.item.kind == .episode ? "series" : "movie"
             let fileExtension = record.isLive ? liveExtension : record.container ?? "mp4"
             let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")

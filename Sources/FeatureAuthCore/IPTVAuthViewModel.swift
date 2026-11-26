@@ -34,6 +34,7 @@ public final class IPTVAuthViewModel {
     }
 
     public var mode: IPTVCredential.Mode = .playlist
+    public var liveStreamFormat: IPTVCredential.LiveStreamFormat = .hls
     public var playlistFileURL: URL?
     public var address: String
     public var name: String
@@ -56,8 +57,8 @@ public final class IPTVAuthViewModel {
     private let reconnecting: UserSession?
     private let setupDiagnostics: IPTVSetupDiagnostics
     @ObservationIgnored private var diagnosticAttempt: IPTVSetupAttempt?
-    private var flow: Task<Void, Never>?
-    private var generation = UUID()
+    @ObservationIgnored private var flow: Task<Void, Never>?
+    @ObservationIgnored private var generation = UUID()
 
     public init(
         deviceID: String, address: String = "", name: String = "", guideAddress: String = "",
@@ -83,6 +84,7 @@ public final class IPTVAuthViewModel {
             do {
                 let credential = try IPTVCredential.decode(reconnecting.accessToken)
                 mode = credential.mode
+                liveStreamFormat = credential.liveStreamFormat
                 self.address = credential.address.absoluteString
                 username = credential.username
                 password = credential.password
@@ -244,7 +246,8 @@ public final class IPTVAuthViewModel {
         return try IPTVCredential(
             mode: mode, address: url, username: username, password: password,
             headers: values, guideURL: guide, additionalGuideURLs: extraGuides,
-            guideHeaders: try headerValues(guideHeaders)
+            guideHeaders: try headerValues(guideHeaders),
+            liveStreamFormat: mode == .xtream ? liveStreamFormat : .hls
         )
     }
 

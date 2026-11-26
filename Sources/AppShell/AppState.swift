@@ -58,6 +58,7 @@ public final class AppState {
               !self.accountsProviders.activeProfileAwaitsIdentity else { return nil }
         return self.accountsProviders.liveTVProviderResolver()(id)
     }
+    @ObservationIgnored public lazy var liveTVStreamFormat = accountsProviders.makeLiveTVStreamFormatModel()
 
     private static func seerrAccountConnectionStore() -> SeerAccountConnectionStore {
         SeerAccountConnectionStore(secureStore: KeychainStore(service: "com.plozz.app.household"))

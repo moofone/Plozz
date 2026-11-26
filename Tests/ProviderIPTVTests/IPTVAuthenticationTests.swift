@@ -462,6 +462,47 @@ final class IPTVAuthenticationTests: XCTestCase {
         XCTAssertEqual(IPTVFixture.state.requests.filter { $0.url?.query?.contains("action=") == false }.count, 2)
     }
 
+    func testXtreamLiveStreamFormatPreferenceHonorsProviderChoiceAndFallsBack() async throws {
+        XCTAssertEqual(IPTVClient.preferredLiveExtension(allowedFormats: ["m3u8", "ts"], preference: .hls), "m3u8")
+        XCTAssertEqual(IPTVClient.preferredLiveExtension(allowedFormats: ["m3u8", "ts"], preference: .transportStream), "ts")
+        XCTAssertEqual(IPTVClient.preferredLiveExtension(allowedFormats: ["m3u8"], preference: .transportStream), "m3u8")
+        XCTAssertEqual(IPTVClient.preferredLiveExtension(allowedFormats: ["ts"], preference: .hls), "ts")
+        XCTAssertEqual(IPTVClient.preferredLiveExtension(allowedFormats: [], preference: .transportStream), "ts")
+
+        let base = try IPTVCredential(
+            mode: .xtream, address: XCTUnwrap(URL(string: "https://provider.test")),
+            username: "viewer", password: "secret"
+        )
+        XCTAssertEqual(base.liveStreamFormat, .hls)
+        let tsCred = base.replacingLiveStreamFormat(.transportStream)
+        XCTAssertEqual(tsCred.identity, base.identity)
+        XCTAssertEqual(tsCred.catalogKey, base.catalogKey)
+        XCTAssertEqual(try IPTVCredential.decode(tsCred.encoded()).liveStreamFormat, .transportStream)
+        let hlsAgain = tsCred.replacingLiveStreamFormat(.hls)
+        XCTAssertEqual(try IPTVCredential.decode(hlsAgain.encoded()).liveStreamFormat, .hls)
+
+        IPTVFixture.state.handler = { request in
+            let query = Dictionary(uniqueKeysWithValues: (URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+            let payload: String
+            switch query["action"] {
+            case nil: payload = #"{"user_info":{"auth":1,"status":"Active","allowed_output_formats":["m3u8","ts"]}}"#
+            case "get_live_categories": payload = "[]"
+            case "get_live_streams": payload = #"[{"stream_id":42,"name":"Fast channel"}]"#
+            default: throw URLError(.unsupportedURL)
+            }
+            return (200, [:], Data(payload.utf8))
+        }
+        let client = try IPTVClient(credential: tsCred, directory: temporaryDirectory(), configuration: IPTVFixture.configuration())
+        _ = try await client.liveChannels()
+        let (tsURL, _, _) = try await client.delivery("live:42")
+        XCTAssertEqual(tsURL.pathExtension, "ts")
+
+        let hlsClient = try IPTVClient(credential: base, directory: temporaryDirectory(), configuration: IPTVFixture.configuration())
+        _ = try await hlsClient.liveChannels()
+        let (hlsURL, _, _) = try await hlsClient.delivery("live:42")
+        XCTAssertEqual(hlsURL.pathExtension, "m3u8")
+    }
+
     private func checkPlayback(_ credential: IPTVCredential) async throws {
         let root = temporaryDirectory()
         let session = try await IPTVProvider.signIn(

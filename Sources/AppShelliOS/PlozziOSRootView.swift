@@ -534,6 +534,7 @@ public struct PlozziOSRootView: View {
         .environment(appModel.settings.navigation)
         .environment(appModel.settings.homeVisibility)
         .environment(appModel.guidePreparation)
+        .environment(appModel.liveTVStreamFormat)
         .background { PlozziOSMusicLifecycle(appModel: appModel) }
         .environment(heroTrailerController)
         .themeMusicScope(

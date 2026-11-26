@@ -96,6 +96,7 @@ final class PlozziOSAppModel {
               !self.accountsProviders.activeProfileAwaitsIdentity else { return nil }
         return self.accountsProviders.liveTVProviderResolver()(id)
     }
+    @ObservationIgnored lazy var liveTVStreamFormat = accountsProviders.makeLiveTVStreamFormatModel()
 
     static var isStandalonePlaybackAvailable: Bool {
         true

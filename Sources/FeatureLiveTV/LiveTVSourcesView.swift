@@ -967,6 +967,54 @@ private struct LiveTVGuideDaysPicker: View {
     }
 }
 
+private struct LiveTVStreamFormatPicker: View {
+    @Binding var selection: IPTVCredential.LiveStreamFormat
+    let identifier: String
+
+    private func label(for format: IPTVCredential.LiveStreamFormat) -> String {
+        switch format {
+        case .hls: "HLS"
+        case .transportStream: "MPEG-TS"
+        }
+    }
+
+    private func resource(for format: IPTVCredential.LiveStreamFormat) -> LocalizedStringResource {
+        switch format {
+        case .hls: "HLS"
+        case .transportStream: "MPEG-TS"
+        }
+    }
+
+    var body: some View {
+        #if os(tvOS)
+        HStack(spacing: 24) {
+            Label("Live stream format", systemImage: "bolt.horizontal")
+            Spacer(minLength: 16)
+            Menu {
+                Picker("Live stream format", selection: $selection) {
+                    ForEach(IPTVCredential.LiveStreamFormat.allCases, id: \.self) { format in
+                        Text(verbatim: label(for: format)).tag(format)
+                    }
+                }
+            } label: {
+                Text(verbatim: label(for: selection))
+            }
+            .menuStyle(.button)
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier(identifier)
+        }
+        #else
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Live stream format", systemImage: "bolt.horizontal")
+            SettingsOptionPicker(options: IPTVCredential.LiveStreamFormat.allCases, selection: $selection) { format in
+                resource(for: format)
+            }
+            .accessibilityIdentifier(identifier)
+        }
+        #endif
+    }
+}
+
 private struct LiveTVPlaylistImportStatus: View {
     let status: LiveTVPlaylistSourceStatus
 
@@ -1001,6 +1049,7 @@ struct LiveTVServerSourceDetails: View {
     @State private var confirmsRemoval = false
     @SettingsPageDismiss private var dismiss
     @Environment(LiveTVGuidePreparationModel.self) private var guidePreparation: LiveTVGuidePreparationModel?
+    @Environment(LiveTVStreamFormatModel.self) private var streamFormats: LiveTVStreamFormatModel?
 
     var body: some View {
         if let source = model.configuration.servers.first(where: { $0.id == sourceID }) {
@@ -1028,6 +1077,21 @@ struct LiveTVServerSourceDetails: View {
                         })
                     }
                     .buttonStyle(SettingsFocusButtonStyle(size: .contained))
+                }
+                if let streamFormats, let format = streamFormats.liveStreamFormat(accountID: source.accountID) {
+                    SettingsSectionGroup {
+                        LiveTVStreamFormatPicker(
+                            selection: Binding(
+                                get: { streamFormats.liveStreamFormat(accountID: source.accountID) ?? format },
+                                set: { _ = streamFormats.setLiveStreamFormat($0, accountID: source.accountID) }
+                            ),
+                            identifier: "live-tv-stream-format-\(source.id)"
+                        )
+                        .settingsSearchAnchor("live-source-stream-format")
+                        Text("MPEG-TS switches channels faster and frees single-stream slots immediately. HLS supports live rewind when the provider offers one.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 if let status = imports?.serverSources.first(where: { $0.id == sourceID }) {
                     SettingsSectionGroup("Live TV status") {

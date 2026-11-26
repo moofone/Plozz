@@ -162,5 +162,20 @@ final class LiveChannelOutputGroupTests: XCTestCase {
         XCTAssertTrue(first.outputPolicy.isAudible)
         firstModel.stop()
     }
+
+    func testReadinessCallbackPresentsFirstFrameImmediatelyWithoutMonitorPoll() async {
+        let engine = LiveEngineSpy()
+        engine.liveSnapshot = .init(phase: .loading, firstFrameReady: false)
+        let model = LiveChannelPlayerModel(
+            engine: engine, streamURL: URL(string: "https://example.invalid/live.ts")!
+        )
+        await model.start()
+        XCTAssertFalse(model.hasPresentedFrame)
+        engine.liveSnapshot = .init(phase: .playing, firstFrameReady: true)
+        engine.onLiveOutputReadinessChanged?()
+        XCTAssertTrue(model.hasPresentedFrame)
+        XCTAssertEqual(model.phase, .playing)
+        model.stop()
+    }
 }
 #endif

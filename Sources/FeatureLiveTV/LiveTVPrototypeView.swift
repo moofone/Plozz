@@ -1029,6 +1029,12 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
         .task(id: catalogActivation.taskID(reloadRequest: reloadRequest)) {
             await reloadCatalog()
         }
+        .task(id: LiveTVConnectionWarmupKey(
+            active: isActive, preloads: preloadsCatalog, authorization: serverAuthorizationID,
+            accounts: serverChoices.map(\.id)
+        )) {
+            await warmServerConnections()
+        }
         .task(id: preview.pendingRequest) {
             await preparePendingPreview()
         }
@@ -1046,6 +1052,29 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             while isActive && !Task.isCancelled {
                 model.synchronizeClock()
                 try? await Task.sleep(for: .seconds(30))
+            }
+        }
+    }
+
+    private struct LiveTVConnectionWarmupKey: Equatable {
+        let active: Bool
+        let preloads: Bool
+        let authorization: String
+        let accounts: [String]
+    }
+
+    private func warmServerConnections() async {
+        guard (isActive || preloadsCatalog), isProfileAuthorized(), !serverChoices.isEmpty else { return }
+        let disabledAccountIDs = Set(imports.configuration.servers.filter { !$0.isEnabled }.map(\.accountID))
+        let providers = serverChoices
+            .filter { !disabledAccountIDs.contains($0.id) }
+            .compactMap { serverProviderResolver($0.id)?.provider }
+        guard !providers.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for provider in providers {
+                group.addTask(priority: .utility) {
+                    await provider.warmLiveTVConnection()
+                }
             }
         }
     }
@@ -2497,22 +2526,37 @@ public struct LiveTVPrototypeView<PlayerContent: View>: View {
             finishMultiviewSelection()
             return
         }
-        if !preview.isExpanded {
-            let channels: [LiveTVPrototypeChannel]
-            #if os(tvOS)
-            if isSearching && searchScope == .programs {
-                let allowed = model.programmeSearchChannelIDs
-                channels = model.unhiddenCatalogChannels.filter { allowed.contains($0.id) }
-            } else {
-                channels = model.guideChannels.map(\.channel)
-            }
-            #else
-            channels = model.guideChannels.map(\.channel)
-            #endif
-            channelSequence = LiveTVChannelSequence(channels: channels)
-        }
         let selectedOrigin = !preview.isExpanded && selectedRowID?.channelID == id ? selectedRowID : nil
+        let shouldUpdateSequence = !preview.isExpanded
+        // Kick off playback preparation immediately; compute the channel-up/down sequence off
+        // @MainActor so scanning large guide lineups never delays player launch or load.
         playback.watch(id, origin: origin ?? selectedOrigin, expandsPlayer: expandsPlayer)
+        if shouldUpdateSequence {
+            #if os(tvOS)
+            let isProgramSearch = isSearching && searchScope == .programs
+            let programSearchAllowed = isProgramSearch ? model.programmeSearchChannelIDs : []
+            let unhiddenCatalog = isProgramSearch ? model.unhiddenCatalogChannels : []
+            let guideSnapshot = isProgramSearch ? [] : model.guideChannels
+            #else
+            let guideSnapshot = model.guideChannels
+            #endif
+            Task.detached(priority: .utility) {
+                let channels: [LiveTVPrototypeChannel]
+                #if os(tvOS)
+                if isProgramSearch {
+                    channels = unhiddenCatalog.filter { programSearchAllowed.contains($0.id) }
+                } else {
+                    channels = guideSnapshot.map(\.channel)
+                }
+                #else
+                channels = guideSnapshot.map(\.channel)
+                #endif
+                let sequence = LiveTVChannelSequence(channels: channels)
+                await MainActor.run {
+                    channelSequence = sequence
+                }
+            }
+        }
     }
 
     private func handleWatchAcceptance() {

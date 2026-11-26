@@ -56,6 +56,7 @@ struct LiveTVShellDestination: View {
     @Environment(ProfilesModel.self) private var profiles
     @Environment(PlaybackSettingsModel.self) private var playbackSettings: PlaybackSettingsModel?
     @Environment(LiveTVGuidePreparationModel.self) private var guidePreparation: LiveTVGuidePreparationModel?
+    @Environment(LiveTVStreamFormatModel.self) private var liveTVStreamFormat: LiveTVStreamFormatModel?
     @Environment(NavigationStyleSettingsModel.self) private var navigationStyle: NavigationStyleSettingsModel?
     @Environment(GlassPerformanceModel.self) private var glassPerformance: GlassPerformanceModel?
     @Environment(DisplayVeilModel.self) private var displayVeil: DisplayVeilModel?
@@ -115,6 +116,7 @@ struct LiveTVShellDestination: View {
                 .environment(profiles)
                 .environment(playbackSettings)
                 .environment(guidePreparation)
+                .environment(liveTVStreamFormat)
                 .environment(navigationStyle)
                 .environment(glassPerformance)
                 .environment(displayVeil)

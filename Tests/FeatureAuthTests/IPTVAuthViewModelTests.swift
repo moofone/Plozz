@@ -434,6 +434,21 @@ final class IPTVAuthViewModelTests: XCTestCase {
         XCTAssertNotEqual(updatedCredential.identity, credential.identity)
         XCTAssertNotEqual(updatedCredential.catalogKey, credential.catalogKey)
     }
+
+    func testReconnectPreservesAndUpdatesXtreamLiveStreamFormat() throws {
+        let credential = try IPTVCredential(
+            mode: .xtream, address: try XCTUnwrap(URL(string: "https://provider.example")),
+            username: "viewer", password: "secret",
+            liveStreamFormat: .transportStream
+        )
+        var original = IPTVSignInGate.session(credential)
+        original.accessToken = try credential.encoded()
+        let model = IPTVAuthViewModel(deviceID: "device", reconnecting: original, onAuthenticated: { _ in })
+        XCTAssertEqual(model.liveStreamFormat, .transportStream)
+        XCTAssertEqual(try model.makeCredential().liveStreamFormat, .transportStream)
+        model.liveStreamFormat = .hls
+        XCTAssertEqual(try model.makeCredential().liveStreamFormat, .hls)
+    }
 }
 
 private actor IPTVSignInGate {
