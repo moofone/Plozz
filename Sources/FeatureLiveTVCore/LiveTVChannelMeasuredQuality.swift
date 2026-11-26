@@ -5,6 +5,11 @@ extension LiveTVPrototypeChannel {
     /// The store key of this channel's measured resolution: its playlist source and channel ID.
     public var qualityKey: (sourceID: String, channelID: String) { (playlistSourceID ?? source.rawValue, id) }
 
+    /// The adaptive live buffer is learned per profile and playlist source, never per channel.
+    public func bufferAdaptationScope(namespace: String?) -> LiveBufferAdaptationScope {
+        LiveBufferAdaptationScope(namespace: namespace, sourceID: qualityKey.sourceID)
+    }
+
     /// The resolution label measured while the channel played (the most common steady state of its last five plays), or `nil`.
     public func measuredResolution(in store: LiveChannelMeasuredQualityStore = .shared) -> LiveChannelResolutionLabel? {
         store.label(sourceID: qualityKey.sourceID, channelID: qualityKey.channelID)

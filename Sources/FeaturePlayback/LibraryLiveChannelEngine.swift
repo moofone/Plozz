@@ -403,6 +403,11 @@ public final class LibraryLiveChannelEngine: LiveChannelEngine {
         return underlyingEngine.liveStartupBuffer
     }
 
+    public var liveStartupCushionSeconds: TimeInterval? {
+        guard hasSource, case .stream? = currentInput else { return nil }
+        return underlyingEngine.liveStartupCushionSeconds
+    }
+
     public func configureLiveOutput(_ policy: LiveChannelOutputPolicy) {
         outputPolicy = policy
         applyOutputPolicy()

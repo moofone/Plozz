@@ -8,6 +8,9 @@ import Network
 /// behind a per-playback, loopback-only endpoint and authorize each upstream
 /// request against the original stream origin instead.
 actor IPTVPlaybackProxy {
+    private static let liveChunkLimit = 65_536
+    private static let liveClockCheckInterval = 1_024
+    private static let liveFlushInterval: TimeInterval = 0.05
     private let listener: NWListener
     private let origin: URL
     private let headers: [String: String]
@@ -290,6 +293,7 @@ actor IPTVPlaybackProxy {
                 var iterator = bytes.makeAsyncIterator()
                 var prefix = Data()
                 while prefix.count < 16, let byte = try await iterator.next() {
+                    if prefix.isEmpty { responseEvidence.firstByte() }
                     prefix.append(byte)
                     receivedBytes += 1
                 }
@@ -343,16 +347,28 @@ actor IPTVPlaybackProxy {
                     sentResponse = true
                     var chunk = prefix
                     diagnosticStage = .body
-                    while let byte = try await iterator.next() {
-                        chunk.append(byte)
-                        receivedBytes += 1
-                        if chunk.count == 65_536 {
+                    // The first bytes go out at once so the player can start parsing; afterwards a
+                    // partial chunk is flushed once it has waited, so a slow live feed is not held
+                    // back until 64 KiB accumulate.
+                    var lastFlush = ProcessInfo.processInfo.systemUptime
+                    var flushPending = !chunk.isEmpty
+                    while true {
+                        if flushPending || chunk.count == Self.liveChunkLimit {
                             responseEvidence.received(receivedBytes)
                             try Task.checkCancellation()
                             diagnosticStage = nil
                             try await Self.sendChunk(connection, data: chunk)
                             chunk.removeAll(keepingCapacity: true)
                             diagnosticStage = .body
+                            lastFlush = ProcessInfo.processInfo.systemUptime
+                            flushPending = false
+                        }
+                        guard let byte = try await iterator.next() else { break }
+                        chunk.append(byte)
+                        receivedBytes += 1
+                        if chunk.count.isMultiple(of: Self.liveClockCheckInterval),
+                           ProcessInfo.processInfo.systemUptime - lastFlush >= Self.liveFlushInterval {
+                            flushPending = true
                         }
                     }
                     responseEvidence.finish(outcome: .complete, receivedBytes: receivedBytes)
@@ -520,6 +536,15 @@ actor IPTVPlaybackProxy {
             }
         }
 
+        /// Marks the first upstream body byte once; later calls keep the original time.
+        func firstByte() {
+            update {
+                guard $0.firstByteMilliseconds == nil else { return }
+                $0.firstByteMilliseconds = min(86_400_000, max(0, Int(
+                    (ProcessInfo.processInfo.systemUptime - started) * 1_000
+                )))
+            }
+        }
         func received(_ count: Int) { update { $0.receivedBytes = min(9_007_199_254_740_991, count) } }
         func playlist(_ value: PlaybackDeliveryEvidence.Playlist) { update { $0.playlist = value } }
         func finish(outcome: PlaybackDeliveryEvidence.Outcome, receivedBytes: Int, networkCode: Int? = nil) {

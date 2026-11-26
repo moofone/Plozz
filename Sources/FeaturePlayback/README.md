@@ -898,6 +898,17 @@ cushion in addition to its 30-second startup watchdog, bounded at 75 seconds.
 Settings changes cannot alter an in-progress load's allowance. Scheduled
 library playback does not inherit this stream-startup allowance.
 
+Automatic adapts per profile and playlist source (`LiveBufferAdaptation`). It
+starts at the engine's normal holdback so a first tune joins as fast as before;
+each rebuffer of at least 1.5 s after the first frame (not a startup wait, pause
+or seek) moves the next tune's cushion up one step (4, 8, 15, then 30 s; at most
+one step per 60 s), and every 10 minutes of stall-free playback gives one step
+back. The step is read per load, so it applies on the next tune: the engine
+cannot change a running session's cushion without a re-tune that would lose the
+picture. An explicit 10-45 s choice never adapts, and multiview panes and VOD
+keep their fixed behavior. State is keyed by a salted hash, bounded to 64
+sources, device-local and excluded from profile transfer.
+
 For explicit cushions, the live indicator and Return to Live affordance use the
 engine's safe-edge verdict so the deliberate delay does not look like a rewind.
 Automatic retains the existing time-shift presentation. Returning to Live

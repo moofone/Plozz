@@ -146,6 +146,8 @@ public struct PlaybackDeliveryEvidence: Codable, Equatable, Sendable {
         public var method: Method
         public var startedMilliseconds: Int
         public var elapsedMilliseconds: Int = 0
+        /// Milliseconds from this request's start to the first upstream body byte, if one arrived.
+        public var firstByteMilliseconds: Int?
         public var outcome: Outcome = .pending
         public var status: Int?
         public var format: PlaybackFailureDiagnostic.Format = .unknown
@@ -169,6 +171,7 @@ public struct PlaybackDeliveryEvidence: Codable, Equatable, Sendable {
             (1...1_000_000).contains(sequence)
                 && (0...86_400_000).contains(startedMilliseconds)
                 && (0...86_400_000).contains(elapsedMilliseconds)
+                && firstByteMilliseconds.map { (0...86_400_000).contains($0) } != false
                 && status.map { (100...599).contains($0) } != false
                 && expectedBytes.map { (0...9_007_199_254_740_991).contains($0) } != false
                 && (0...9_007_199_254_740_991).contains(receivedBytes)

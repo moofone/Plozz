@@ -112,6 +112,8 @@ public protocol LiveChannelEngine: VideoEngine {
     var onLiveOutputReadinessChanged: (@MainActor () -> Void)? { get set }
     /// The cushion applied to this load; the host allows that time in addition to its startup deadline.
     var liveStartupBuffer: LivePlaybackBuffer { get }
+    /// The cushion in seconds applied to this load, including an adaptive Automatic step.
+    var liveStartupCushionSeconds: TimeInterval? { get }
     var livePlaybackFailureDiagnostic: PlaybackFailureDiagnostic? { get }
     /// What the loopback relay has seen of the provider during this load, typed failure or not.
     var liveDeliveryEvidence: PlaybackDeliveryEvidence? { get }
@@ -146,6 +148,7 @@ public extension LiveChannelEngine {
         set {}
     }
     var liveStartupBuffer: LivePlaybackBuffer { .automatic }
+    var liveStartupCushionSeconds: TimeInterval? { liveStartupBuffer.seconds }
     var livePlaybackFailureDiagnostic: PlaybackFailureDiagnostic? { nil }
     var liveDeliveryEvidence: PlaybackDeliveryEvidence? { nil }
     var isCapturingLiveFailureDiagnostic: Bool { false }
