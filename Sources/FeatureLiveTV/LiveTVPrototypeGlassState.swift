@@ -208,6 +208,28 @@ enum LiveTVPrototypeBackAction: Equatable {
     var handledByGuide: Bool { self == .closePresentation || self == .showVideoFullScreen }
 }
 
+/// Back inside the guide browser (a programme or channel focused), after any presentation has had the press.
+/// A pending Watch, search or multiview selection is closed first. On the glass screen, which has no toolbar, Back then
+/// steps to the filter heading, as Left at the guide's leading edge does; Back on the heading goes on to the main menu.
+enum LiveTVPrototypeGuideBrowseBack: Equatable {
+    case cancelWatch
+    case ignore
+    case closeSearch
+    case finishMultiviewSelection
+    case focusHeading
+    case focusToolbar
+
+    static func resolve(
+        hasPendingWatch: Bool, isRestoringFocus: Bool, isSearching: Bool, isSelectingMultiview: Bool, headingAvailable: Bool
+    ) -> LiveTVPrototypeGuideBrowseBack {
+        if hasPendingWatch { return .cancelWatch }
+        if isRestoringFocus { return .ignore }
+        if isSearching { return .closeSearch }
+        if isSelectingMultiview { return .finishMultiviewSelection }
+        return headingAvailable ? .focusHeading : .focusToolbar
+    }
+}
+
 #if os(tvOS)
 /// The full-screen scrim behind a presentation, drawn above the guide and any
 /// mounted picture and below the panels. Reduce Transparency drops the blur and
