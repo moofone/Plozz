@@ -105,6 +105,22 @@ final class LiveChannelDisplayTransitionTests: XCTestCase {
         transition.reset()
     }
 
+    /// Without Match Content the TV never switches mode, so full-screen entry must not
+    /// hold a black veil until its safety timeout (seen as 2–4.5 s of black on Watch).
+    func testFullscreenEntryWithoutMatchContentNeverVeils() async {
+        let transition = LiveChannelDisplayTransition(displayCanSwitchMode: { false })
+        for (changesSource, range) in [(true, SourceDynamicRange?.none), (false, .sdr), (true, .dolbyVision)] {
+            let token = transition.beginPlayback(
+                isFullscreen: true, changesSource: changesSource, range: range, settings: .default)
+            XCTAssertFalse(transition.veil.isVeiled)
+            let prepared = await transition.preparePlayback(token)
+            XCTAssertTrue(prepared)
+            transition.update(range: .sdr, hasPresentedFrame: true, failed: false)
+            XCTAssertFalse(transition.veil.isVeiled)
+        }
+        transition.reset()
+    }
+
     func testReadySDREntryUsesOnlyFrameRatePreferenceAndWaitsForSettle() async {
         for hdr in [false, true] {
             for frameRate in [false, true] {

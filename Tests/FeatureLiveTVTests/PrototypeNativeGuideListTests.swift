@@ -477,5 +477,50 @@ final class PrototypeNativeGuideListTests: XCTestCase {
         controller.update(guide(rows: Array(all[0..<10]), scroll: scroll, initial: nil), environment: EnvironmentValues())
         XCTAssertEqual(scroll.scrollCommandCount, 0)
     }
+
+    /// Watch mounts a picture under the guide, which moves the guide onto the glass sheet and stops the whole-row fit.
+    /// The list must survive that: rebuilding it dropped its scroll position and focus, so the guide jumped to the
+    /// top of the lineup, with the heading focused, while the channel started.
+    func testTheGuideListSurvivesMovingOnAndOffTheGlassSheet() {
+        let state = WholeRowsProbeState()
+        let host = UIHostingController(rootView: WholeRowsProbeHost(state: state))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1_920, height: 1_080))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        host.view.layoutIfNeeded()
+        XCTAssertEqual(state.made, 1)
+        for fits in [false, true, false] {
+            state.fitsWholeRows = fits
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            host.view.layoutIfNeeded()
+        }
+        XCTAssertEqual(state.made, 1, "moving on or off the sheet rebuilt the guide list")
+    }
+}
+
+@MainActor
+@Observable
+private final class WholeRowsProbeState {
+    var fitsWholeRows = true
+    @ObservationIgnored var made = 0
+}
+
+private struct WholeRowsProbe: UIViewRepresentable {
+    let state: WholeRowsProbeState
+    func makeUIView(context: Context) -> UIView {
+        state.made += 1
+        return UIView()
+    }
+    func updateUIView(_ view: UIView, context: Context) {}
+}
+
+private struct WholeRowsProbeHost: View {
+    let state: WholeRowsProbeState
+    var body: some View {
+        WholeRowsProbe(state: state)
+            .frame(height: state.fitsWholeRows ? nil : 400)
+            .modifier(PrototypeWholeGuideRows(isActive: state.fitsWholeRows, pitch: 100, gap: 10))
+    }
 }
 #endif
