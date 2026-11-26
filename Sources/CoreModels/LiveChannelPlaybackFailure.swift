@@ -94,11 +94,21 @@ public enum LiveChannelPlaybackFailure: Equatable, Sendable {
 public struct LiveChannelFailureReport: Equatable, Sendable {
     public let failure: LiveChannelPlaybackFailure
     public let diagnostic: PlaybackFailureDiagnostic?
+    /// What the loopback relay saw of the provider, for failures no typed error was recorded for
+    /// (a timeout, an ended stream). Ignored when `diagnostic` carries its own delivery evidence.
+    public let delivery: PlaybackDeliveryEvidence?
 
-    public init(failure: LiveChannelPlaybackFailure, diagnostic: PlaybackFailureDiagnostic? = nil) {
+    public init(
+        failure: LiveChannelPlaybackFailure, diagnostic: PlaybackFailureDiagnostic? = nil,
+        delivery: PlaybackDeliveryEvidence? = nil
+    ) {
         self.failure = failure
         self.diagnostic = diagnostic
+        self.delivery = delivery
     }
+
+    /// The relay evidence this report explains itself with: the typed failure's own, else the stream's.
+    public var deliveryEvidence: PlaybackDeliveryEvidence? { diagnostic?.evidence?.delivery ?? delivery }
 
     public var message: LocalizedStringResource {
         if case .engine(.invalidResponse) = failure,
@@ -114,7 +124,50 @@ public struct LiveChannelFailureReport: Equatable, Sendable {
                 httpStatus: diagnostic?.httpStatus,
                 networkCode: diagnostic?.domain == .url ? diagnostic?.code : nil
             ) ?? diagnostic?.engineFailure.message ?? failure.message
+        case .startupTimedOut:
+            capturedMessage ?? deliveryEvidence?.observedCause(sinceVideo: false) ?? failure.message
+        case .bufferingTimedOut, .ended:
+            capturedMessage ?? deliveryEvidence?.observedCause(sinceVideo: true) ?? failure.message
         default: failure.message
         }
+    }
+
+    private var capturedMessage: LocalizedStringResource? {
+        PlaybackDiagnosticReport.providerMessage(
+            httpStatus: diagnostic?.httpStatus, networkCode: diagnostic?.domain == .url ? diagnostic?.code : nil
+        )
+    }
+}
+
+extension PlaybackDeliveryEvidence {
+    /// The provider's part in a stream that never showed video, or stopped: what the relay actually observed,
+    /// or nil when it observed nothing conclusive. `sinceVideo` limits a refusal to the recent requests, since
+    /// a live stream recovers from transient segment errors long before it stalls or ends.
+    func observedCause(sinceVideo: Bool) -> LocalizedStringResource? {
+        let failures = sinceVideo
+            ? recent.filter { $0.outcome == .upstreamFailure || ($0.status ?? 0) >= 400 }
+            : [firstFailure].compactMap(\.self) + recent.filter { ($0.status ?? 0) >= 400 }
+        for request in failures {
+            let status = request.status.flatMap { (400...599).contains($0) ? $0 : nil }
+            if let message = PlaybackDiagnosticReport.providerMessage(httpStatus: status, networkCode: request.networkCode) {
+                return message
+            }
+            if let status, request.outcome != .pending {
+                return "The provider refused the stream (HTTP \(String(status)))."
+            }
+        }
+        guard !sinceVideo, let root else { return nil }
+        if root.status == nil, root.outcome != .complete {
+            return "The provider did not respond to the request for this channel."
+        }
+        if let status = root.status, (200...299).contains(status), root.outcome != .complete, root.receivedBytes == 0 {
+            return "The provider accepted the request but sent no data for this channel."
+        }
+        let segments = recent.filter { $0.resource == .child && $0.method == .get }
+        if root.outcome == .complete, root.playlist?.isMaster == false,
+           !segments.isEmpty, segments.allSatisfy({ $0.receivedBytes == 0 }) {
+            return "The provider sent the channel’s playlist but no video."
+        }
+        return nil
     }
 }

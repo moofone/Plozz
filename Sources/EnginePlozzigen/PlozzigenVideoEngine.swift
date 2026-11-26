@@ -1293,6 +1293,8 @@ public final class PlozzigenVideoEngine: VideoEngine, LiveChannelEngine {
         liveFailureDiagnostic?.diagnostic ?? liveDeliveryFailure?.diagnostic
     }
 
+    public var liveDeliveryEvidence: PlaybackDeliveryEvidence? { liveDeliveryFailure?.evidence }
+
     public var isCapturingLiveFailureDiagnostic: Bool {
         guard liveAttemptGate.activeGeneration != nil, liveFailureDiagnostic?.diagnostic == nil else { return false }
         // The phase can reach the guide before Combine delivers the error callback.

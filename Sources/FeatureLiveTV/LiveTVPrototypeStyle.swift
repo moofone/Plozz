@@ -85,6 +85,8 @@ enum PrototypeLayout {
     static let stationColumnWidth = stationSize * 1.75 + rowInset * 2
     /// Programme text inset inside a cell.
     static let cellInset = rowInset
+    /// Sizes the ruler-time width estimate; the touch guide draws its times in the caption style.
+    static let rulerFontSize: CGFloat = 12
     #endif
     static var guideShape: UnevenRoundedRectangle {
         #if os(tvOS)

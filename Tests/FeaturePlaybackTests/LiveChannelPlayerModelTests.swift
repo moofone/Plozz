@@ -1131,6 +1131,27 @@ final class LiveChannelPlayerModelTests: XCTestCase {
         XCTAssertEqual(engine.stopCount, 1)
     }
 
+    /// A provider that never answered is named on the timeout screen, read before the engine is torn down.
+    func testStartupTimeoutReportsWhatTheRelaySawOfTheProvider() async {
+        let clock = LiveTestClock()
+        let engine = LiveEngineSpy()
+        engine.liveSnapshot.firstFrameReady = false
+        var root = PlaybackDeliveryEvidence.Request(sequence: 1, resource: .root, method: .get, startedMilliseconds: 40)
+        root.outcome = .pending
+        engine.liveDeliveryEvidence = .init(root: root, recent: [root])
+        let model = makeModel(engine: engine, clock: clock)
+        defer { model.stop() }
+        await model.start()
+        clock.now = 30
+        model.refreshFromEngine()
+        XCTAssertEqual(model.phase, .failed(.startupTimedOut))
+        XCTAssertEqual(model.failureReport?.delivery, engine.liveDeliveryEvidence)
+        XCTAssertEqual(
+            model.failureReport.map { String(localized: $0.message) },
+            "The provider did not respond to the request for this channel."
+        )
+    }
+
     // MARK: - Audio plays, no frame decodes (REPORT-16944)
 
     /// An engine that plays audio, reports a video track, and never presents a frame.
@@ -2065,6 +2086,7 @@ final class LiveEngineSpy: LiveChannelEngine {
     var videoAspectRatio: Double?
     var liveStartupBuffer: LivePlaybackBuffer = .automatic
     var livePlaybackFailureDiagnostic: PlaybackFailureDiagnostic?
+    var liveDeliveryEvidence: PlaybackDeliveryEvidence?
     var liveTelemetry: EngineLiveTelemetry?
     var isCapturingLiveFailureDiagnostic = false
     var liveVideoCodecName: String?

@@ -3024,7 +3024,9 @@ final class LiveChannelPlayerModel {
         cancelRecovery()
         foregroundTask?.cancel()
         foregroundTask = nil
-        let report = LiveChannelFailureReport(failure: failure, diagnostic: engine.livePlaybackFailureDiagnostic)
+        let report = LiveChannelFailureReport(
+            failure: failure, diagnostic: engine.livePlaybackFailureDiagnostic, delivery: engine.liveDeliveryEvidence
+        )
         let pipeline = PlaybackPipelineSnapshot(engine.liveTelemetry)
         failureReport = report
         engine.stop()
@@ -3043,7 +3045,9 @@ final class LiveChannelPlayerModel {
         cancelRecovery()
         foregroundTask?.cancel()
         foregroundTask = nil
-        let report = LiveChannelFailureReport(failure: .ended, diagnostic: engine.livePlaybackFailureDiagnostic)
+        let report = LiveChannelFailureReport(
+            failure: .ended, diagnostic: engine.livePlaybackFailureDiagnostic, delivery: engine.liveDeliveryEvidence
+        )
         let pipeline = PlaybackPipelineSnapshot(engine.liveTelemetry)
         failureReport = report
         engine.stop()
