@@ -989,18 +989,20 @@ private struct LiveTVStreamFormatPicker: View {
 
     var body: some View {
         #if os(tvOS)
-        HStack(spacing: 24) {
-            Label("Live stream format", systemImage: "bolt.horizontal")
-            Spacer(minLength: 16)
-            Menu {
-                options
+        Menu {
+            options
+        } label: {
+            LabeledContent {
+                SettingsMenuValue(Text(verbatim: label(for: selection)))
             } label: {
-                Text(verbatim: label(for: selection))
+                Label("Live stream format", systemImage: "bolt.horizontal")
             }
-            .menuStyle(.button)
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier(identifier)
         }
+        .menuStyle(.button)
+        .buttonStyle(SettingsFormButtonStyle())
+        .accessibilityLabel(Text("Live stream format"))
+        .accessibilityValue(Text(verbatim: label(for: selection)))
+        .accessibilityIdentifier(identifier)
         #else
         SettingsControlMenu {
             options
@@ -1098,16 +1100,10 @@ struct LiveTVServerSourceDetails: View {
                     }
                 }
                 if let status = imports?.serverSources.first(where: { $0.id == sourceID }) {
-                    SettingsSectionGroup("Live TV status") {
+                    SettingsSectionGroup {
                         LiveTVServerSourceSummary(source: source, status: status)
-                        Text("\(guidePreparation?.statuses[source.accountID]?.channelCount ?? status.channelCount) channels")
-                        if guidePreparation?.statuses[source.accountID] == nil {
-                            Text("\(status.programCount) loaded program listings")
-                        }
-                        if let date = guidePreparation?.statuses[source.accountID]?.refreshedAt ?? status.lastGuideRefresh {
-                            Text("Guide refreshed: \(date, format: .dateTime.month().day().hour().minute())")
-                                .font(.caption)
-                        }
+                            .settingsFormTextLayout()
+                            .padding(.vertical, PlozzTheme.Spacing.small)
                     }
                 }
                 if let guidePreparation, guidePreparation.canPrepare(accountID: source.accountID) {
@@ -1385,20 +1381,33 @@ struct LiveTVServerSourceSummary: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(source.name).font(.headline)
             if !source.isEnabled {
                 Text("Disabled").font(.caption)
             } else if let status {
+                let preparation = guidePreparation?.statuses[source.accountID]
                 if status.failure != nil {
                     Label("Refresh failed", systemImage: "exclamationmark.triangle").font(.caption)
-                } else if let availability = status.availability {
+                } else if let availability = status.availability,
+                          availability.status != .available || !availability.hasChannels || preparation == nil {
                     LiveTVServerAvailabilitySummary(availability: availability)
                 } else if status.phase == .loading {
                     ProgressView("Loading channels")
                 } else if guidePreparation?.statuses[source.accountID] == nil {
                     Text("Ready to load").font(.caption)
                 }
-                if let preparation = guidePreparation?.statuses[source.accountID] {
+                if let preparation, preparation.phase == .loaded, let total = preparation.channelCount {
+                    LabeledContent("Guide ready") {
+                        if total == 1 {
+                            Text("1 channel")
+                        } else {
+                            Text("\(total) channels")
+                        }
+                    }
+                    if preparation.channelsWithListings < total {
+                        Text("\(preparation.channelsWithListings) of \(total) channels have current listings")
+                            .settingsRowSecondary()
+                    }
+                } else if let preparation {
                     #if os(tvOS)
                     LiveTVGuidePreparationStatus(status: preparation)
                     #else
@@ -1409,6 +1418,10 @@ struct LiveTVServerSourceSummary: View {
                 } else if status.guidePhase == .loading {
                     ProgressView("Loading guide")
                         .accessibilityIdentifier("live-tv-source-guide-loading-\(source.id)")
+                }
+                if let date = preparation?.refreshedAt ?? status.lastGuideRefresh {
+                    Text("Guide refreshed: \(date, format: .dateTime.month().day().hour().minute())")
+                        .settingsRowSecondary()
                 }
             }
         }

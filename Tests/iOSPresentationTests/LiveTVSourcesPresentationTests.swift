@@ -628,9 +628,12 @@ final class LiveTVSourcesPresentationTests: XCTestCase {
         XCTAssertFalse(loading.contains("Ready to load"), loading)
         await provider.resume()
         await preparation.waitForCompletion(accountID: source.accountID)
+        let result = try XCTUnwrap(preparation.statuses[source.accountID])
+        preparation.dismissNotification(accountID: source.accountID, requestID: result.requestID)
         let completed = try await visibleText()
         XCTAssertTrue(completed.contains("Guide ready"), completed)
-        XCTAssertTrue(completed.contains("current listings"), completed)
+        XCTAssertEqual(completed.components(separatedBy: "1 channel").count - 1, 1, completed)
+        XCTAssertFalse(completed.contains("current listings"), completed)
     }
 
     func testSourceOverflowUsesMeasuredRowsAndDirectionalSharedFade() async throws {

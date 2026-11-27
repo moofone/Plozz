@@ -731,7 +731,7 @@
       "reason": "The source-specific call site owns the search anchor for both native menus and their shared options.",
       "controls": {
         "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVStreamFormatPicker|options|Picker|\"Live stream format\"": 1,
-        "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVStreamFormatPicker|body|Menu|Text(verbatim: label(for: selection))": 1,
+        "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVStreamFormatPicker|body|Menu|LabeledContent { SettingsMenuValue(Text(verbatim: label(for: selection))) } label: { Label(\"Live stream format\", systemImage: \"bolt.horizontal\") }": 1,
         "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVStreamFormatPicker|body|SettingsControlMenu|LabeledContent { SettingsMenuValue(Text(verbatim: label(for: selection))) } label: { Label(\"Live stream format\", systemImage: \"bolt.horizontal\") }": 1
       }
     },
