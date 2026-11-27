@@ -114,11 +114,6 @@ private struct IPTVConnectionFields: View {
                 TextField("Name (optional)", text: $model.name)
                 if model.mode == .xtream {
                     IPTVLoginFields(username: $model.username, password: $model.password)
-                    Picker("Live stream format", selection: $model.liveStreamFormat) {
-                        Text(verbatim: "HLS").tag(IPTVCredential.LiveStreamFormat.hls)
-                        Text(verbatim: "MPEG-TS").tag(IPTVCredential.LiveStreamFormat.transportStream)
-                    }
-                    .accessibilityIdentifier("iptv-live-stream-format")
                 }
                 IPTVAddressField(title: "EPG URL (optional)", value: $model.guideAddress)
                 Button {
