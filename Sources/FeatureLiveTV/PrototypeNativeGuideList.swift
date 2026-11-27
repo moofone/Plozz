@@ -721,20 +721,26 @@ struct PrototypeNativeGuideList<Revision: Equatable, Stationary: View, Scrolling
                 animated: animated && swiftUIEnvironment?.accessibilityReduceMotion != true && !UIAccessibility.isReduceMotionEnabled)
         }
 
-        /// tvOS reports focus-driven scrolling here before animating it. Aiming that one system animation at a row edge
-        /// lands the list whole, so the settle after it has nothing left to correct (a second movement read as judder).
+        /// tvOS reports focus-driven scrolling here before animating it. Its own deceleration creeps the last few points
+        /// a pixel per frame (~0.83 s total). Cancel that deceleration and move directly to the row edge in one standard
+        /// UIKit scroll animation (~0.33 s, or immediately with Reduce Motion), so the list lands whole and stays put.
         override func scrollViewWillEndDragging(
             _ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>
         ) {
+            guard !scrollView.isTracking, positionedCollection.pendingPlacement == nil else { return }
             let y = scrollView.contentOffset.y
             let target = targetContentOffset.pointee.y
-            guard abs(target - y) > 0.5, positionedCollection.pendingPlacement == nil,
+            guard abs(target - y) > 0.5,
                   let stop = guideLayout.verticalStop(for: target, height: scrollView.bounds.height, movingDown: target > y)
             else { return }
             #if DEBUG
             GuideNavigationProfileHook.verticalRoute?("focusScroll from=\(Int(y)) proposed=\(Int(target)) stop=\(Int(stop))")
             #endif
-            targetContentOffset.pointee.y = stop
+            targetContentOffset.pointee = scrollView.contentOffset
+            rowEdgeSettle?.cancel()
+            settledY = stop
+            let reduceMotion = swiftUIEnvironment?.accessibilityReduceMotion == true || UIAccessibility.isReduceMotionEnabled
+            scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: stop), animated: !reduceMotion)
         }
 
         override func scrollViewDidScroll(_ scrollView: UIScrollView) {

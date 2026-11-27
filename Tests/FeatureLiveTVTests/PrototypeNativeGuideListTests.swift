@@ -209,6 +209,55 @@ final class PrototypeNativeGuideListTests: XCTestCase {
         XCTAssertEqual(scroll.firstVisibleRow?(), rows[1_500])
     }
 
+    /// tvOS hands a focus move's scroll to `scrollViewWillEndDragging`. The guide cancels the focus engine's slow
+    /// deceleration and drives one standard UIKit scroll animation straight to the row edge, where it stays put.
+    func testFocusScrollIsOneAnimatedMoveThatStaysWhereItLands() throws {
+        let rows = (0..<500).map { LiveTVGuideRowID(channelID: "channel-\($0)") }
+        let scroll = PrototypeGuideScrollController()
+        let list = list(rows: rows, scroll: scroll) { Text($0.channelID) }
+        let controller = Guide.Controller()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1920, height: 723))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            Guide.dismantleUIViewController(controller, coordinator: ())
+        }
+        controller.view.frame = window.bounds
+        controller.update(list, environment: EnvironmentValues())
+        controller.view.layoutIfNeeded()
+        let collection: UICollectionView = try XCTUnwrap(controller.collectionView)
+        let pitch = PrototypeLayout.rowHeight + PrototypeLayout.rowGap
+        let start = collection.contentOffset.y
+        let proposed = start + pitch - 4
+        let expectedStop = start + pitch
+
+        var target = CGPoint(x: collection.contentOffset.x, y: proposed)
+        controller.scrollViewWillEndDragging(collection, withVelocity: CGPoint(x: 0, y: 0.55), targetContentOffset: &target)
+        XCTAssertEqual(target.y, start, "The focus engine's own deceleration is cancelled")
+
+        var offsets: [CGFloat] = []
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            let y = collection.layer.presentation()?.bounds.minY ?? collection.contentOffset.y
+            if offsets.last != y { offsets.append(y) }
+        }
+        XCTAssertEqual(collection.contentOffset.y, expectedStop, accuracy: 0.01)
+        XCTAssertEqual(offsets.last ?? .nan, expectedStop, accuracy: 0.01)
+        XCTAssertEqual(offsets, offsets.sorted(), "One move in one direction: \(offsets)")
+        XCTAssertTrue(offsets.contains { $0 > start + 1 && $0 < expectedStop - 1 }, "The move is animated: \(offsets)")
+
+        // Once landed, nothing moves the guide again (no second settle).
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        XCTAssertEqual(collection.contentOffset.y, expectedStop, accuracy: 0.01)
+
+        // A move the focus engine does not scroll for is left alone.
+        target = collection.contentOffset
+        controller.scrollViewWillEndDragging(collection, withVelocity: .zero, targetContentOffset: &target)
+        XCTAssertEqual(target.y, expectedStop)
+    }
+
     /// Settled vertical scrolling rests on a row edge that keeps the focused row whole, and the list holds whole rows.
     func testRowEdgeStopKeepsTheFocusedRowWholeAndTheListHoldsWholeRows() {
         let layout = PrototypeGuideCollectionLayout()
