@@ -233,6 +233,7 @@
     "HeaderReviewScoreCountPicker",
     "LivePlaybackBufferControl",
     "LiveTVGuideDaysPicker",
+    "LiveTVStreamFormatPicker",
     "LosslessAudioControl",
     "MobileSubtitleSliderRow",
     "PlaybackReadAheadControl",
@@ -723,6 +724,15 @@
         "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVGuideDaysPicker|body|Menu|Text(\"\\(selection) days\")": 1,
         "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVGuideDaysPicker|body|Picker|Text(title)": 1,
         "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVGuideDaysPicker|body|SettingsOptionPicker|<dynamic>": 1
+      }
+    },
+    "LiveTVStreamFormatPicker": {
+      "kind": "input",
+      "reason": "The source-specific call site owns the search anchor for both native menus and their shared options.",
+      "controls": {
+        "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVStreamFormatPicker|options|Picker|\"Live stream format\"": 1,
+        "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVStreamFormatPicker|body|Menu|Text(verbatim: label(for: selection))": 1,
+        "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVStreamFormatPicker|body|SettingsControlMenu|LabeledContent { SettingsMenuValue(Text(verbatim: label(for: selection))) } label: { Label(\"Live stream format\", systemImage: \"bolt.horizontal\") }": 1
       }
     },
     "MobileSubtitleSliderRow": {
@@ -2394,17 +2404,17 @@
       "reason": "Reviewed navigation, connection, credential, confirmation, recovery or content-management action; not a preference value.",
       "covered_by": []
     },
-    "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVServerSourceDetails|body|SettingsPageLink|SettingsRowLabel(icon: \"pencil\", title: \"Rename source\", trailing: { LiveTVSourceChevron() })": {
+    "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVServerSourceDetails|body|SettingsPageLink|SettingsDisclosureLabel { Label(\"Rename source\", systemImage: \"pencil\") }": {
       "count": 1,
       "reason": "Navigation to an existing editor; its controls are independently discovered.",
       "covered_by": []
     },
-    "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVServerSourceDetails|body|Button|SettingsRowLabel(icon: \"arrow.clockwise\", title: \"Refresh guide\")": {
+    "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVServerSourceDetails|body|Button|Label(\"Refresh guide\", systemImage: \"arrow.clockwise\")": {
       "count": 1,
       "reason": "Source-scoped guide refresh action; does not change a preference or source selection.",
       "covered_by": []
     },
-    "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVServerSourceDetails|body|Button|SettingsRowLabel(icon: \"trash\", title: \"Remove source\")": {
+    "Sources/FeatureLiveTV/LiveTVSourcesView.swift|LiveTVServerSourceDetails|body|Button|Label(\"Remove source\", systemImage: \"trash\")": {
       "count": 1,
       "reason": "destructive_action: Keep confirmation and authorization.",
       "covered_by": []

@@ -978,11 +978,13 @@ private struct LiveTVStreamFormatPicker: View {
         }
     }
 
-    private func resource(for format: IPTVCredential.LiveStreamFormat) -> LocalizedStringResource {
-        switch format {
-        case .hls: "HLS"
-        case .transportStream: "MPEG-TS"
+    private var options: some View {
+        Picker("Live stream format", selection: $selection) {
+            ForEach(IPTVCredential.LiveStreamFormat.allCases, id: \.self) { format in
+                Text(verbatim: label(for: format)).tag(format)
+            }
         }
+        .pickerStyle(.inline)
     }
 
     var body: some View {
@@ -991,11 +993,7 @@ private struct LiveTVStreamFormatPicker: View {
             Label("Live stream format", systemImage: "bolt.horizontal")
             Spacer(minLength: 16)
             Menu {
-                Picker("Live stream format", selection: $selection) {
-                    ForEach(IPTVCredential.LiveStreamFormat.allCases, id: \.self) { format in
-                        Text(verbatim: label(for: format)).tag(format)
-                    }
-                }
+                options
             } label: {
                 Text(verbatim: label(for: selection))
             }
@@ -1004,13 +1002,18 @@ private struct LiveTVStreamFormatPicker: View {
             .accessibilityIdentifier(identifier)
         }
         #else
-        VStack(alignment: .leading, spacing: 12) {
-            Label("Live stream format", systemImage: "bolt.horizontal")
-            SettingsOptionPicker(options: IPTVCredential.LiveStreamFormat.allCases, selection: $selection) { format in
-                resource(for: format)
+        SettingsControlMenu {
+            options
+        } label: {
+            LabeledContent {
+                SettingsMenuValue(Text(verbatim: label(for: selection)))
+            } label: {
+                Label("Live stream format", systemImage: "bolt.horizontal")
             }
-            .accessibilityIdentifier(identifier)
         }
+        .accessibilityLabel(Text("Live stream format"))
+        .accessibilityValue(Text(verbatim: label(for: selection)))
+        .accessibilityIdentifier(identifier)
         #endif
     }
 }
@@ -1072,25 +1075,26 @@ struct LiveTVServerSourceDetails: View {
                     SettingsPageLink {
                         LiveTVServerSourceRename(model: model, source: source)
                     } label: {
-                        SettingsRowLabel(icon: "pencil", title: "Rename source", trailing: {
-                            LiveTVSourceChevron()
-                        })
+                        SettingsDisclosureLabel {
+                            Label("Rename source", systemImage: "pencil")
+                        }
                     }
-                    .buttonStyle(SettingsFocusButtonStyle(size: .contained))
+                    .settingsActionRow()
                 }
                 if let streamFormats, let format = streamFormats.liveStreamFormat(accountID: source.accountID) {
                     SettingsSectionGroup {
-                        LiveTVStreamFormatPicker(
-                            selection: Binding(
-                                get: { streamFormats.liveStreamFormat(accountID: source.accountID) ?? format },
-                                set: { _ = streamFormats.setLiveStreamFormat($0, accountID: source.accountID) }
-                            ),
-                            identifier: "live-tv-stream-format-\(source.id)"
-                        )
-                        .settingsSearchAnchor("live-source-stream-format")
-                        Text("MPEG-TS switches channels faster and frees single-stream slots immediately. HLS supports live rewind when the provider offers one.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        SettingsDescribedControl {
+                            LiveTVStreamFormatPicker(
+                                selection: Binding(
+                                    get: { streamFormats.liveStreamFormat(accountID: source.accountID) ?? format },
+                                    set: { _ = streamFormats.setLiveStreamFormat($0, accountID: source.accountID) }
+                                ),
+                                identifier: "live-tv-stream-format-\(source.id)"
+                            )
+                            .settingsSearchAnchor("live-source-stream-format")
+                        } description: {
+                            Text("MPEG-TS switches channels faster and frees single-stream slots immediately. HLS supports live rewind when the provider offers one.")
+                        }
                     }
                 }
                 if let status = imports?.serverSources.first(where: { $0.id == sourceID }) {
@@ -1111,16 +1115,16 @@ struct LiveTVServerSourceDetails: View {
                         Button {
                             guidePreparation.start(accountID: source.accountID, refresh: true)
                         } label: {
-                            SettingsRowLabel(icon: "arrow.clockwise", title: "Refresh guide")
+                            Label("Refresh guide", systemImage: "arrow.clockwise")
                         }
                         .disabled(!source.isEnabled || guidePreparation.statuses[source.accountID]?.phase == .loading)
-                        .buttonStyle(SettingsFocusButtonStyle(size: .contained))
+                        .settingsActionRow()
                         .accessibilityIdentifier("live-tv-refresh-guide-\(source.id)")
                     }
                 }
                 SettingsSectionGroup {
                     Button(role: .destructive) { confirmsRemoval = true } label: {
-                        SettingsRowLabel(icon: "trash", title: "Remove source")
+                        Label("Remove source", systemImage: "trash")
                     }
                     .confirmationDialog("Remove this source?", isPresented: $confirmsRemoval, titleVisibility: .visible) {
                         Button("Remove source", role: .destructive) {
@@ -1132,8 +1136,8 @@ struct LiveTVServerSourceDetails: View {
                     } message: {
                         Text("The server account stays connected.")
                     }
-                    .buttonStyle(SettingsFocusButtonStyle(size: .contained))
                     .accessibilityIdentifier("live-tv-remove-source-\(source.id)")
+                    .settingsActionRow()
                 }
             }
         } else {
