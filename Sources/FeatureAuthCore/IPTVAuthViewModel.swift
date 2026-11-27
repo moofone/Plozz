@@ -85,7 +85,7 @@ public final class IPTVAuthViewModel {
                 let credential = try IPTVCredential.decode(reconnecting.accessToken)
                 mode = credential.mode
                 liveStreamFormat = credential.liveStreamFormat
-                self.address = credential.address.absoluteString
+                self.address = credential.mode == .file ? "" : credential.address.absoluteString
                 username = credential.username
                 password = credential.password
                 headers = credential.headers.sorted { $0.key < $1.key }.map { Header(name: $0.key, value: $0.value) }
